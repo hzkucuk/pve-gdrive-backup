@@ -9,5 +9,19 @@ ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py serve
 Restart=always
 RestartSec=5
 
+# --- Kaynak denetimi: arayuz hafif kalmali ---
+Nice=5
+CPUWeight=30
+MemoryMax=512M
+MemoryHigh=256M
+TasksMax=128
+
+# --- Sertlestirme ---
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
 [Install]
 WantedBy=multi-user.target

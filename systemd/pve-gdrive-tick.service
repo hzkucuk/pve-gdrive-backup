@@ -6,6 +6,21 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py tick
-# Yedek isi host'u yormasin
+
+# --- Kaynak denetimi: yedekleme isi hipervizoru ve VM/CT'leri yormasin ---
 Nice=10
-IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+MemoryMax=2G
+MemoryHigh=1G
+TasksMax=256
+
+# --- Sertlestirme ---
+NoNewPrivileges=yes
+PrivateTmp=no
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

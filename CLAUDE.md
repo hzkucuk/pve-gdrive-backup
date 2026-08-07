@@ -56,14 +56,30 @@ Bu bir yedekleme aracı. Veri kaybettiren hata, diğer tüm hatalardan ağırdı
 - Varsayılanlar her zaman güvenli tarafta olsun (`prune_on_failure: false`,
   `allow_account_cleanup: false`).
 
-### 6. Hata dayanıklılığı
+### 6. Linux'un imkânlarını kullan, kaynak tüketimini yönet
+
+Bu bir hipervizör üzerinde çalışıyor. Yedekleme işi, üstünde koşan VM ve CT'leri
+yavaşlatmamalı. Performans ve kaynak kullanımı senin sorumluluğunda, sonradan
+düşünülecek bir konu değil.
+
+- **CPU:** ağır işleri `nice` ile arka plana at; gereksiz hash/sıkıştırma yapma.
+- **G/Ç:** disk yoğun işlerde `ionice` kullan; sayfa önbelleğini gereksiz kirletme.
+- **Bellek:** tampon boyutu × eşzamanlılık çarpımını hesapla ve arayüzde göster;
+  akış (streaming) kullan, tüm çıktıyı belleğe alma.
+- **Ağ:** API çağrısı sayısını azalt (toplu işlem, gereksiz listelemeden kaçın),
+  hattı diğer uygulamalarla paylaş.
+- **systemd:** birimlere `CPUWeight`, `IOWeight`, `MemoryMax`, `Nice` gibi kaynak
+  denetimleri koy; kaçak bir süreç host'u etkilemesin.
+- Optimizasyon iddiası da ölçülür: "hızlandı" demeden önce önce/sonra sayısını göster.
+
+### 7. Hata dayanıklılığı
 
 - Bir planın hatası diğer planları durdurmamalı.
 - API 500 döndürmemeli; anlamlı bir mesajla dönmeli.
 - Rapor/mail üretimi patlarsa en azından kısa bir bildirim gitmeli.
 - Uzun süre çalışan serviste bellek ve disk sınırsız büyümemeli.
 
-### 7. Değişiklikten sonra regresyon koş
+### 8. Değişiklikten sonra regresyon koş
 
 Kod değiştirdiysen mevcut test paketini yeniden koş ve sonucu göster. Yeni özellik eklediysen
 o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
@@ -92,7 +108,9 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [ ] Çalışan planlar için canlı durum ekranı: %, hız, başlangıç ve tahmini bitiş zamanı
 - [ ] Arayüzde F5 / yenileme koruması
 - [ ] Login ekranı + captcha + güvenlik önlemleri
-- [ ] Proxmox arayüzünden erişim: Datacenter Notes linki ve nginx ters vekil (TLS)
+- [x] Proxmox arayüzünden erişim: Datacenter Notes linki ve nginx ters vekil (TLS)
+- [x] Bant genişliği plan başına: sabit, saatlik çizelge ve otomatik mod
+- [ ] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları
 
 ## Ortam
 

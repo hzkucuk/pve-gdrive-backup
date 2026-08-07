@@ -97,6 +97,15 @@ PLAN_DEFAULTS = {
     "checkers": 4,
     "drive_chunk": "64M",     # rclone RAM kullanimi ~ drive_chunk x transfers
     "rclone_extra": [],       # ham rclone argumanlari, or. ["--exclude","*.log"]
+    # --- kaynak kullanimi: hipervizoru ve uzerindeki VM/CT'leri yormamak icin ---
+    "nice": 10,               # CPU onceligi (0-19, yuksek = daha nazik)
+    "ionice_class": 2,        # 1=gercek zamanli 2=en iyi caba 3=bosta
+    "ionice_level": 6,        # 0-7 (yuksek = daha nazik), yalnizca sinif 2 icin
+    "buffer_size": "16M",     # rclone dosya basina tampon. RAM ~ (parca+tampon) x transfer
+    "use_mmap": True,         # bellegi isletim sistemine geri verir, GC baskisini azaltir
+    "fast_list": False,       # tek istekte tum agac: daha az API cagrisi, daha cok RAM
+    "no_traverse": False,     # az sayida yeni dosya varken hedefi bastan sona listeleme
+    "tpslimit": 0,            # saniyedeki azami API islemi (0 = sinirsiz)
     # --- Proxmox'un kendi yedegi ile cakismayi onleyen ayarlar ---
     "wait_for_vzdump": True,  # vzdump calisiyorsa yuklemeye baslama
     "vzdump_wait_min": 60,    # en fazla bu kadar dakika bekle, sonra bu turu atla (0 = hic bekleme)
@@ -189,6 +198,17 @@ def norm_plan(p):
         try: q[k] = max(0, int(q[k]))
         except Exception: q[k] = PLAN_DEFAULTS[k]
     if not isinstance(q.get("rclone_extra"), list): q["rclone_extra"] = []
+    try: q["nice"] = min(19, max(-20, int(q["nice"])))
+    except Exception: q["nice"] = PLAN_DEFAULTS["nice"]
+    try: q["ionice_class"] = min(3, max(0, int(q["ionice_class"])))
+    except Exception: q["ionice_class"] = PLAN_DEFAULTS["ionice_class"]
+    try: q["ionice_level"] = min(7, max(0, int(q["ionice_level"])))
+    except Exception: q["ionice_level"] = PLAN_DEFAULTS["ionice_level"]
+    try: q["tpslimit"] = max(0, int(q["tpslimit"]))
+    except Exception: q["tpslimit"] = PLAN_DEFAULTS["tpslimit"]
+    q["buffer_size"] = str(q.get("buffer_size") or "16M").strip()
+    for k in ("use_mmap", "fast_list", "no_traverse"):
+        q[k] = bool(q.get(k, PLAN_DEFAULTS[k]))
     q["bwlimit"] = str(q.get("bwlimit") or "off").strip()
     q["bwlimit_schedule"] = str(q.get("bwlimit_schedule") or "").strip()
     q["bwlimit_upload_only"] = bool(q.get("bwlimit_upload_only", True))
@@ -363,12 +383,14 @@ def clear_progress(pid):
     try: os.remove(progress_path(pid))
     except Exception: pass
 
-# rclone --stats-one-line ciktisi:
-#   Transferred:   1.234 GiB / 10.5 GiB, 11%, 25.1 MiB/s, ETA 6m12s
+# rclone --stats-one-line ciktisi. DIKKAT: gercek cikti "Transferred:" oneki ICERMEZ:
+#   INFO  :   976.597 KiB / 976.597 KiB, 100%, 88.775 KiB/s, ETA 0s
+# Cok satirli formatta onek vardir, o yuzden onek istege bagli birakildi.
 RE_STATS = re.compile(
-    r"Transferred:\s*([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+)\s*,\s*(\d+)\s*%"
+    r"(?:Transferred:\s*)?([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+)\s*,\s*(\d+)\s*%"
     r"(?:\s*,\s*([\d.]+\s*\w+/s))?(?:\s*,\s*ETA\s*(\S+))?")
 RE_UNIT = re.compile(r"([\d.]+)\s*([KMGTP]?)i?B", re.I)
+RE_DOSYA_SAYISI = re.compile(r"Transferred:\s*(\d+)\s*/\s*(\d+)\s*,\s*\d+\s*%\s*$")
 
 def to_bytes(txt):
     m = RE_UNIT.search(str(txt) or "")
@@ -395,12 +417,32 @@ def rclone(args, timeout=None):
     except FileNotFoundError: return 127, "", "rclone bulunamadi (apt install rclone)"
     except subprocess.TimeoutExpired: return 124, "", "zaman asimi"
 
-def rclone_stream(args, timeout=None, on_line=None):
+_ONEK_CACHE = {}
+
+def kaynak_oneki(p):
+    """rclone'u nice/ionice ile calistirmak icin komut oneki.
+    Yedekleme isi hipervizordeki VM ve CT'leri yavaslatmamali."""
+    onek = []
+    n = int(p.get("nice", 10) or 0)
+    if n and _var_mi("nice"): onek += ["nice", "-n", str(n)]
+    sinif = int(p.get("ionice_class", 2) or 0)
+    if sinif and _var_mi("ionice"):
+        onek += ["ionice", "-c", str(sinif)]
+        if sinif == 2: onek += ["-n", str(int(p.get("ionice_level", 6) or 0))]
+    return onek
+
+def _var_mi(ad):
+    if ad not in _ONEK_CACHE:
+        _ONEK_CACHE[ad] = any(os.access(os.path.join(d, ad), os.X_OK)
+                              for d in os.environ.get("PATH", "/usr/bin:/bin").split(":") if d)
+    return _ONEK_CACHE[ad]
+
+def rclone_stream(args, timeout=None, on_line=None, onek=None):
     """Uzun ciktili komutlar (copy) icin. Cikti satir satir okunur ve yalnizca son
     rclone_tail_lines satiri bellekte tutulur; binlerce dosyada bile RAM sabit kalir."""
     n = max(1, int(cfg().get("rclone_tail_lines") or 40))
     try:
-        pr = subprocess.Popen(["rclone"] + args, stdout=subprocess.PIPE,
+        pr = subprocess.Popen(list(onek or []) + ["rclone"] + args, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True, bufsize=1)
     except FileNotFoundError:
         return 127, ["rclone bulunamadi (apt install rclone)"]
@@ -730,32 +772,50 @@ def do_copy(p):
     for pat in (p.get("skip_patterns") or []): args += ["--exclude", pat]
     # Son N dakikadir degismemis dosyalar alinsin: vzdump yazarken yakalamayalim
     if float(p.get("min_age_min") or 0) > 0: args += ["--min-age", f"{int(float(p['min_age_min']))}m"]
+    args += ["--buffer-size", str(p.get("buffer_size") or "16M")]
+    if p.get("use_mmap"): args += ["--use-mmap"]          # bellegi OS'e geri verir
+    if p.get("fast_list"): args += ["--fast-list"]        # daha az API cagrisi
+    if p.get("no_traverse"): args += ["--no-traverse"]    # hedefi bastan sona listeleme
+    if int(p.get("tpslimit") or 0): args += ["--tpslimit", str(int(p["tpslimit"]))]
     args += list(p.get("rclone_extra") or [])
     oto = bool(p.get("bwlimit_auto"))
     port = rc_port(p["id"])
-    if oto:
-        args += ["--rc", "--rc-addr", f"127.0.0.1:{port}", "--rc-no-auth"]
+    # rc her zaman acilir: ilerleme bilgisi buradan yapisal olarak okunur.
+    # Yalnizca 127.0.0.1'e baglanir, disaridan erisilemez.
+    args += ["--rc", "--rc-addr", f"127.0.0.1:{port}", "--rc-no-auth"]
     log(f"rclone copy basladi: {p['src_dir']} -> {p['remote']}", p["id"])
     tmo = float(cfg().get("rclone_timeout_min") or 0) * 60 or None
     t0 = time.time()
     set_progress(p["id"], {"phase": "kopyalama", "phase_label": "Drive'a yükleniyor",
                            "started": t0, "pct": 0})
+    rc_calisti = {"ok": False}
     def on_line(l):
+        # rc API'si calisiyorsa yapisal veri onceliklidir; log ayristirma yalnizca yedek.
+        if rc_calisti["ok"]: return
         st = parse_stats(l)
         if st: set_progress(p["id"], st)
-    dur = threading.Event(); izleyici = None
+    dur = threading.Event(); isciler = []
+    isciler.append(threading.Thread(target=stats_izle, args=(p, port, dur, rc_calisti), daemon=True))
     if oto:
-        izleyici = threading.Thread(target=bw_auto_izle, args=(p, port, dur), daemon=True)
-        izleyici.start()
+        isciler.append(threading.Thread(target=bw_auto_izle, args=(p, port, dur), daemon=True))
+    for t in isciler: t.start()
     try:
-        rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line)
+        rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line, onek=kaynak_oneki(p))
     finally:
         dur.set()
-        if izleyici: izleyici.join(timeout=5)
+        for t in isciler: t.join(timeout=5)
     for l in tail[-4:]:
         if l.strip(): log("  " + l, p["id"])
-    log(f"rclone copy bitti rc={rc}", p["id"])
-    return rc == 0
+    # Yuklenen dosya sayisi: once rclone'un bitis ozetinden, yoksa son rc olcumunden.
+    # Boylece kopyalama oncesi sirf saymak icin tam uzak listeleme yapmamiza gerek kalmaz.
+    yuklenen = None
+    for l in reversed(tail):
+        m = RE_DOSYA_SAYISI.search(l)
+        if m: yuklenen = int(m.group(1)); break
+    if yuklenen is None:
+        yuklenen = int((get_progress(p["id"]) or {}).get("transfers") or 0)
+    log(f"rclone copy bitti rc={rc}, yuklenen dosya: {yuklenen}", p["id"])
+    return rc == 0, yuklenen
 
 RE_BW = re.compile(r"^(off|\d+(?:\.\d+)?[BKMGT]?)$", re.I)
 RE_BW_SCHED = re.compile(r"^\s*([01]?\d|2[0-3]):[0-5]\d\s*,\s*(off|\d+(?:\.\d+)?[BKMGT]?)\s*$", re.I)
@@ -847,6 +907,36 @@ def rc_call(port, yol, *args):
                           timeout=20)
     return rc == 0, (out or err or "").strip()
 
+def stats_izle(p, port, dur_bayragi, rc_calisti):
+    """rclone'un rc API'sinden yapisal ilerleme okur. Log metni ayristirmaktan
+    cok daha guvenilir: alan adlari sabit, birim cevrimi gerekmez."""
+    pid = p["id"]
+    aralik = max(1, int(cfg().get("stats_interval_sec") or 5))
+    while not dur_bayragi.is_set():
+        dur_bayragi.wait(aralik)
+        if dur_bayragi.is_set(): break
+        ok, cikti = rc_call(port, "core/stats")
+        if not ok: continue
+        try: d = json.loads(cikti)
+        except Exception: continue
+        rc_calisti["ok"] = True          # rc yanit veriyor: log ayristirici devreden ciksin
+        done = int(d.get("bytes") or 0); total = int(d.get("totalBytes") or 0)
+        hiz = float(d.get("speed") or 0)
+        eta = d.get("eta")
+        yama = {"done": done, "total": total, "speed_bps": int(hiz),
+                "done_h": human(done), "total_h": human(total),
+                "speed": human(hiz) + "/s",
+                "transfers": int(d.get("transfers") or 0),
+                "errors": int(d.get("errors") or 0)}
+        if total: yama["pct"] = min(100, int(done * 100 / total))
+        if isinstance(eta, (int, float)) and eta >= 0:
+            yama["eta"] = fmt_sure(eta)
+        set_progress(pid, yama)
+
+def fmt_sure(sn):
+    sn = int(max(0, sn)); s, d, saat = sn % 60, (sn // 60) % 60, sn // 3600
+    return (f"{saat}h" if saat else "") + (f"{d}m" if saat or d else "") + f"{s}s"
+
 def bw_auto_izle(p, port, dur_bayragi):
     """rclone calisirken hattaki DIGER trafigi olcup sinirimizi canli ayarlar.
     Boylece UrBackup gibi baska bir yedekleme yazilimi hatti kullandiginda geri cekiliriz."""
@@ -892,8 +982,8 @@ def bw_auto_izle(p, port, dur_bayragi):
             set_progress(pid, {"bw_auto": bw_str(hedef), "bw_other": int(diger),
                                "bw_total": int(toplam), "bw_mine": int(bizim), "bw_iface": iface})
             log(f"bant genisligi -> {bw_str(hedef)} "
-                f"(hat: {bw_str(toplam)}/sn, bizim: {bw_str(bizim)}/sn, "
-                f"diger: {bw_str(diger)}/sn)", pid)
+                f"(hat: {human(toplam)}/sn, bizim: {human(bizim)}/sn, "
+                f"diger: {human(diger)}/sn)", pid)
         else:
             log(f"bant genisligi ayarlanamadi: {cikti[:120]}", pid)
 
@@ -1203,11 +1293,12 @@ def do_run(pid, trigger="zamanlanmis"):
         if yarim:
             log(f"yazilmakta olan {len(yarim)} dosya atlanacak: {', '.join(yarim[:3])}"
                 + (" ..." if len(yarim) > 3 else ""), p["id"])
+        # Kopyalama oncesi "kac dosya vardi" listelemesi kaldirildi: yuklenen sayisi
+        # rclone'un kendi ozetinden gelir. Boylece her calismada bir tam uzak
+        # listeleme (buyuk klasorlerde onlarca saniye) tasarruf edilir.
+        ok, uploaded = do_copy(p)
         set_progress(pid, {"phase": "listeleme", "phase_label": "Drive listeleniyor"})
-        before = len([f for f in lsjson(p["remote"]) if not f.get("IsDir")])
-        ok = do_copy(p)
-        listed, files = lsjson_ok(p["remote"])   # tek listeleme: hem sayim hem retention icin
-        uploaded = max(0, len([f for f in files if not f.get("IsDir")]) - before)
+        listed, files = lsjson_ok(p["remote"])   # yalnizca retention icin
         # GUVENLIK: yukleme basarisizsa veya Drive listelenemiyorsa hicbir sey silinmez.
         # Aksi halde yeni yedek Drive'a cikmadan eskiler silinip yedeksiz kalinabilir.
         if ok and listed:
