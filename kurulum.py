@@ -28,9 +28,14 @@ M = {
   "mc_yeni": "Baştan yapılandır (mevcut ayarlar yedeklenip değiştirilir)",
   "mc_cik": "Çık",
   "b_ag": "Erişim",
-  "s_ag": "Arayüze hangi ağlardan erişilebilsin? (virgülle ayır, boş = herkes)",
-  "ag_ipucu": "SSH ile {0} adresinden bağlandın, onun ağını öneriyorum.",
-  "ag_yok": "Boş bırakırsan arayüz ağdaki herkese açık olur.",
+  "s_ag": "Hangilerine izin verilsin? (numaraları virgülle yaz, ya da CIDR yapıştır)",
+  "ag_ipucu": "SSH ile {0} adresinden bağlandın",
+  "ag_lan": "Sunucunun kendi yerel ağı ({0})",
+  "ag_hepsi": "Kısıtlama yok — ağdaki herkes erişebilir",
+  "ag_uyari": "DİKKAT: Buraya yazmadığın bir ağdan arayüze giremezsin (403).\n"
+              "  Şimdi VPN'den bağlıysan ama sonra yerel ağdan da gireceksen İKİSİNİ de seç.",
+  "ag_kurtarma": "Kilitlenirsen: sunucuda 'pve_gdrive.py aglar --ac' komutu kısıtlamayı kaldırır.",
+  "ag_secildi": "seçilen: {0}",
   "b_arayuz": "Arayüz",
   "s_port": "Arayüz portu",
   "s_kul": "Kullanıcı adı",
@@ -81,9 +86,14 @@ M = {
   "mc_yeni": "Reconfigure from scratch (current settings are backed up first)",
   "mc_cik": "Quit",
   "b_ag": "Access",
-  "s_ag": "Which networks may reach the web UI? (comma separated, empty = everyone)",
-  "ag_ipucu": "You connected over SSH from {0}; suggesting that network.",
-  "ag_yok": "If left empty the UI is reachable by anyone on the network.",
+  "s_ag": "Which ones to allow? (comma separated numbers, or paste a CIDR)",
+  "ag_ipucu": "You connected over SSH from {0}",
+  "ag_lan": "The server's own local network ({0})",
+  "ag_hepsi": "No restriction — anyone on the network can reach it",
+  "ag_uyari": "CAREFUL: You cannot reach the UI from a network you do not list here (403).\n"
+              "  If you are on VPN now but will also connect from the LAN, pick BOTH.",
+  "ag_kurtarma": "If locked out: run 'pve_gdrive.py aglar --ac' on the server to clear it.",
+  "ag_secildi": "selected: {0}",
   "b_arayuz": "Web interface",
   "s_port": "Web interface port",
   "s_kul": "Username",
@@ -164,6 +174,24 @@ def insan(n):
         n /= 1024
     return f"{n:.1f} PB"
 
+def host_aglari():
+    """Sunucunun kendi IPv4 aglari. Kurulumu VPN'den yapip sonra yerel agdan
+    girmek isteyen kullanici kendini disarida birakmasin diye onerilir."""
+    out = []
+    try:
+        r = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, timeout=10)
+        for satir in r.stdout.splitlines():
+            p = satir.split()
+            if len(p) < 4: continue
+            arayuz, adres = p[1], p[3]
+            m = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/(\d{1,2})$", adres)
+            if not m: continue
+            out.append((f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0/24", arayuz))
+    except Exception:
+        pass
+    return out
+
 def dump_klasorleri():
     out, cur = [], None
     try:
@@ -223,17 +251,36 @@ def main():
         shutil.copy2(CONF, yd); print(f"  {G}✓{R} {yd}")
 
     baslik(t("b_ag"))
+    adaylar = []      # (cidr, aciklama)
     ip = (os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION") or "").split()
-    vars_ag = ""
     if ip and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip[0]):
-        p = ip[0].split("."); vars_ag = f"{p[0]}.{p[1]}.{p[2]}.0/24"
-        print(f"  {t('ag_ipucu', ip[0])}")
-    print(f"  {Y}{t('ag_yok')}{R}")
+        o = ip[0].split(".")
+        adaylar.append((f"{o[0]}.{o[1]}.{o[2]}.0/24", t("ag_ipucu", ip[0])))
+    for cidr, ad in host_aglari():
+        if not any(cidr == c for c, _ in adaylar):
+            adaylar.append((cidr, t("ag_lan", ad)))
+    print(f"  {Y}{t('ag_uyari')}{R}")
+    print(f"  {t('ag_kurtarma')}\n")
+    for i, (cidr, ac) in enumerate(adaylar, 1):
+        print(f"    {B}{i}{R}) {cidr:20} {ac}")
+    print(f"    {B}0{R}) {t('ag_hepsi')}")
     def d_ag(v):
+        v = v.strip()
+        if not v: return False, None
         for x in [y.strip() for y in v.split(",") if y.strip()]:
-            if not re.match(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$", x): return False, None
+            if x.isdigit():
+                if not (0 <= int(x) <= len(adaylar)): return False, None
+            elif not re.match(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$", x): return False, None
         return True, None
-    aglar = [x.strip() for x in sor(t("s_ag"), vars_ag, d_ag).split(",") if x.strip()]
+    varsayilan = ",".join(str(i) for i in range(1, len(adaylar) + 1)) if adaylar else "0"
+    secim = sor(t("s_ag"), varsayilan, d_ag)
+    aglar = []
+    for x in [y.strip() for y in secim.split(",") if y.strip()]:
+        if x == "0": aglar = []; break
+        if x.isdigit(): aglar.append(adaylar[int(x) - 1][0])
+        else: aglar.append(x)
+    aglar = list(dict.fromkeys(aglar))
+    print(f"  {G}✓{R} " + (t("ag_secildi", ", ".join(aglar)) if aglar else t("ag_hepsi")))
 
     baslik(t("b_arayuz"))
     port = int(sor(t("s_port"), "8787",

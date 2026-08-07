@@ -231,6 +231,9 @@ pve_gdrive.py version                 # sürüm
 pve_gdrive.py update --check          # yeni sürüm var mı
 pve_gdrive.py update                  # güncellemeyi kur
 pve_gdrive.py update --rollback       # önceki sürüme dön
+pve_gdrive.py aglar                   # izinli ağları göster
+pve_gdrive.py aglar --ekle 10.0.0.0/24 # ağ ekle
+pve_gdrive.py aglar --ac              # kısıtlamayı kaldır (kilitlenme kurtarması)
 pve_gdrive.py disa-aktar              # plan/mail ayarlarını JSON olarak yaz
 pve_gdrive.py disa-aktar --sirlarla   # SMTP şifreleri dahil
 pve_gdrive.py ice-aktar < ayar.json   # ayar yükle (planlar kapalı gelir)

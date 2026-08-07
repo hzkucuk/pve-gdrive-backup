@@ -439,6 +439,22 @@ def t_ag():
         dogru(G.ip_izinli("8.8.8.8"), "bos liste = kisitlama yok")
     finally: o.temizle()
 
+@test("ag kurtarma komutu listeyi dogru yonetir", "erisim")
+def t_ag_yonet():
+    """Yanlis kisitlama yuzunden arayuze girilemez duruma dusuldugunde kurtarma yolu."""
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["allow_networks"] = ["10.0.0.0/24"]; o.yaz_cfg(c)
+        G = o.modul()
+        esit(G.aglari_yonet()["aglar"], ["10.0.0.0/24"], "mevcut liste")
+        esit(G.aglari_yonet("ekle", "192.168.1.0/24")["aglar"],
+             ["10.0.0.0/24", "192.168.1.0/24"], "ekleme")
+        dogru(not G.aglari_yonet("ekle", "sacma")["ok"], "gecersiz ag reddedilmeli")
+        esit(G.aglari_yonet("cikar", "10.0.0.0/24")["aglar"], ["192.168.1.0/24"], "cikarma")
+        esit(G.aglari_yonet("ac")["aglar"], [], "kisitlamayi kaldirma")
+        dogru(G.ip_izinli("8.8.8.8"), "kisitlama kalkinca herkes gecmeli")
+    finally: o.temizle()
+
 @test("sifre hash'lenir ve dogrulanir", "erisim")
 def t_sifre():
     o = Ortam()

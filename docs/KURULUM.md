@@ -173,6 +173,31 @@ Arayüz varsayılan olarak Proxmox'un kendi sertifikasıyla HTTPS konuşur:
 Tarayıcı uyarısı Proxmox arayüzündekiyle aynıdır (aynı CA). Sertifika okunamazsa servis düz
 HTTP ile ayakta kalır ve log'a sebebini yazar — erişimi kaybetmezsin.
 
+### Hangi ağı seçmeliyim?
+
+Kurulum sihirbazı iki adayı birden gösterir ve **ikisini de** varsayılan olarak seçer:
+
+```
+  1) 10.212.134.0/24      SSH ile 10.212.134.200 adresinden bağlandın
+  2) 192.168.2.0/24       Sunucunun kendi yerel ağı (vmbr0)
+  0) Kısıtlama yok
+```
+
+Buradaki tuzak şu: kurulumu VPN'den yaparsan sihirbaz VPN ağını görür, ama sonradan
+**yerel ağdan** girmek istersen 403 alırsın. Nereden erişeceksen onu listeye ekle;
+şüphedeysen ikisini de seç.
+
+**Kilitlenirsen** sunucuda:
+
+```bash
+pve_gdrive.py aglar                       # mevcut listeyi göster
+pve_gdrive.py aglar --ekle 192.168.2.0/24 # ağ ekle
+pve_gdrive.py aglar --ac                  # kısıtlamayı tamamen kaldır
+systemctl restart pve-gdrive-ui
+```
+
+Bu komut SSH gerektirir; SSH bu ayardan **etkilenmez**, o yüzden her zaman geri dönebilirsin.
+
 VPN dışından erişimi kapatmak için:
 
 ```json

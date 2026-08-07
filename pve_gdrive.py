@@ -14,6 +14,7 @@ Komutlar:
   python3 pve_gdrive.py snapshot [--plan ID]  # Drive durumunu tazeler
   python3 pve_gdrive.py status            # durum JSON (stdout)
   python3 pve_gdrive.py plans             # planlari listeler
+  python3 pve_gdrive.py aglar             # izinli aglari gosterir/duzenler (kurtarma)
   python3 pve_gdrive.py disa-aktar        # plan/mail ayarlarini JSON olarak yazar
   python3 pve_gdrive.py ice-aktar         # stdin'den ayar yukler
 """
@@ -2637,6 +2638,30 @@ def serve():
         log("TLS kapali - arayuz duz HTTP. VPN disinda kullanma.")
     httpd.serve_forever()
 
+def aglari_yonet(islem=None, deger=None):
+    """Izinli ag listesini komut satirindan yonetir.
+
+    Yanlis bir kisitlama yuzunden arayuze giremez duruma dusersen kurtarma yolu budur:
+    sunucuda 'pve_gdrive.py aglar --ac' calistirip kisitlamayi kaldirirsin."""
+    C = cfg()
+    mevcut = list(C.get("allow_networks") or [])
+    if islem is None:
+        return {"ok": True, "aglar": mevcut}
+    if islem == "ac":
+        C["allow_networks"] = []
+    elif islem == "ekle":
+        try: ipaddress.ip_network(str(deger), strict=False)
+        except Exception: return {"ok": False, "msg": f"gecersiz ag: {deger}"}
+        if deger not in mevcut: mevcut.append(str(deger))
+        C["allow_networks"] = mevcut
+    elif islem == "cikar":
+        C["allow_networks"] = [x for x in mevcut if x != deger]
+    else:
+        return {"ok": False, "msg": "bilinmeyen islem"}
+    save_cfg(C)
+    log(f"izinli aglar guncellendi: {C['allow_networks'] or '(kisitlama yok)'}")
+    return {"ok": True, "aglar": C["allow_networks"]}
+
 def disa_aktar(sirlar=False):
     """Planlari ve mail profillerini baska bir kuruluma tasimak icin JSON uretir.
 
@@ -4692,6 +4717,16 @@ def main():
             put_pstate(p["id"], update_snapshot(p)); print("ok:", p["id"])
     elif cmd == "status": print(json.dumps(public_status(), ensure_ascii=False, indent=2))
     elif cmd in ("version", "--version", "-V"): print(SURUM)
+    elif cmd == "aglar":
+        if "--ac" in a: r = aglari_yonet("ac")
+        elif "--ekle" in a: r = aglari_yonet("ekle", opt("--ekle"))
+        elif "--cikar" in a: r = aglari_yonet("cikar", opt("--cikar"))
+        else: r = aglari_yonet()
+        if not r.get("ok"): print("HATA:", r.get("msg")); return
+        ag = r["aglar"]
+        print("izinli aglar:", ", ".join(ag) if ag else "(kisitlama yok - herkes erisebilir)")
+        if len(a) > 1:
+            print("degisiklik icin servisi yeniden baslat: systemctl restart pve-gdrive-ui")
     elif cmd in ("disa-aktar", "export"):
         print(json.dumps(disa_aktar("--sirlarla" in a), ensure_ascii=False, indent=2))
     elif cmd in ("ice-aktar", "import"):
