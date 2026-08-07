@@ -86,3 +86,17 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .ozet td:first-child{color:#8b97a5;width:40%;white-space:nowrap}
 .ozet td:last-child{color:#e6edf3;word-break:break-all}
 .ozet tr.uyari td{color:#ffd479}
+
+/* --- ana ekran hesap/kota seridi --- */
+.hesaplar{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;margin-bottom:14px}
+.hesap{background:#161b22;border:1px solid #232b36;border-radius:10px;padding:10px 12px;cursor:pointer}
+.hesap:hover{border-color:#30404f}
+.hesap .ad{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.hesap .ad b{font-size:13px}
+.hesap .ad span{font-size:11px;color:#8b97a5}
+.hesap .mini{height:6px;border-radius:4px;background:#232b36;overflow:hidden;margin:7px 0 5px}
+.hesap .mini i{display:block;height:100%;background:#3fb950}
+.hesap.uyari .mini i{background:#d29922}
+.hesap.dolu .mini i{background:#f85149}
+.hesap .alt{font-size:11px;color:#8b97a5}
+.hesap.hata{border-color:#5c1a1a}

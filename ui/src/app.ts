@@ -321,6 +321,7 @@ function render(): void {
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
     || '<div class="card">Henüz plan yok. Sağ üstten "+ Yeni Plan" ile başla.</div>');
+  hesapSerit();
   setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
   const tabs: [string, string][] = ([["all", "Tümü"], ["system", "Sistem"]] as [string, string][])
     .concat(ps.map((p) => [p.id, p.name] as [string, string]));
@@ -328,6 +329,28 @@ function render(): void {
     + "\" onclick=\"setLog('" + t[0] + "')\">" + esc(t[1]) + "</button>").join(""));
 }
 function setLog(src: string): void { LOGSRC = src; remember(); void loadLog(); }
+
+/** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
+ *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
+function hesapSerit(): void {
+  const h = (S && S.hesaplar) || [];
+  if (!h.length) { setHtml("hesapserit", ""); return; }
+  setHtml("hesapserit", h.map((x) => {
+    const q = x.quota || {};
+    if (!q.ok) {
+      return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
+        + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '
+        + esc(q.error || "kota okunamadı") + "</div></div>";
+    }
+    const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
+    const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
+    return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="Yönetmek için tıkla">'
+      + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
+      + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
+      + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
+      + (q.trashed ? " · çöp " + hb(q.trashed) : "") + "</div></div>";
+  }).join(""));
+}
 
 async function loadLog(): Promise<void> {
   try {

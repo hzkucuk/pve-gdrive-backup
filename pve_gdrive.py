@@ -57,6 +57,7 @@ GLOBAL_DEFAULTS = {
     "update_auto": False,         # bulununca kendiliginden kur (varsayilan: sadece bildir)
     "update_url": "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py",
     "update_backup_keep": 5,      # saklanacak eski surum sayisi
+    "quota_cache_min": 15,        # hesap kotasi kac dakika onbellekte tutulsun
     # Zamanlayici: systemd timer yerine surecin kendi icinde calissin mi.
     # null = otomatik (konteynerde acik, systemd kurulumunda kapali)
     "debug": False,               # ayrintili hata izleri loga yazilsin mi
@@ -1496,6 +1497,29 @@ def rclone_remotes():
         res.append({"name": parts[0].strip(), "type": parts[1].strip()})
     return res
 
+_KOTA_ONBELLEK = {}   # hesap adi -> {"veri": {...}, "zaman": ts}
+
+def remote_quota_onbellekli(name, zorla=False):
+    """Kota sorgusu her arayuz yenilemesinde yapilmaz: bir rclone about cagrisi
+    saniyeler surer ve Drive API kotasini yer. quota_cache_min kadar onbellekte tutulur."""
+    ttl = float(cfg().get("quota_cache_min") or 15) * 60
+    kayit = _KOTA_ONBELLEK.get(name)
+    if not zorla and kayit and (time.time() - kayit["zaman"]) < ttl:
+        return kayit["veri"]
+    veri = remote_quota(name)
+    _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
+    return veri
+
+def hesap_ozeti(zorla=False):
+    """Ana ekranda gosterilecek hesap + kota listesi."""
+    out = []
+    for r in rclone_remotes():
+        q = remote_quota_onbellekli(r["name"], zorla)
+        toplam = float(q.get("total") or 0); kullanilan = float(q.get("used") or 0)
+        out.append({"name": r["name"], "type": r["type"], "quota": q,
+                    "pct": round(kullanilan / toplam * 100, 1) if toplam else None})
+    return out
+
 def remote_quota(name):
     rc, out, err = rclone(["about", f"{name}:", "--json"], timeout=45)
     if rc != 0: return {"ok": False, "error": (err or "").strip()[:200]}
@@ -1615,6 +1639,7 @@ def remote_create(name, token):
     try: os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
     except Exception as e: yut("remote_create", e)
     q = remote_quota(name)
+    _KOTA_ONBELLEK.pop(name, None)
     log(f"rclone hesabi eklendi: {name}")
     return {"ok": True, "msg": f"'{name}' eklendi" + (
         f" ({human(q.get('used'))}/{human(q.get('total'))} kullanimda)" if q.get("ok") else
@@ -1625,6 +1650,7 @@ def remote_delete(name):
     if used: return {"ok": False, "msg": "su planlar kullaniyor: " + ", ".join(used)}
     rc, out, err = rclone(["config", "delete", name])
     if rc != 0: return {"ok": False, "msg": (err or "").strip()[:200]}
+    _KOTA_ONBELLEK.pop(name, None)
     log(f"rclone hesabi silindi: {name} (Drive'daki dosyalara dokunulmadi)")
     return {"ok": True, "msg": f"'{name}' silindi (Drive'daki dosyalar duruyor)"}
 
@@ -2104,11 +2130,13 @@ def public_status():
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
+                          "quota_cache_min",
                           "remember_enabled", "remember_days", "session_timeout_min",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
             "smtp_ready": bool(smtp_profiles(C)),
             "tls": {"aktif": TLS_AKTIF, "sertifika": cert_bilgisi()},
+            "hesaplar": hesap_ozeti(),
             "surum": SURUM, "konteyner": konteyner_mi(),
             "ic_zamanlayici": ic_zamanlayici_acik(),
             "guncelleme": {"uzak": GUNCELLEME_DURUMU["uzak_surum"],
@@ -2267,7 +2295,8 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/remotes":
             rs = rclone_remotes()
             if q.get("quota", [""])[0] == "1":
-                for r in rs: r["quota"] = remote_quota(r["name"])
+                zorla = q.get("force", [""])[0] == "1"
+                for r in rs: r["quota"] = remote_quota_onbellekli(r["name"], zorla)
             self._json({"remotes": rs})
         elif p == "/api/remote/auth/status":
             self._json(auth_status())
@@ -2703,6 +2732,20 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .ozet td:last-child{color:#e6edf3;word-break:break-all}
 .ozet tr.uyari td{color:#ffd479}
 
+/* --- ana ekran hesap/kota seridi --- */
+.hesaplar{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;margin-bottom:14px}
+.hesap{background:#161b22;border:1px solid #232b36;border-radius:10px;padding:10px 12px;cursor:pointer}
+.hesap:hover{border-color:#30404f}
+.hesap .ad{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.hesap .ad b{font-size:13px}
+.hesap .ad span{font-size:11px;color:#8b97a5}
+.hesap .mini{height:6px;border-radius:4px;background:#232b36;overflow:hidden;margin:7px 0 5px}
+.hesap .mini i{display:block;height:100%;background:#3fb950}
+.hesap.uyari .mini i{background:#d29922}
+.hesap.dolu .mini i{background:#f85149}
+.hesap .alt{font-size:11px;color:#8b97a5}
+.hesap.hata{border-color:#5c1a1a}
+
 </style></head><body>
 <div class="wrap">
 <header>
@@ -2711,12 +2754,11 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
-  <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
-  <button onclick="openSmtp()" title="Mail gönderici profilleri. Farklı planlar farklı adreslerden mail atabilir.">✉ Mail</button>
-  <button onclick="openSettings()" title="Arayüz, bellek ve gelişmiş ayarlar">⚙ Ayarlar</button>
+  <button onclick="openSettings()" title="Hesaplar, mail profilleri, güvenlik ve gelişmiş ayarlar">⚙ Ayarlar</button>
   <button class="primary" onclick="openEditor(null)">+ Yeni Plan</button>
 </header>
 
+<div class="hesaplar" id="hesapserit"></div>
 <div class="plans" id="plans"></div>
 <div id="detail"></div>
 
@@ -2992,6 +3034,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 
 <div class="mask" id="m-set"><div class="modal">
   <h2>⚙ Ayarlar</h2><div class="small">Tüm planlar için ortak.</div>
+  <div class="btns" style="margin-top:12px">
+    <button onclick="openAccounts()" title="Google hesaplarını yönet: kota, bağlantı testi, silme">👤 Google hesapları</button>
+    <button onclick="openSmtp()" title="Mail gönderici profilleri">✉ Mail profilleri</button>
+  </div>
   <fieldset><legend>Web arayüzü</legend>
     <div class="f"><label class="tip" title="Arayüzün dinleyeceği adres. 127.0.0.1 yaparsan sadece SSH tüneli/ters vekil üzerinden erişilir.">Dinlenen adres</label>
       <div><input id="g-bind"><div class="errmsg" id="err-gbind"></div>
@@ -3462,6 +3508,7 @@ function render() {
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
         || '<div class="card">Henüz plan yok. Sağ üstten "+ Yeni Plan" ile başla.</div>');
+    hesapSerit();
     setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
     const tabs = [["all", "Tümü"], ["system", "Sistem"]]
         .concat(ps.map((p) => [p.id, p.name]));
@@ -3469,6 +3516,30 @@ function render() {
         + "\" onclick=\"setLog('" + t[0] + "')\">" + esc(t[1]) + "</button>").join(""));
 }
 function setLog(src) { LOGSRC = src; remember(); void loadLog(); }
+/** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
+ *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
+function hesapSerit() {
+    const h = (S && S.hesaplar) || [];
+    if (!h.length) {
+        setHtml("hesapserit", "");
+        return;
+    }
+    setHtml("hesapserit", h.map((x) => {
+        const q = x.quota || {};
+        if (!q.ok) {
+            return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
+                + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '
+                + esc(q.error || "kota okunamadı") + "</div></div>";
+        }
+        const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
+        const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
+        return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="Yönetmek için tıkla">'
+            + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
+            + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
+            + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
+            + (q.trashed ? " · çöp " + hb(q.trashed) : "") + "</div></div>";
+    }).join(""));
+}
 async function loadLog() {
     try {
         const r = await fetch("/api/log?src=" + encodeURIComponent(LOGSRC));

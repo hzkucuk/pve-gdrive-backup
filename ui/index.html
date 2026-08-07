@@ -5,12 +5,11 @@
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
-  <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
-  <button onclick="openSmtp()" title="Mail gönderici profilleri. Farklı planlar farklı adreslerden mail atabilir.">✉ Mail</button>
-  <button onclick="openSettings()" title="Arayüz, bellek ve gelişmiş ayarlar">⚙ Ayarlar</button>
+  <button onclick="openSettings()" title="Hesaplar, mail profilleri, güvenlik ve gelişmiş ayarlar">⚙ Ayarlar</button>
   <button class="primary" onclick="openEditor(null)">+ Yeni Plan</button>
 </header>
 
+<div class="hesaplar" id="hesapserit"></div>
 <div class="plans" id="plans"></div>
 <div id="detail"></div>
 
@@ -286,6 +285,10 @@
 
 <div class="mask" id="m-set"><div class="modal">
   <h2>⚙ Ayarlar</h2><div class="small">Tüm planlar için ortak.</div>
+  <div class="btns" style="margin-top:12px">
+    <button onclick="openAccounts()" title="Google hesaplarını yönet: kota, bağlantı testi, silme">👤 Google hesapları</button>
+    <button onclick="openSmtp()" title="Mail gönderici profilleri">✉ Mail profilleri</button>
+  </div>
   <fieldset><legend>Web arayüzü</legend>
     <div class="f"><label class="tip" title="Arayüzün dinleyeceği adres. 127.0.0.1 yaparsan sadece SSH tüneli/ters vekil üzerinden erişilir.">Dinlenen adres</label>
       <div><input id="g-bind"><div class="errmsg" id="err-gbind"></div>

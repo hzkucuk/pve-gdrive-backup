@@ -115,6 +115,7 @@ interface Status {
   smtp: SmtpProfile[];
   smtp_ready: boolean;
   tls?: { aktif: boolean; sertifika: { konu: string; veren: string; bitis: string } | null };
+  hesaplar?: { name: string; type: string; quota: Quota; pct: number | null }[];
   surum?: string;
   guncelleme?: { uzak: string | null; yeni_var: boolean; otomatik: boolean; hata: string };
   csrf: string;
