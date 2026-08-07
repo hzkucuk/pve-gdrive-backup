@@ -18,8 +18,15 @@ hata()  { renk "31;1" "HATA: $*" >&2; exit 1; }
 [ "$(id -u)" = "0" ] || hata "root olarak calistir (sudo -i)"
 
 # curl | bash ile calisirken stdin borudan gelir ve sihirbaz soru soramaz.
-# Terminal varsa girdiyi ona baglayip etkilesimi geri kazandiriyoruz.
-if [ ! -t 0 ] && [ -r /dev/tty ]; then exec < /dev/tty; fi
+# Terminal VARSA girdiyi ona baglayip etkilesimi geri kazaniriz. Dosyanin varligi
+# yetmez, gercekten acilabiliyor olmasi gerekir (cron/ssh -T'de acilmaz).
+if [ ! -t 0 ]; then
+  if { exec 3</dev/tty; } 2>/dev/null; then
+    exec 0<&3 3<&-
+  else
+    export PGD_SESSIZ=1   # terminal yok: sihirbaz atlanir, otomatik tespit kullanilir
+  fi
+fi
 
 bilgi "bagimliliklar kontrol ediliyor"
 eksik=()
