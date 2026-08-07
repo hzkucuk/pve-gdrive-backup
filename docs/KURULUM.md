@@ -140,6 +140,37 @@ pve_gdrive.py plans                         # planlar ve sonraki çalışma zama
 İlk yükleme büyükse (yüzlerce GB) elle başlatıp izlemek mantıklı: plan kartında **▶ Yedekle**.
 Arayüzde yüzde, hız, geçen süre ve tahmini bitiş zamanı canlı görünür.
 
+## 8b. HTTPS ve erişim kısıtlaması
+
+Arayüz varsayılan olarak Proxmox'un kendi sertifikasıyla HTTPS konuşur:
+
+```json
+{
+  "ssl_cert": "/etc/pve/local/pve-ssl.pem",
+  "ssl_key": "/etc/pve/local/pve-ssl.key",
+  "cookie_secure": true
+}
+```
+
+Tarayıcı uyarısı Proxmox arayüzündekiyle aynıdır (aynı CA). Sertifika okunamazsa servis düz
+HTTP ile ayakta kalır ve log'a sebebini yazar — erişimi kaybetmezsin.
+
+VPN dışından erişimi kapatmak için:
+
+```json
+{ "allow_networks": ["10.212.134.0/24"] }
+```
+
+Kendi VPN ağını öğrenmek için sunucuya bağlanıp bak:
+
+```bash
+ss -tn state established '( sport = :8787 )'      # bagli istemcilerin IP'leri
+grep "giris basarili" /var/log/pve-gdrive.log     # giris yapan adresler
+```
+
+Bu kontrol uygulamanın içindedir; firewall kurmaya gerek yok ve **SSH ile Proxmox arayüzü
+etkilenmez**. Yanlış yazarsan `/etc/pve-gdrive.conf` dosyasından düzeltip servisi yeniden başlat.
+
 ## 9. Proxmox arayüzünden erişim
 
 ### Datacenter → Notes'a link (upgrade-güvenli)

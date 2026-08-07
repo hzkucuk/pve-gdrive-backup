@@ -306,6 +306,10 @@ function render(): void {
   const ps = S.plans || [];
   if (!sel || !ps.some((p) => p.id === sel)) sel = ps.length ? ps[0].id : null;
   running = ps.filter((p) => p.running).length;
+  const tls = S.tls;
+  setHtml("tlsrozet", tls && tls.aktif
+    ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
+    : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
@@ -757,6 +761,15 @@ function openSettings(): void {
   setVal("g-tail", s.rclone_tail_lines); setVal("g-rows", s.snapshot_max_rows);
   setVal("g-logmb", s.log_max_mb); setVal("g-logkeep", s.log_keep);
   setVal("g-tmo", s.rclone_timeout_min); setChk("g-cleanup", s.allow_account_cleanup);
+  setVal("g-cert", s.ssl_cert || ""); setVal("g-key", s.ssl_key || "");
+  setVal("g-nets", (s.allow_networks || []).join(", "));
+  setChk("g-cookiesec", !!s.cookie_secure);
+  const t = S && S.tls;
+  const c = t && t.sertifika;
+  setHtml("g-tlsdurum", t && t.aktif
+    ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
+      + "</b> · veren: " + esc(c ? c.veren : "-") + " · bitiş: " + esc(c ? c.bitis : "-")
+    : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
   openM("m-set");
 }
 async function saveSettings(): Promise<void> {
@@ -773,6 +786,10 @@ async function saveSettings(): Promise<void> {
   ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
   ok = vNum("g-tmo", 0, 1440, "0-1440 dk") && ok;
   ok = vTxt("g-re", "kalıp boş olamaz") && ok;
+  const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
+  const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
+    && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
+  if (kotuNet.length) ok = bad("g-nets", "geçersiz ağ: " + kotuNet[0]) && ok; else good("g-nets");
   if (!ok) { flash("form hatalı", false); return; }
   const b: Record<string, unknown> = {
     ui_bind: val("g-bind"), ui_port: Number(val("g-port")), ui_user: val("g-user"),
@@ -781,6 +798,8 @@ async function saveSettings(): Promise<void> {
     rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
     log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),
     rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
+    ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
+    allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
     browse_roots: val("g-roots").split(",").map((x) => x.trim()).filter(Boolean),
   };
   if (val("g-pass")) b.ui_pass = val("g-pass");

@@ -1,6 +1,7 @@
 <div class="wrap">
 <header>
   <h1>🗄️ Proxmox → Google Drive Yedek</h1>
+  <span id="tlsrozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
   <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
@@ -302,6 +303,29 @@
       <div><input type="password" id="g-pass" placeholder="boş = değişmesin"></div></div>
     <div class="f"><label>Tazeleme (sn)</label><div><input type="number" min="1" id="g-refresh"><div class="errmsg" id="err-grefresh"></div></div></div>
     <div class="hint">Adres veya port değişirse servisi yeniden başlat: <code>systemctl restart pve-gdrive-ui</code></div>
+  </fieldset>
+  <fieldset><legend>HTTPS</legend>
+    <div id="g-tlsdurum" class="hint" style="margin-bottom:10px"></div>
+    <div class="f"><label class="tip" title="Sertifika dosyası. Boş bırakırsan arayüz düz HTTP çalışır.">Sertifika</label>
+      <div><input id="g-cert" placeholder="/etc/pve/local/pve-ssl.pem">
+        <div class="eg">Proxmox'un kendi sertifikası: <code>/etc/pve/local/pve-ssl.pem</code> —
+          tarayıcı uyarısı Proxmox arayüzüyle aynı olur.</div></div></div>
+    <div class="f"><label class="tip" title="Sertifikanın özel anahtarı.">Anahtar</label>
+      <div><input id="g-key" placeholder="/etc/pve/local/pve-ssl.key"></div></div>
+    <div class="f"><label class="tip" title="Çerezin yalnızca HTTPS üzerinden gönderilmesi. TLS açıkken zaten zorunlu tutulur.">Güvenli çerez</label>
+      <div><label class="cb"><input type="checkbox" id="g-cookiesec"> çerezi sadece HTTPS'te gönder</label></div></div>
+    <div class="hint">Sertifika yüklenemezse servis <b>düz HTTP ile ayakta kalır</b> ve log'a sebep yazar —
+      hatalı yol yüzünden arayüze erişimi kaybetmezsin. Değişiklik sonrası servisi yeniden başlat.</div>
+  </fieldset>
+  <fieldset><legend>Erişim kısıtlaması</legend>
+    <div class="f"><label class="tip" title="Arayüze yalnızca bu ağlardan erişilebilir. Boş bırakırsan kısıtlama olmaz.">İzinli ağlar</label>
+      <div><input id="g-nets" placeholder="10.212.134.0/24">
+        <div class="errmsg" id="err-nets"></div>
+        <div class="eg">Virgülle ayır. Örnek: <code>10.212.134.0/24</code> (VPN ağın) ·
+          <code>192.168.2.0/24, 127.0.0.1/32</code></div>
+        <div class="hint">Firewall kurmaya gerek yok — kontrol uygulamanın içinde. <b>SSH ve Proxmox
+          arayüzü bu ayardan etkilenmez</b>, yanlış yazarsan config dosyasından geri alabilirsin.
+          Boş liste = herkese açık.</div></div></div>
   </fieldset>
   <fieldset><legend>Gelişmiş</legend>
     <div class="f"><label class="tip" title="Klasör seçici yalnızca bu köklerin altını gösterir.">Gezinme kökleri</label>

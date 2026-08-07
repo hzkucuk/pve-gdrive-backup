@@ -96,6 +96,8 @@ interface Settings {
   log_tail_lines: number; rclone_timeout_min: number; dump_regex: string;
   rclone_tail_lines: number; snapshot_max_rows: number; log_max_mb: number;
   log_keep: number; stats_interval_sec: number; log_file: string; state_file: string;
+  ssl_cert: string; ssl_key: string; cookie_secure: boolean;
+  allow_networks: string[];
 }
 
 interface SmtpProfile {
@@ -111,6 +113,7 @@ interface Status {
   settings: Settings;
   smtp: SmtpProfile[];
   smtp_ready: boolean;
+  tls?: { aktif: boolean; sertifika: { konu: string; veren: string; bitis: string } | null };
   csrf: string;
   login?: boolean;
 }

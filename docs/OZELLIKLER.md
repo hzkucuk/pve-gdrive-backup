@@ -146,8 +146,34 @@ uyarısının ulaşması için.
 | `login_lockout_min` | `15` | Kilit süresi |
 | `captcha_enabled` | `true` | Giriş ekranında SVG captcha |
 | `captcha_after_fails` | `0` | `0` = her giriş, `2` = 2 hatadan sonra |
-| `cookie_secure` | `false` | HTTPS arkasındaysa `true` |
+| `ssl_cert` / `ssl_key` | Proxmox sertifikası | Doluysa arayüz **HTTPS** çalışır. Yüklenemezse HTTP'ye düşer, log'a sebep yazar |
+| `allow_networks` | `[]` | Arayüze yalnızca bu ağlardan erişilir. Boş = kısıtlama yok |
+| `cookie_secure` | `false` | TLS açıkken zaten zorunlu tutulur |
 | `trust_proxy_header` | `false` | nginx arkasındaysa `true` (`X-Forwarded-For`) |
+
+### HTTPS
+
+`ssl_cert` ve `ssl_key` doluysa arayüz doğrudan HTTPS konuşur — ters vekil veya ek paket
+gerekmez, Python'un kendi `ssl` modülü kullanılır. Varsayılan Proxmox'un kendi sertifikasıdır
+(`/etc/pve/local/pve-ssl.pem`), yani tarayıcı uyarısı Proxmox arayüzüyle aynıdır.
+
+Sertifika okunamazsa servis **düz HTTP ile ayakta kalır** ve log'a sebebi yazar; hatalı bir
+yol yüzünden arayüze erişim kaybedilmez. TLS açıkken çerez otomatik olarak `Secure`
+işaretlenir ve `Strict-Transport-Security` başlığı gönderilir.
+
+### Ağ kısıtlaması
+
+`allow_networks` doluysa yalnızca listedeki ağlardan gelen istekler işlenir, diğerleri
+**403** alır ve log'a `GUVENLIK` satırı düşer. Kontrol uygulamanın içindedir: firewall
+kurmak gerekmez, **SSH ve Proxmox arayüzü bu ayardan etkilenmez**, yanlış yazılırsa config
+dosyasından geri alınır.
+
+```json
+{ "allow_networks": ["10.212.134.0/24"] }
+```
+
+Ters vekil arkasındaysan `trust_proxy_header` açık olmalı, yoksa tüm istekler vekilin
+IP'sinden geliyor görünür.
 
 Oturum çerezi `HttpOnly` ve `SameSite=Strict`'tir, IP'ye bağlanır. Tüm POST istekleri CSRF
 jetonu ister. Yanıtlarda `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy` ve

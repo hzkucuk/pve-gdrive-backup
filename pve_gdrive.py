@@ -16,7 +16,7 @@ Komutlar:
   python3 pve_gdrive.py plans             # planlari listeler
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
-import hashlib, secrets, random, html as _html
+import hashlib, secrets, random, ssl, ipaddress, html as _html
 from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -42,8 +42,17 @@ GLOBAL_DEFAULTS = {
     "login_lockout_min": 15,      # kilit suresi
     "captcha_enabled": True,
     "captcha_after_fails": 0,     # 0 = her giriste captcha iste
-    "cookie_secure": False,       # HTTPS/ters vekil arkasindaysa true yap
+    # --- HTTPS (dogrudan, ters vekil olmadan) ---
+    # Proxmox'un kendi sertifikasi kullanilir: tarayici uyarisi PVE arayuzuyle ayni olur.
+    # Bos birakilirsa arayuz duz HTTP calisir.
+    "ssl_cert": "/etc/pve/local/pve-ssl.pem",
+    "ssl_key": "/etc/pve/local/pve-ssl.key",
+    "cookie_secure": False,       # TLS acikken otomatik olarak zorlanir
     "trust_proxy_header": False,  # X-Forwarded-For'a guvenilsin mi (nginx arkasinda true)
+    # Arayuze yalnizca bu aglardan erisilebilir. Bos liste = kisitlama yok.
+    # Firewall kurmaya gerek kalmaz; yanlis yazarsan config'ten geri alinir,
+    # SSH ve Proxmox arayuzu bu ayardan hic etkilenmez.
+    "allow_networks": [],
     "smtp_profiles": [],        # birden fazla gonderici hesap; her plan birini secer
     # --- asagidakiler eskiye uyumluluk icin; ilk acilista profile donusturulur ---
     "smtp_host": "smtp.gmail.com",
@@ -1511,6 +1520,41 @@ def browse(path):
     if not any(parent == r or parent.startswith(r + os.sep) for r in roots): parent = ""
     return {"path": p, "parent": parent, "dirs": dirs, "roots": roots, "dumps": count_dumps(p)}
 
+# ---------- TLS ----------
+TLS_AKTIF = False
+
+def ssl_context():
+    """Sertifika ve anahtar okunabiliyorsa TLS baglami dondurur, yoksa None.
+    Hata durumunda servis duz HTTP ile ayakta kalir - arayuze erisim kaybedilmesin."""
+    C = cfg()
+    cert, key = str(C.get("ssl_cert") or ""), str(C.get("ssl_key") or "")
+    if not cert or not key: return None
+    for yol in (cert, key):
+        if not os.path.exists(yol):
+            log(f"TLS kapali: dosya yok -> {yol}"); return None
+        if not os.access(yol, os.R_OK):
+            log(f"TLS kapali: okuma izni yok -> {yol}"); return None
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:!aNULL:!MD5:!DSS")
+        ctx.load_cert_chain(cert, key)
+        return ctx
+    except Exception as e:
+        log(f"TLS kapali: sertifika yuklenemedi ({e})"); return None
+
+def cert_bilgisi():
+    """Arayuzde gostermek icin sertifikanin ozeti."""
+    C = cfg(); cert = str(C.get("ssl_cert") or "")
+    if not TLS_AKTIF or not cert: return None
+    try:
+        ham = ssl._ssl._test_decode_cert(cert)
+        return {"konu": dict(x[0] for x in ham.get("subject", ()) if x).get("commonName", "-"),
+                "veren": dict(x[0] for x in ham.get("issuer", ()) if x).get("commonName", "-"),
+                "bitis": ham.get("notAfter", "-")}
+    except Exception:
+        return {"konu": "-", "veren": "-", "bitis": "-"}
+
 # ---------- KIMLIK DOGRULAMA ----------
 SESSIONS = {}     # token -> {user, ip, created, last, csrf}
 CAPTCHAS = {}     # cid   -> {code, exp}
@@ -1544,6 +1588,21 @@ def ensure_hashed_pw():
             save_cfg(C); log("UI sifresi hash'lendi (config guncellendi)")
         except Exception as e:
             log(f"sifre hash'lenemedi: {e}")
+
+def izinli_aglar():
+    aglar = []
+    for x in cfg().get("allow_networks") or []:
+        try: aglar.append(ipaddress.ip_network(str(x).strip(), strict=False))
+        except Exception: log(f"UYARI: gecersiz ag tanimi yok sayildi: {x}")
+    return aglar
+
+def ip_izinli(ip):
+    """Bos liste = herkese acik. Tanimliysa yalnizca listedeki aglar."""
+    aglar = izinli_aglar()
+    if not aglar: return True
+    try: adres = ipaddress.ip_address(str(ip))
+    except Exception: return False
+    return any(adres in a for a in aglar)
 
 def client_ip(h):
     if cfg().get("trust_proxy_header"):
@@ -1675,9 +1734,11 @@ def public_status():
                           "log_tail_lines", "ui_refresh_sec", "rclone_timeout_min", "dump_regex",
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
+                          "ssl_cert", "ssl_key", "cookie_secure", "allow_networks",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
-            "smtp_ready": bool(smtp_profiles(C))}
+            "smtp_ready": bool(smtp_profiles(C)),
+            "tls": {"aktif": TLS_AKTIF, "sertifika": cert_bilgisi()}}
 
 class H(BaseHTTPRequestHandler):
     server_version = "pve-gdrive"
@@ -1695,6 +1756,8 @@ class H(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        if TLS_AKTIF:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "script-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -1708,7 +1771,7 @@ class H(BaseHTTPRequestHandler):
         C = cfg()
         parts = [f"pgs={'' if sil else tok}", "Path=/", "HttpOnly", "SameSite=Strict"]
         if sil: parts.append("Max-Age=0")
-        if C.get("cookie_secure"): parts.append("Secure")
+        if C.get("cookie_secure") or TLS_AKTIF: parts.append("Secure")
         return ("Set-Cookie", "; ".join(parts))
 
     def _session(self):
@@ -1766,6 +1829,8 @@ class H(BaseHTTPRequestHandler):
     def do_HEAD(self):
         """Saglik kontrolu / ters vekil icin: govde yok, yalnizca basliklar."""
         try:
+            if not ip_izinli(client_ip(self)):
+                self._send(403, "text/plain; charset=utf-8", ""); return
             u = urlparse(self.path)
             kod = 200 if (u.path == "/" or self._session()) else 401
             self._send(kod, "text/html; charset=utf-8", "")
@@ -1787,7 +1852,16 @@ class H(BaseHTTPRequestHandler):
             try: self._json({"ok": False, "msg": f"sunucu hatasi: {e}"}, 500)
             except Exception: pass
 
+    def _ag_kontrol(self):
+        ip = client_ip(self)
+        if ip_izinli(ip): return True
+        log(f"GUVENLIK: izinli ag disindan istek reddedildi ({ip} -> {self.path})")
+        self._send(403, "text/plain; charset=utf-8",
+                   "Bu ağdan erişim kapalı.\n")
+        return False
+
     def _get(self):
+        if not self._ag_kontrol(): return
         u = urlparse(self.path); p = u.path; q = parse_qs(u.query)
         if p == "/captcha.svg":
             self._send(200, "image/svg+xml; charset=utf-8", captcha_svg(q.get("cid", [""])[0]))
@@ -1825,6 +1899,7 @@ class H(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", "yok")
 
     def _post(self):
+        if not self._ag_kontrol(): return
         u = urlparse(self.path); path = u.path; q = parse_qs(u.query)
         if path == "/login": return self._do_login()
         if path == "/logout":
@@ -1964,7 +2039,7 @@ def smtp_test(pid, to):
 def save_settings(data):
     C = cfg()
     for k in ("ui_bind", "ui_user", "smtp_host", "smtp_user", "mail_from", "dump_regex",
-              "log_file", "state_file"):
+              "ssl_cert", "ssl_key", "log_file", "state_file"):
         if k in data: C[k] = str(data[k])
     for k in ("ui_port", "smtp_port", "history_max", "log_tail_lines", "ui_refresh_sec",
               "rclone_tail_lines", "snapshot_max_rows", "log_keep", "stats_interval_sec",
@@ -1979,6 +2054,16 @@ def save_settings(data):
     if data.get("ui_pass"): C["ui_pass"] = str(data["ui_pass"])
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
+    if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
+    if isinstance(data.get("allow_networks"), list):
+        temiz, hatali = [], []
+        for x in data["allow_networks"]:
+            x = str(x).strip()
+            if not x: continue
+            try: ipaddress.ip_network(x, strict=False); temiz.append(x)
+            except Exception: hatali.append(x)
+        if hatali: return {"ok": False, "msg": "gecersiz ag tanimi: " + ", ".join(hatali[:3])}
+        C["allow_networks"] = temiz
     if isinstance(data.get("browse_roots"), list):
         C["browse_roots"] = [str(x) for x in data["browse_roots"] if str(x).strip()]
     save_cfg(C); log("ayarlar guncellendi")
@@ -2036,10 +2121,21 @@ def do_login(handler):
                   [handler._cookie(tok), ("Location", "/")])
 
 def serve():
+    global TLS_AKTIF
     C = cfg()
     ensure_hashed_pw()
     httpd = ThreadingHTTPServer((C["ui_bind"], int(C["ui_port"])), H)
-    log(f"web UI hazir -> http://{C['ui_bind']}:{C['ui_port']}  (kullanici: {C['ui_user']})")
+    ctx = ssl_context()
+    if ctx:
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        TLS_AKTIF = True
+    sema = "https" if TLS_AKTIF else "http"
+    log(f"web UI hazir -> {sema}://{C['ui_bind']}:{C['ui_port']}  (kullanici: {C['ui_user']})")
+    if TLS_AKTIF:
+        b = cert_bilgisi() or {}
+        log(f"TLS acik | sertifika: {b.get('konu')} | veren: {b.get('veren')} | bitis: {b.get('bitis')}")
+    else:
+        log("TLS kapali - arayuz duz HTTP. VPN disinda kullanma.")
     httpd.serve_forever()
 
 def init_conf():
@@ -2186,6 +2282,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 <div class="wrap">
 <header>
   <h1>🗄️ Proxmox → Google Drive Yedek</h1>
+  <span id="tlsrozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
   <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
@@ -2487,6 +2584,29 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input type="password" id="g-pass" placeholder="boş = değişmesin"></div></div>
     <div class="f"><label>Tazeleme (sn)</label><div><input type="number" min="1" id="g-refresh"><div class="errmsg" id="err-grefresh"></div></div></div>
     <div class="hint">Adres veya port değişirse servisi yeniden başlat: <code>systemctl restart pve-gdrive-ui</code></div>
+  </fieldset>
+  <fieldset><legend>HTTPS</legend>
+    <div id="g-tlsdurum" class="hint" style="margin-bottom:10px"></div>
+    <div class="f"><label class="tip" title="Sertifika dosyası. Boş bırakırsan arayüz düz HTTP çalışır.">Sertifika</label>
+      <div><input id="g-cert" placeholder="/etc/pve/local/pve-ssl.pem">
+        <div class="eg">Proxmox'un kendi sertifikası: <code>/etc/pve/local/pve-ssl.pem</code> —
+          tarayıcı uyarısı Proxmox arayüzüyle aynı olur.</div></div></div>
+    <div class="f"><label class="tip" title="Sertifikanın özel anahtarı.">Anahtar</label>
+      <div><input id="g-key" placeholder="/etc/pve/local/pve-ssl.key"></div></div>
+    <div class="f"><label class="tip" title="Çerezin yalnızca HTTPS üzerinden gönderilmesi. TLS açıkken zaten zorunlu tutulur.">Güvenli çerez</label>
+      <div><label class="cb"><input type="checkbox" id="g-cookiesec"> çerezi sadece HTTPS'te gönder</label></div></div>
+    <div class="hint">Sertifika yüklenemezse servis <b>düz HTTP ile ayakta kalır</b> ve log'a sebep yazar —
+      hatalı yol yüzünden arayüze erişimi kaybetmezsin. Değişiklik sonrası servisi yeniden başlat.</div>
+  </fieldset>
+  <fieldset><legend>Erişim kısıtlaması</legend>
+    <div class="f"><label class="tip" title="Arayüze yalnızca bu ağlardan erişilebilir. Boş bırakırsan kısıtlama olmaz.">İzinli ağlar</label>
+      <div><input id="g-nets" placeholder="10.212.134.0/24">
+        <div class="errmsg" id="err-nets"></div>
+        <div class="eg">Virgülle ayır. Örnek: <code>10.212.134.0/24</code> (VPN ağın) ·
+          <code>192.168.2.0/24, 127.0.0.1/32</code></div>
+        <div class="hint">Firewall kurmaya gerek yok — kontrol uygulamanın içinde. <b>SSH ve Proxmox
+          arayüzü bu ayardan etkilenmez</b>, yanlış yazarsan config dosyasından geri alabilirsin.
+          Boş liste = herkese açık.</div></div></div>
   </fieldset>
   <fieldset><legend>Gelişmiş</legend>
     <div class="f"><label class="tip" title="Klasör seçici yalnızca bu köklerin altını gösterir.">Gezinme kökleri</label>
@@ -2858,6 +2978,10 @@ function render() {
     if (!sel || !ps.some((p) => p.id === sel))
         sel = ps.length ? ps[0].id : null;
     running = ps.filter((p) => p.running).length;
+    const tls = S.tls;
+    setHtml("tlsrozet", tls && tls.aktif
+        ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
+        : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
@@ -3435,6 +3559,16 @@ function openSettings() {
     setVal("g-logkeep", s.log_keep);
     setVal("g-tmo", s.rclone_timeout_min);
     setChk("g-cleanup", s.allow_account_cleanup);
+    setVal("g-cert", s.ssl_cert || "");
+    setVal("g-key", s.ssl_key || "");
+    setVal("g-nets", (s.allow_networks || []).join(", "));
+    setChk("g-cookiesec", !!s.cookie_secure);
+    const t = S && S.tls;
+    const c = t && t.sertifika;
+    setHtml("g-tlsdurum", t && t.aktif
+        ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
+            + "</b> · veren: " + esc(c ? c.veren : "-") + " · bitiş: " + esc(c ? c.bitis : "-")
+        : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
     openM("m-set");
 }
 async function saveSettings() {
@@ -3451,6 +3585,13 @@ async function saveSettings() {
     ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
     ok = vNum("g-tmo", 0, 1440, "0-1440 dk") && ok;
     ok = vTxt("g-re", "kalıp boş olamaz") && ok;
+    const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
+    const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
+        && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
+    if (kotuNet.length)
+        ok = bad("g-nets", "geçersiz ağ: " + kotuNet[0]) && ok;
+    else
+        good("g-nets");
     if (!ok) {
         flash("form hatalı", false);
         return;
@@ -3462,6 +3603,8 @@ async function saveSettings() {
         rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
         log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),
         rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
+        ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
+        allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
         browse_roots: val("g-roots").split(",").map((x) => x.trim()).filter(Boolean),
     };
     if (val("g-pass"))
