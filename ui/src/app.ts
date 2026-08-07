@@ -98,7 +98,9 @@ const RX = {
   ip: /^(\d{1,3}\.){3}\d{1,3}$|^localhost$/,
 };
 function errBox(id: string): HTMLElement | null {
-  return document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
+  // Kutu adlari iki bicimde: e-name -> err-name, a-name -> err-aname. Ikisini de dene.
+  return document.getElementById("err-" + id.replace("-", ""))
+      || document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
 }
 function bad(id: string, msg: string): boolean {
   fld(id).classList.add("bad");
@@ -310,6 +312,11 @@ function render(): void {
   setHtml("tlsrozet", tls && tls.aktif
     ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
     : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
+  const g = S.guncelleme;
+  setHtml("uprozet", g && g.yeni_var
+    ? '<span class="pill run" title="Yeni sürüm var: ' + esc(g.uzak || "")
+      + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + " hazır</span>"
+    : '<span class="small" title="Kurulu sürüm">v' + esc(S.surum || "?") + "</span>");
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
@@ -357,6 +364,122 @@ async function delPlan(pid: string): Promise<void> {
   void refresh();
 }
 async function logout(): Promise<void> { await api("/logout", { method: "POST" }); location.reload(); }
+
+/* ---------- plan sihirbazi ---------- */
+const ADIMLAR = ["Plan", "Kaynak", "Hedef", "Saklama", "Zamanlama", "Aktarım", "Bildirim", "Özet"];
+/** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
+const ADIM_ALANLARI: string[][] = [
+  ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
+  ["e-runat", "e-wvm", "e-mage"],
+  ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
+  ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
+];
+let wAktif = 1;
+let wSihirbaz = false;
+
+function wGoster(): void {
+  Array.prototype.slice.call(document.querySelectorAll(".wstep")).forEach((d: HTMLElement) => {
+    const n = Number(d.getAttribute("data-step"));
+    d.style.display = !wSihirbaz || n === wAktif ? "" : "none";
+  });
+  el("w-adimlar").style.display = wSihirbaz ? "" : "none";
+  if (wSihirbaz) {
+    setHtml("w-adimlar", ADIMLAR.map((ad, i) => {
+      const n = i + 1;
+      const sinif = n === wAktif ? "on" : (n < wAktif ? "ok" : "");
+      return '<span class="' + sinif + '">' + n + ". " + esc(ad) + "</span>";
+    }).join(""));
+  }
+  const son = wAktif === ADIMLAR.length;
+  el("w-geri").style.display = wSihirbaz && wAktif > 1 ? "" : "none";
+  el("w-ileri").style.display = wSihirbaz && !son ? "" : "none";
+  el("w-kaydet").style.display = !wSihirbaz || son ? "" : "none";
+  if (wSihirbaz && son) wOzet();
+}
+
+/** Yalnizca verilen alanlari dogrular; digerlerini bozmadan birakir. */
+function wAdimGecerli(adim: number): boolean {
+  const alanlar = ADIM_ALANLARI[adim - 1] || [];
+  if (!alanlar.length) return true;
+  const oncekiHatalar = alanlar.filter((id) => document.getElementById(id))
+    .map((id) => [id, fld(id).classList.contains("bad")] as [string, boolean]);
+  const tumu = validatePlan();
+  if (tumu) return true;
+  // Bu adimin alanlarindan biri hatali mi?
+  const buAdimHatali = alanlar.some((id) => document.getElementById(id) && fld(id).classList.contains("bad"));
+  if (!buAdimHatali) {
+    // Hata baska adimda: bu adimin gorunumunu temizle, gecise izin ver
+    oncekiHatalar.forEach(([id, vardi]) => { if (!vardi) good(id); });
+    return true;
+  }
+  return false;
+}
+
+function wAdim(yon: number): void {
+  if (yon > 0 && !wAdimGecerli(wAktif)) {
+    flash("bu adımda eksik veya hatalı alan var", false);
+    return;
+  }
+  wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
+  wGoster();
+  el("m-edit").scrollTop = 0;
+}
+
+function wSatir(baslik: string, deger: string, uyari?: boolean): string {
+  return '<tr' + (uyari ? ' class="uyari"' : "") + "><td>" + esc(baslik) + "</td><td>"
+    + esc(deger) + "</td></tr>";
+}
+function wOzet(): void {
+  const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
+    .map((c: HTMLInputElement) => WD[Number(c.value) - 1]);
+  const bildirim = [chk("e-nsuc") ? "başarılı" : "", chk("e-nerr") ? "hata" : "",
+    chk("e-nskip") ? "atlandı" : ""].filter(Boolean).join(", ") || "hiçbiri";
+  const oto = chk("e-bwauto");
+  const hiz = oto ? ("otomatik (" + val("e-bwmin") + " – " + (val("e-bwmax") || val("e-bw")) + ")")
+    : (val("e-bwsch") ? "çizelge: " + val("e-bwsch") : val("e-bw"));
+  let h = '<table class="ozet"><tbody>';
+  h += wSatir("Plan adı", val("e-name"));
+  h += wSatir("Durum", chk("e-enabled") ? "etkin" : "kapalı (zamanlayıcı atlar)", !chk("e-enabled"));
+  h += wSatir("Kaynak", val("e-src"));
+  h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
+  h += wSatir("Saklama", val("e-kd") + " gün · misafir başına en az " + val("e-kc") + " set");
+  h += wSatir("Çöp süresi", val("e-td") + " gün sonra kalıcı silinir");
+  h += wSatir("Program", (wd.length ? wd.join(",") : "her gün") + " saat " + val("e-runat"));
+  h += wSatir("vzdump koruması", chk("e-wv")
+    ? "bekle, en fazla " + val("e-wvm") + " dk" : "beklemeden çalış", !chk("e-wv"));
+  h += wSatir("Hatada retention", chk("e-pof")
+    ? "ÇALIŞIR — yükleme başarısızsa da siler" : "çalışmaz (güvenli)", chk("e-pof"));
+  h += wSatir("Hız", hiz);
+  h += wSatir("Mail", (val("e-mail") || "—") + "  ·  " + bildirim);
+  h += wSatir("Haftalık rapor", chk("e-wr")
+    ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + " günlük dönem)"
+    : "kapalı");
+  h += "</tbody></table>";
+  const uyarilar: string[] = [];
+  if (!val("e-acct")) uyarilar.push("Google hesabı seçilmedi — 3. adıma dön.");
+  if (Number(val("e-kc")) === 0) uyarilar.push("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.");
+  if (chk("e-pof")) uyarilar.push("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir.");
+  if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
+    uyarilar.push("Bildirim seçili ama alıcı adresi boş.");
+  if (uyarilar.length) {
+    h += '<div class="hint" style="margin-top:10px;color:#ffd479">'
+      + uyarilar.map((u) => "⚠ " + esc(u)).join("<br>") + "</div>";
+  }
+  setHtml("w-ozet", h);
+}
+
+/** Hesap ekleme paneli tek bir DOM parcasidir; sihirbaz ile modal arasinda tasinir. */
+function hesapPaneliTasi(hedefId: string, gorunur: boolean): void {
+  const panel = el("hesap-ekle-panel");
+  const yuva = document.getElementById(hedefId);
+  if (yuva && panel.parentElement !== yuva) yuva.appendChild(panel);
+  panel.style.display = gorunur ? "" : "none";
+}
+function wHesapEkle(): void {
+  hesapPaneliTasi("w-hesap-yuvasi", true);
+  acctTab(1);
+  fld("a-name").focus();
+}
 
 /* ---------- plan duzenleyici ---------- */
 interface Preset {
@@ -413,7 +536,12 @@ function openEditor(pid: string | null): void {
   const p = pid && S ? S.plans.filter((x) => x.id === pid)[0] : undefined;
   EDIT = pid || null;
   dirty = false;
-  setTxt("ed-title", p ? "Plan: " + p.name : "Yeni plan");
+  wSihirbaz = !pid;                 // yeni plan: sihirbaz, mevcut plan: tek sayfa form
+  wAktif = 1;
+  setTxt("ed-title", p ? "Plan: " + p.name : "🧭 Yeni plan sihirbazı");
+  setTxt("ed-alt", p
+    ? "Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar."
+    : "Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın.");
   const d = {
     name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
     keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [] as number[],
@@ -459,6 +587,8 @@ function openEditor(pid: string | null): void {
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
   fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
   fld("e-tr").oninput = () => { ramHint(); markDirty(); };
+  hesapPaneliTasi("w-hesap-yuvasi", false);
+  wGoster();
   openM("m-edit");
 }
 
@@ -534,7 +664,10 @@ async function savePlan(): Promise<void> {
   };
   const j = await api("/api/plan/save", { method: "POST", body: JSON.stringify(body) });
   flash(j.msg || "", j.ok);
-  if (j.ok) { dirty = false; closeM("m-edit"); sel = j.id || sel; remember(); void refresh(); }
+  if (j.ok) {
+    dirty = false; wSihirbaz = false; closeM("m-edit");
+    sel = j.id || sel; remember(); void refresh();
+  }
 }
 
 /* ---------- klasor gezgini ---------- */
@@ -576,7 +709,7 @@ async function loadRemotes(selName?: string): Promise<void> {
   setTxt("e-accthint", REM.length ? REM.length + " hesap tanımlı" : "Henüz hesap yok — 'Yönet' ile ekle.");
 }
 function openAccounts(): void {
-  openM("m-acct"); acctTab(1); void renderAccounts();
+  openM("m-acct"); hesapPaneliTasi("hesap-ekle-yuvasi", true); acctTab(1); void renderAccounts();
   void api<AuthStatus>("/api/remote/auth/status").then((j) => {
     if (j.waiting && j.url) { el("a-authbox").style.display = ""; setTxt("a-url", j.url); pollAuth(); }
   });
@@ -621,7 +754,11 @@ async function acctPaste(): Promise<void> {
   const j = await api("/api/remote/add", { method: "POST",
     body: JSON.stringify({ name: val("a-name"), token: val("a-token") }) });
   flash(j.msg || "", j.ok);
-  if (j.ok) { setVal("a-token", ""); setVal("a-name", ""); void renderAccounts(); void loadRemotes(j.name); }
+  if (j.ok) {
+    setVal("a-token", ""); setVal("a-name", "");
+    void renderAccounts(); void loadRemotes(j.name);
+    if (wSihirbaz) { hesapPaneliTasi("w-hesap-yuvasi", false); good("e-acct"); markDirty(); }
+  }
 }
 async function authStart(): Promise<void> {
   if (!RX.acct.test(val("a-name").trim())) { bad("a-name", "önce geçerli bir hesap adı yaz"); return; }
@@ -646,7 +783,10 @@ function pollAuth(): void {
           body: JSON.stringify({ name: val("a-name") }) });
         flash(j.msg || "", j.ok);
         el("a-authbox").style.display = "none";
-        if (j.ok) { setVal("a-name", ""); void renderAccounts(); void loadRemotes(j.name); }
+        if (j.ok) {
+          setVal("a-name", ""); void renderAccounts(); void loadRemotes(j.name);
+          if (wSihirbaz) { hesapPaneliTasi("w-hesap-yuvasi", false); good("e-acct"); markDirty(); }
+        }
       } else if (!st.waiting) {
         window.clearInterval(authTimer);
         setTxt("a-wait", "yetkilendirme sonlandı");
@@ -763,6 +903,9 @@ function openSettings(): void {
   setVal("g-tmo", s.rclone_timeout_min); setChk("g-cleanup", s.allow_account_cleanup);
   setVal("g-cert", s.ssl_cert || ""); setVal("g-key", s.ssl_key || "");
   setVal("g-nets", (s.allow_networks || []).join(", "));
+  setChk("g-upcheck", s.update_check !== false); setChk("g-upauto", !!s.update_auto);
+  setVal("g-upurl", s.update_url || "");
+  upDurum();
   setChk("g-cookiesec", !!s.cookie_secure);
   const t = S && S.tls;
   const c = t && t.sertifika;
@@ -800,12 +943,48 @@ async function saveSettings(): Promise<void> {
     rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
     ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
     allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
+    update_check: chk("g-upcheck"), update_auto: chk("g-upauto"), update_url: val("g-upurl"),
     browse_roots: val("g-roots").split(",").map((x) => x.trim()).filter(Boolean),
   };
   if (val("g-pass")) b.ui_pass = val("g-pass");
   const j = await api("/api/settings/save", { method: "POST", body: JSON.stringify(b) });
   flash(j.msg || "", j.ok);
   if (j.ok) { closeM("m-set"); void refresh(); }
+}
+
+/* ---------- guncelleme ---------- */
+function upDurum(): void {
+  const g = S && S.guncelleme;
+  const v = (S && S.surum) || "?";
+  let h = "Kurulu sürüm: <b>v" + esc(v) + "</b>";
+  if (g && g.hata) h += ' · <span style="color:#ff9b9b">kontrol hatası: ' + esc(g.hata) + "</span>";
+  else if (g && g.yeni_var) h += ' · <span style="color:#ffd479">yeni sürüm hazır: <b>v'
+    + esc(g.uzak || "") + "</b></span>";
+  else if (g && g.uzak) h += " · güncel";
+  setHtml("g-guncel", h);
+  el("g-upbtn").style.display = g && g.yeni_var ? "" : "none";
+}
+async function upKontrol(): Promise<void> {
+  flash("kontrol ediliyor…", true);
+  const j = await api<{ ok: boolean; surum?: string; uzak?: string; yeni_var?: boolean; hata?: string }>(
+    "/api/update/check?force=1");
+  await refresh(); upDurum();
+  flash(j.hata ? "hata: " + j.hata
+    : (j.yeni_var ? "yeni sürüm var: v" + j.uzak : "güncel: v" + j.surum), !j.hata);
+}
+async function upKur(): Promise<void> {
+  if (!confirm("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n"
+    + "Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?")) return;
+  flash("indiriliyor ve doğrulanıyor…", true);
+  const j = await api("/api/update/apply", { method: "POST" });
+  flash(j.msg || "", j.ok);
+  if (j.ok) window.setTimeout(() => location.reload(), 6000);
+}
+async function upGeri(): Promise<void> {
+  if (!confirm("Önceki sürüme dönülecek. Devam edilsin mi?")) return;
+  const j = await api("/api/update/rollback", { method: "POST" });
+  flash(j.msg || "", j.ok);
+  if (j.ok) window.setTimeout(() => location.reload(), 6000);
 }
 
 /* ---------- baslangic ---------- */

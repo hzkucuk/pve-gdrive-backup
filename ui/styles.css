@@ -72,3 +72,17 @@ input[type=checkbox]{width:auto}
 .tabs button{padding:4px 10px;font-size:12px;background:#0d1117}
 .tabs button.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
 code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace,Menlo,monospace;color:#9fd0ff}
+
+/* --- plan sihirbazi --- */
+.wsteps{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 4px}
+.wsteps span{font-size:11px;padding:4px 10px;border-radius:999px;background:#0d1117;
+ border:1px solid #30363d;color:#8b97a5;white-space:nowrap}
+.wsteps span.on{background:#1f6feb;border-color:#1f6feb;color:#fff;font-weight:700}
+.wsteps span.ok{background:#1a4d2e;border-color:#2ea043;color:#7ee2a8}
+.wbaslik{font-size:14px;color:#c9d4df;margin:12px 0 2px}
+.wbaslik .small{display:block;margin-top:2px}
+.ozet{width:100%;border-collapse:collapse;font-size:13px}
+.ozet td{padding:6px 8px;border-bottom:1px solid #232b36;vertical-align:top}
+.ozet td:first-child{color:#8b97a5;width:40%;white-space:nowrap}
+.ozet td:last-child{color:#e6edf3;word-break:break-all}
+.ozet tr.uyari td{color:#ffd479}

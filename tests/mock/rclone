@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""
+Test icin sahte rclone. Gercek Drive'a hic dokunmaz, durumu bir JSON dosyasinda tutar.
+
+Ortam degiskenleri:
+  MOCK_DB    durum dosyasi (zorunlu)
+  MOCK_ARGS  cagrilan argumanlarin yazilacagi dosya (istege bagli)
+  MOCK_FAIL  hata senaryosu: copy | lstrash | about
+Desteklenen komutlar: copy, lsjson, deletefile, delete, about, cleanup, listremotes,
+                      config create/delete, rc, version
+"""
+import sys, json, os, time, re, fnmatch
+
+DB = os.environ.get("MOCK_DB", "/tmp/mockdrive.json")
+
+def load():
+    try:
+        with open(DB) as f: return json.load(f)
+    except Exception: return {}
+
+def save(d):
+    with open(DB, "w") as f: json.dump(d, f, indent=1)
+
+a = sys.argv[1:]
+cmd = a[0] if a else ""
+db = load(); db.setdefault("files", {}); db.setdefault("remotes", {"gdrive": "drive"})
+
+if os.environ.get("MOCK_ARGS"):
+    with open(os.environ["MOCK_ARGS"], "a") as f: f.write(" ".join(a) + "\n")
+
+fail = os.environ.get("MOCK_FAIL", "")
+if fail == "copy" and cmd == "copy":
+    print("upload hatasi (MOCK_FAIL)", file=sys.stderr); sys.exit(1)
+if fail == "lstrash" and cmd == "lsjson" and "--drive-trashed-only" in a:
+    print("api hatasi (MOCK_FAIL)", file=sys.stderr); sys.exit(1)
+if fail == "about" and cmd == "about":
+    print("kota okunamadi (MOCK_FAIL)", file=sys.stderr); sys.exit(1)
+
+if cmd == "version":
+    print("rclone v1.60.1-MOCK")
+elif cmd == "listremotes":
+    for ad, tip in db["remotes"].items():
+        print(f"{ad}:" + (f"       {tip}" if "--long" in a else ""))
+elif cmd == "lsjson":
+    path = a[1]; trashed = "--drive-trashed-only" in a
+    out = [{"Name": n.split("/")[-1], "Size": f["size"], "ModTime": f["mod"], "IsDir": False}
+           for n, f in db["files"].items()
+           if f["remote"] == path and bool(f.get("trashed")) == trashed]
+    print(json.dumps(out))
+elif cmd == "copy":
+    src, dst = a[1], a[2]
+    dislama = [a[i + 1] for i, x in enumerate(a) if x == "--exclude"]
+    n = 0
+    for fn in sorted(os.listdir(src)):
+        if any(fnmatch.fnmatch(fn, d) for d in dislama): continue
+        key = dst + "/" + fn
+        if key in db["files"]: continue
+        m = re.search(r"(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})", fn)
+        mod = (f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:{m.group(5)}:{m.group(6)}Z"
+               if m else "2026-08-07T00:00:00Z")
+        db["files"][key] = {"remote": dst, "size": os.path.getsize(os.path.join(src, fn)),
+                            "mod": mod, "trashed": False}
+        n += 1
+    save(db)
+    print(f"Transferred:   \t  {n} / {n}, 100%", file=sys.stderr)
+elif cmd == "deletefile":
+    key = a[1]; kalici = "--drive-use-trash=false" in a
+    if key not in db["files"]:
+        print("not found", file=sys.stderr); sys.exit(3)
+    if kalici: del db["files"][key]
+    else: db["files"][key]["trashed"] = True; db["files"][key]["tat"] = int(time.time())
+    save(db)
+elif cmd == "delete":
+    path = a[1]; sadece_cop = "--drive-trashed-only" in a; kalici = "--drive-use-trash=false" in a
+    kaliplar = [a[i + 1] for i, x in enumerate(a) if x == "--include"] or ["*"]
+    hedef = [k for k, f in db["files"].items()
+             if f["remote"] == path
+             and (f.get("trashed") if sadece_cop else not f.get("trashed"))
+             and any(fnmatch.fnmatch(k.split("/")[-1], p) for p in kaliplar)]
+    for k in hedef:
+        if kalici: del db["files"][k]
+        else: db["files"][k]["trashed"] = True
+    save(db)
+elif cmd == "about":
+    kullanilan = sum(f["size"] for f in db["files"].values())
+    cop = sum(f["size"] for f in db["files"].values() if f.get("trashed"))
+    print(json.dumps({"total": 2 * 1024**4, "used": kullanilan, "trashed": cop,
+                      "free": 2 * 1024**4 - kullanilan}))
+elif cmd == "cleanup":
+    for k in [k for k, f in db["files"].items() if f.get("trashed")]: del db["files"][k]
+    save(db)
+elif cmd == "config":
+    if len(a) > 1 and a[1] == "create":
+        db["remotes"][a[2]] = a[3]; save(db)
+    elif len(a) > 1 and a[1] == "delete":
+        db["remotes"].pop(a[2], None); save(db)
+elif cmd == "rc":
+    print(json.dumps({"bytes": 0, "totalBytes": 0, "speed": 0, "eta": None, "transfers": 0}))

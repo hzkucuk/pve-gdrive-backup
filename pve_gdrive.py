@@ -16,13 +16,14 @@ Komutlar:
   python3 pve_gdrive.py plans             # planlari listeler
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
-import hashlib, secrets, random, ssl, ipaddress, html as _html
+import hashlib, secrets, random, ssl, ipaddress, shutil, urllib.request, html as _html
 from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
+SURUM = "1.1.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -49,6 +50,15 @@ GLOBAL_DEFAULTS = {
     "ssl_key": "/etc/pve/local/pve-ssl.key",
     "cookie_secure": False,       # TLS acikken otomatik olarak zorlanir
     "trust_proxy_header": False,  # X-Forwarded-For'a guvenilsin mi (nginx arkasinda true)
+    # --- otomatik guncelleme ---
+    "update_check": True,         # gunde bir yeni surum var mi diye bak
+    "update_auto": False,         # bulununca kendiliginden kur (varsayilan: sadece bildir)
+    "update_url": "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py",
+    "update_backup_keep": 5,      # saklanacak eski surum sayisi
+    # Zamanlayici: systemd timer yerine surecin kendi icinde calissin mi.
+    # null = otomatik (konteynerde acik, systemd kurulumunda kapali)
+    "internal_scheduler": None,
+    "scheduler_interval_sec": 300,
     # Arayuze yalnizca bu aglardan erisilebilir. Bos liste = kisitlama yok.
     # Firewall kurmaya gerek kalmaz; yanlis yazarsan config'ten geri alinir,
     # SSH ve Proxmox arayuzu bu ayardan hic etkilenmez.
@@ -232,7 +242,7 @@ def norm_plan(p):
     except Exception: q["bw_auto_smooth"] = PLAN_DEFAULTS["bw_auto_smooth"]
     if not isinstance(q.get("skip_patterns"), list):
         q["skip_patterns"] = list(PLAN_DEFAULTS["skip_patterns"])
-    if not re.match(r"^\d{1,2}:\d{2}$", str(q.get("report_at", ""))): q["report_at"] = "09:00"
+    if not RE_SAAT.match(str(q.get("report_at", ""))): q["report_at"] = "09:00"
     try: q["report_day"] = min(7, max(1, int(q["report_day"])))
     except Exception: q["report_day"] = 1
     q["weekly_report"] = bool(q.get("weekly_report", True))
@@ -246,7 +256,7 @@ def norm_plan(p):
         q[k] = bool(q.get(k, PLAN_DEFAULTS[k]))
     try: q["drive_trash_days"] = max(0.0, float(q["drive_trash_days"]))
     except Exception: q["drive_trash_days"] = PLAN_DEFAULTS["drive_trash_days"]
-    if not re.match(r"^\d{1,2}:\d{2}$", str(q.get("run_at", ""))): q["run_at"] = "03:00"
+    if not RE_SAAT.match(str(q.get("run_at", ""))): q["run_at"] = "03:00"
     wd = q.get("weekdays") or []
     q["weekdays"] = sorted({int(x) for x in wd if str(x).isdigit() and 1 <= int(x) <= 7})
     q["enabled"] = bool(q.get("enabled", True))
@@ -260,6 +270,8 @@ def norm_plan(p):
     for k in ("notify_success", "notify_failure", "notify_skipped"):
         q[k] = bool(q.get(k, PLAN_DEFAULTS[k]))
     return q
+
+RE_SAAT = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 def slug(s):
     s = re.sub(r"[^a-zA-Z0-9]+", "-", str(s).lower()).strip("-")
@@ -295,7 +307,8 @@ def log(msg, plan=None):
         rotate_log(lf)
         with open(lf, "a") as f: f.write(line + "\n")
     except Exception: pass
-    print(line)
+    # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
+    if not os.environ.get("PVE_GDRIVE_QUIET"): print(line)
 
 def tail_bytes(path, maxbytes=1024 * 1024):
     """Dosyanin sadece son maxbytes'ini okur - log buyuse de bellek sabit kalir."""
@@ -1362,6 +1375,14 @@ def do_tick():
                 st = read_state()
         except Exception as e:
             log(f"plan calistirilamadi: {e}", p.get("id", "?"))
+    try:
+        d = guncelleme_kontrol()
+        if d.get("yeni_var") and cfg().get("update_auto"):
+            log("otomatik guncelleme aciik, yeni surum kuruluyor")
+            s = guncelleme_uygula()
+            log(("guncelleme: " + s.get("msg", "")) if s.get("ok") else ("guncelleme basarisiz: " + s.get("msg", "")))
+    except Exception as e:
+        log(f"guncelleme kontrolu atlandi: {e}")
     # Haftalik raporlar yedekten bagimsiz kontrol edilir: plan kapali olsa bile
     # "hic calismiyor" uyarisinin gitmesi gerekir.
     for p in cfg().get("plans", []):
@@ -1396,6 +1417,34 @@ def remote_quota(name):
     try: q = json.loads(out); q["ok"] = True; return q
     except Exception: return {"ok": False, "error": "cozumlenemedi"}
 
+AUTH_PORT = 53682
+
+def port_dolu_mu(port):
+    import socket
+    sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sk.bind(("127.0.0.1", port)); return False
+    except OSError:
+        return True
+    finally:
+        try: sk.close()
+        except Exception: pass
+
+def artik_authorize_temizle():
+    """Yarida kalmis rclone yetkilendirme sureclerini kapatir.
+    Bunlar OAuth portunu tutar ve sonraki denemeyi engeller."""
+    kapatilan = 0
+    try:
+        r = subprocess.run(["pgrep", "-af", "rclone"], capture_output=True, text=True, timeout=10)
+        for satir in r.stdout.splitlines():
+            pid, _, cmd = satir.partition(" ")
+            if ("authorize" in cmd or "config create" in cmd) and pid.isdigit():
+                try: os.kill(int(pid), 9); kapatilan += 1
+                except Exception: pass
+    except Exception: pass
+    return kapatilan
+
 def auth_start():
     """rclone'un OAuth yardimcisini baslatir. Google, tarayiciyi 127.0.0.1:53682'ye
     yonlendirdigi icin bu adres kullanicinin KENDI makinesinde acilabilir olmali;
@@ -1403,21 +1452,33 @@ def auth_start():
     auth_stop()
     try: os.remove(AUTH_OUT)
     except Exception: pass
+    tunel = f"ssh -N -L {AUTH_PORT}:127.0.0.1:{AUTH_PORT} root@{local_ip() or os.uname().nodename}"
+    if port_dolu_mu(AUTH_PORT):
+        n = artik_authorize_temizle()
+        time.sleep(1)
+        if port_dolu_mu(AUTH_PORT):
+            return {"ok": False, "url": None, "tunnel": tunel,
+                    "msg": f"{AUTH_PORT} portu dolu ve serbest birakilamadi. "
+                           f"Sunucuda kontrol et: ss -tlnp | grep {AUTH_PORT}"}
+        if n: log(f"yarida kalmis {n} rclone sureci kapatildi (OAuth portu serbest birakildi)")
     f = open(AUTH_OUT, "w")
     _AUTH["proc"] = subprocess.Popen(
         ["rclone", "authorize", "drive", "--drive-scope", "drive.file", "--auth-no-open-browser"],
         stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
     _AUTH["started"] = time.time(); _AUTH["url"] = None
-    for _ in range(40):
+    hata = ""
+    for _ in range(60):
         time.sleep(0.25)
         try: txt = open(AUTH_OUT).read()
         except Exception: txt = ""
         m = re.search(r"(http://127\.0\.0\.1:\d+/auth\?state=\S+)", txt)
         if m: _AUTH["url"] = m.group(1); break
-    host = os.uname().nodename
-    return {"ok": bool(_AUTH["url"]), "url": _AUTH["url"],
-            "tunnel": f"ssh -N -L 53682:127.0.0.1:53682 root@{local_ip() or host}",
-            "msg": "" if _AUTH["url"] else "rclone authorize baslatilamadi (log: " + AUTH_OUT + ")"}
+        me = re.search(r"^(Error:.*|.*failed.*)$", txt, re.M)
+        if me: hata = me.group(1).strip()[:200]; break
+    if not _AUTH["url"]:
+        log(f"OAuth baslatilamadi: {hata or 'zaman asimi'}")
+    return {"ok": bool(_AUTH["url"]), "url": _AUTH["url"], "tunnel": tunel,
+            "msg": "" if _AUTH["url"] else (hata or "rclone yetkilendirme baslatilamadi, log dosyasina bak")}
 
 def auth_status():
     try: txt = open(AUTH_OUT).read()
@@ -1438,6 +1499,7 @@ def auth_stop():
         try: pr.kill()
         except Exception: pass
     _AUTH["proc"] = None
+    artik_authorize_temizle()
 
 def local_ip():
     try:
@@ -1453,8 +1515,9 @@ def remote_create(name, token):
         return {"ok": False, "msg": f"'{name}' zaten var"}
     try: json.loads(token)
     except Exception: return {"ok": False, "msg": "jeton gecerli JSON degil"}
+    # --non-interactive: rclone jetonu dogrulamak icin OAuth sunucusu acip asili kalmasin
     rc, out, err = rclone(["config", "create", name, "drive", "scope=drive.file",
-                           f"token={token}"], timeout=60)
+                           f"token={token}", "--non-interactive"], timeout=60)
     if rc != 0: return {"ok": False, "msg": (err or out).strip()[:200]}
     try: os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
     except Exception: pass
@@ -1519,6 +1582,172 @@ def browse(path):
     parent = os.path.dirname(p)
     if not any(parent == r or parent.startswith(r + os.sep) for r in roots): parent = ""
     return {"path": p, "parent": parent, "dirs": dirs, "roots": roots, "dumps": count_dumps(p)}
+
+def konteyner_mi():
+    """Docker/LXC gibi bir konteynerde miyiz? Zamanlayici ve yeniden baslatma
+    davranisi buna gore degisir."""
+    if os.environ.get("PVE_GDRIVE_CONTAINER"): return True
+    if os.path.exists("/.dockerenv"): return True
+    try:
+        with open("/proc/1/cgroup") as f:
+            ic = f.read()
+        if any(x in ic for x in ("docker", "containerd", "kubepods", "lxc")): return True
+    except Exception: pass
+    try:
+        with open("/proc/1/comm") as f:
+            return f.read().strip() != "systemd"
+    except Exception: return False
+
+def ic_zamanlayici_acik():
+    v = cfg().get("internal_scheduler")
+    return konteyner_mi() if v is None else bool(v)
+
+def servisi_yeniden_baslat():
+    """systemd varsa servisi yeniden baslatir; konteynerde surecten cikar,
+    Docker'in restart politikasi ayaga kaldirir."""
+    if konteyner_mi():
+        log("guncelleme kuruldu, konteyner yeniden baslatiliyor (restart policy)")
+        threading.Timer(2.0, lambda: os._exit(0)).start()
+        return "konteyner yeniden başlatılıyor"
+    subprocess.Popen(["systemctl", "restart", "pve-gdrive-ui.service"], start_new_session=True)
+    return "servis yeniden başlatılıyor"
+
+def zamanlayici_dongusu(dur_bayragi):
+    """Konteynerde systemd timer olmadigi icin tick'i surecin kendisi calistirir."""
+    aralik = max(30, int(cfg().get("scheduler_interval_sec") or 300))
+    log(f"ic zamanlayici acik ({aralik} sn'de bir kontrol)")
+    while not dur_bayragi.is_set():
+        dur_bayragi.wait(aralik)
+        if dur_bayragi.is_set(): break
+        try: do_tick()
+        except Exception as e: log(f"zamanlayici hatasi: {e}")
+
+# ---------- OTOMATIK GUNCELLEME ----------
+# Guncelleme YALNIZCA program dosyasini degistirir. /etc/pve-gdrive.conf'a ve
+# planlara dokunulmaz; yeni ayarlar norm_plan()/load_cfg() icindeki varsayilanlardan
+# gelir, eski config otomatik gocer. Yine de her guncellemede ikisinin de yedegi alinir.
+GUNCELLEME_DURUMU = {"son_kontrol": 0, "uzak_surum": None, "hata": "", "kuruluyor": False}
+
+def surum_dizi(v):
+    try: return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3])
+    except Exception: return (0,)
+
+def surum_yeni_mi(uzak, yerel=None):
+    return surum_dizi(uzak) > surum_dizi(yerel or SURUM)
+
+def betik_yolu():
+    return os.path.abspath(getattr(sys.modules["__main__"], "__file__", __file__))
+
+def yedek_dizini():
+    d = os.path.join(os.path.dirname(cfg().get("state_file", "/var/lib/pve-gdrive/x")), "yedek")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def guncelleme_indir(url=None, zaman_asimi=30):
+    """(kaynak_metin, surum, hata). Ag hatasi programi durdurmaz."""
+    url = url or cfg().get("update_url")
+    if not url: return None, None, "guncelleme adresi tanimli degil"
+    try:
+        istek = urllib.request.Request(url, headers={"User-Agent": f"pve-gdrive/{SURUM}"})
+        with urllib.request.urlopen(istek, timeout=zaman_asimi) as y:
+            ham = y.read().decode("utf-8", "replace")
+    except Exception as e:
+        return None, None, f"indirilemedi: {e}"
+    if len(ham) < 20000 or "def do_run(" not in ham:
+        return None, None, "indirilen dosya beklenen bicimde degil"
+    m = re.search(r'^SURUM\s*=\s*"([^"]+)"', ham, re.M)
+    if not m: return None, None, "surum bilgisi bulunamadi"
+    return ham, m.group(1), ""
+
+def guncelleme_kontrol(zorla=False):
+    d = GUNCELLEME_DURUMU
+    if not zorla and not cfg().get("update_check", True):
+        return {"ok": True, "kapali": True, "surum": SURUM}
+    if not zorla and time.time() - d["son_kontrol"] < 86400:
+        return {"ok": True, "surum": SURUM, "uzak": d["uzak_surum"],
+                "yeni_var": bool(d["uzak_surum"] and surum_yeni_mi(d["uzak_surum"])),
+                "hata": d["hata"]}
+    ham, uzak, hata = guncelleme_indir()
+    d["son_kontrol"] = time.time(); d["uzak_surum"] = uzak; d["hata"] = hata
+    if hata: log(f"guncelleme kontrolu basarisiz: {hata}")
+    elif surum_yeni_mi(uzak): log(f"yeni surum var: {uzak} (kurulu: {SURUM})")
+    return {"ok": not hata, "surum": SURUM, "uzak": uzak,
+            "yeni_var": bool(uzak and surum_yeni_mi(uzak)), "hata": hata}
+
+def guncelleme_uygula(zorla=False):
+    """Indir -> dogrula -> yedekle -> kur -> servisi yeniden baslat.
+    Basarisiz olursa eski surume geri doner. Config ve planlar korunur."""
+    if GUNCELLEME_DURUMU["kuruluyor"]:
+        return {"ok": False, "msg": "guncelleme zaten suruyor"}
+    calisan = [p["id"] for p in cfg().get("plans", []) if is_running(p["id"])]
+    if calisan and not zorla:
+        return {"ok": False, "msg": "su planlar calisiyor, once bitmeli: " + ", ".join(calisan)}
+    ham, uzak, hata = guncelleme_indir()
+    if hata: return {"ok": False, "msg": hata}
+    if not surum_yeni_mi(uzak) and not zorla:
+        return {"ok": True, "msg": f"zaten guncel ({SURUM})", "surum": SURUM}
+    GUNCELLEME_DURUMU["kuruluyor"] = True
+    try:
+        hedef = betik_yolu()
+        yd = yedek_dizini(); damga = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # 1) Once yeni dosyayi gecici yere yaz ve SOZDIZIMI ile calisabilirligini dogrula
+        gecici = hedef + f".yeni-{damga}"
+        with open(gecici, "w", encoding="utf-8") as f: f.write(ham)
+        os.chmod(gecici, 0o755)
+        r = subprocess.run([sys.executable, "-m", "py_compile", gecici],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            os.remove(gecici)
+            return {"ok": False, "msg": "indirilen surum derlenmiyor, kurulmadi"}
+        ortam = dict(os.environ); ortam["PVE_GDRIVE_QUIET"] = "1"
+        r2 = subprocess.run([sys.executable, gecici, "plans"], capture_output=True,
+                            text=True, timeout=60, env=ortam)
+        if r2.returncode != 0:
+            os.remove(gecici)
+            return {"ok": False, "msg": "yeni surum mevcut config ile calismadi, kurulmadi: "
+                                        + (r2.stderr or "")[:200]}
+        # 2) Program ve config yedegi
+        prog_yedek = os.path.join(yd, f"pve_gdrive-{SURUM}-{damga}.py")
+        shutil.copy2(hedef, prog_yedek)
+        try: shutil.copy2(CONFIG_PATH, os.path.join(yd, f"config-{damga}.json"))
+        except Exception: pass
+        # 3) Yerine koy (atomik) ve servisi yeniden baslat
+        os.replace(gecici, hedef)
+        log(f"guncelleme kuruldu: {SURUM} -> {uzak} (yedek: {prog_yedek})")
+        yedek_temizle(yd)
+        nasil = servisi_yeniden_baslat()
+        return {"ok": True, "msg": f"{uzak} kuruldu, {nasil}. Planlar ve ayarlar korundu.",
+                "surum": uzak, "yedek": prog_yedek}
+    except Exception as e:
+        log(f"guncelleme HATA: {e}")
+        return {"ok": False, "msg": f"guncelleme basarisiz: {e}"}
+    finally:
+        GUNCELLEME_DURUMU["kuruluyor"] = False
+
+def yedek_temizle(yd):
+    try:
+        tut = max(1, int(cfg().get("update_backup_keep") or 5))
+        for onek in ("pve_gdrive-", "config-"):
+            dosyalar = sorted((f for f in os.listdir(yd) if f.startswith(onek)), reverse=True)
+            for f in dosyalar[tut:]:
+                try: os.remove(os.path.join(yd, f))
+                except Exception: pass
+    except Exception: pass
+
+def guncelleme_geri_al():
+    """En son yedege doner."""
+    try:
+        yd = yedek_dizini()
+        adaylar = sorted((f for f in os.listdir(yd) if f.startswith("pve_gdrive-")), reverse=True)
+        if not adaylar: return {"ok": False, "msg": "geri donulecek yedek yok"}
+        kaynak = os.path.join(yd, adaylar[0])
+        shutil.copy2(kaynak, betik_yolu())
+        os.chmod(betik_yolu(), 0o755)
+        log(f"onceki surume donuldu: {adaylar[0]}")
+        nasil = servisi_yeniden_baslat()
+        return {"ok": True, "msg": f"{adaylar[0]} geri yuklendi, {nasil}"}
+    except Exception as e:
+        return {"ok": False, "msg": f"geri alinamadi: {e}"}
 
 # ---------- TLS ----------
 TLS_AKTIF = False
@@ -1735,10 +1964,18 @@ def public_status():
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks",
+                          "update_check", "update_auto", "update_url", "update_backup_keep",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
             "smtp_ready": bool(smtp_profiles(C)),
-            "tls": {"aktif": TLS_AKTIF, "sertifika": cert_bilgisi()}}
+            "tls": {"aktif": TLS_AKTIF, "sertifika": cert_bilgisi()},
+            "surum": SURUM, "konteyner": konteyner_mi(),
+            "ic_zamanlayici": ic_zamanlayici_acik(),
+            "guncelleme": {"uzak": GUNCELLEME_DURUMU["uzak_surum"],
+                           "yeni_var": bool(GUNCELLEME_DURUMU["uzak_surum"]
+                                            and surum_yeni_mi(GUNCELLEME_DURUMU["uzak_surum"])),
+                           "otomatik": bool(cfg().get("update_auto")),
+                           "hata": GUNCELLEME_DURUMU["hata"]}}
 
 class H(BaseHTTPRequestHandler):
     server_version = "pve-gdrive"
@@ -1888,6 +2125,8 @@ class H(BaseHTTPRequestHandler):
             self._json({"remotes": rs})
         elif p == "/api/remote/auth/status":
             self._json(auth_status())
+        elif p == "/api/update/check":
+            self._json(guncelleme_kontrol(zorla=q.get("force", [""])[0] == "1"))
         elif p == "/api/ifaces":
             ifs = net_ifaces(); vars = default_iface()
             self._json({"default": vars,
@@ -1941,6 +2180,10 @@ class H(BaseHTTPRequestHandler):
                         "msg": (f"{n}: {human(qq.get('used'))} / {human(qq.get('total'))} kullanimda, "
                                 f"cop {human(qq.get('trashed'))}") if qq.get("ok")
                                else f"{n}: HATA {qq.get('error','')}"})
+        elif path == "/api/update/apply":
+            self._json(guncelleme_uygula())
+        elif path == "/api/update/rollback":
+            self._json(guncelleme_geri_al())
         elif path == "/api/smtp/save":
             self._json(smtp_save(self._body()))
         elif path == "/api/smtp/delete":
@@ -2055,6 +2298,9 @@ def save_settings(data):
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
+    for k in ("update_check", "update_auto"):
+        if k in data: C[k] = bool(data[k])
+    if data.get("update_url"): C["update_url"] = str(data["update_url"])
     if isinstance(data.get("allow_networks"), list):
         temiz, hatali = [], []
         for x in data["allow_networks"]:
@@ -2130,7 +2376,11 @@ def serve():
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         TLS_AKTIF = True
     sema = "https" if TLS_AKTIF else "http"
-    log(f"web UI hazir -> {sema}://{C['ui_bind']}:{C['ui_port']}  (kullanici: {C['ui_user']})")
+    log(f"web UI hazir -> {sema}://{C['ui_bind']}:{C['ui_port']}  (kullanici: {C['ui_user']})"
+        + (f" | surum {SURUM}" + (" | konteyner" if konteyner_mi() else "")))
+    if ic_zamanlayici_acik():
+        dur = threading.Event()
+        threading.Thread(target=zamanlayici_dongusu, args=(dur,), daemon=True).start()
     if TLS_AKTIF:
         b = cert_bilgisi() or {}
         log(f"TLS acik | sertifika: {b.get('konu')} | veren: {b.get('veren')} | bitis: {b.get('bitis')}")
@@ -2278,11 +2528,26 @@ input[type=checkbox]{width:auto}
 .tabs button.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
 code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace,Menlo,monospace;color:#9fd0ff}
 
+/* --- plan sihirbazi --- */
+.wsteps{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 4px}
+.wsteps span{font-size:11px;padding:4px 10px;border-radius:999px;background:#0d1117;
+ border:1px solid #30363d;color:#8b97a5;white-space:nowrap}
+.wsteps span.on{background:#1f6feb;border-color:#1f6feb;color:#fff;font-weight:700}
+.wsteps span.ok{background:#1a4d2e;border-color:#2ea043;color:#7ee2a8}
+.wbaslik{font-size:14px;color:#c9d4df;margin:12px 0 2px}
+.wbaslik .small{display:block;margin-top:2px}
+.ozet{width:100%;border-collapse:collapse;font-size:13px}
+.ozet td{padding:6px 8px;border-bottom:1px solid #232b36;vertical-align:top}
+.ozet td:first-child{color:#8b97a5;width:40%;white-space:nowrap}
+.ozet td:last-child{color:#e6edf3;word-break:break-all}
+.ozet tr.uyari td{color:#ffd479}
+
 </style></head><body>
 <div class="wrap">
 <header>
   <h1>🗄️ Proxmox → Google Drive Yedek</h1>
   <span id="tlsrozet"></span>
+  <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
   <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
@@ -2302,8 +2567,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 
 <div class="mask" id="m-edit"><div class="modal">
   <h2 id="ed-title">Plan</h2>
-  <div class="small">Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.</div>
-
+  <div class="small" id="ed-alt">Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.</div>
+  <div id="w-adimlar" class="wsteps"></div>
+<div class="wstep" data-step="1" style="display:none">
+  <div class="wbaslik"><b>1. Plan</b> <span class="small">Bu plana bir ad ver</span></div>
   <fieldset><legend>Hazır senaryolar</legend>
     <div class="btns">
       <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
@@ -2313,7 +2580,6 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     </div>
     <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
   </fieldset>
-
   <fieldset><legend>Genel</legend>
     <div class="f"><label class="tip" title="Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.">Plan adı</label>
       <div><input id="e-name" placeholder="Günlük VM yedeği">
@@ -2322,7 +2588,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Kapalıysa zamanlayıcı bu planı atlar. Elle 'Yedekle' ile yine çalıştırabilirsin.">Etkin</label>
       <div><label class="cb"><input type="checkbox" id="e-enabled"> zamanlayıcı bu planı çalıştırsın</label></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="2" style="display:none">
+  <div class="wbaslik"><b>2. Kaynak</b> <span class="small">Proxmox'ta hangi klasör yedeklenecek</span></div>
   <fieldset><legend>Kaynak (Proxmox)</legend>
     <div class="f"><label class="tip" title="Proxmox'un vzdump çıktılarını yazdığı klasör. Depo başına ayrı bir dump klasörü olur.">Yedek klasörü</label>
       <div><div class="inline"><input id="e-src" placeholder="/var/lib/vz/dump">
@@ -2331,20 +2599,26 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="hint" id="e-srchint"></div><div id="e-stor" class="hint"></div>
         <div class="eg">Depo <code>local</code> → <code>/var/lib/vz/dump</code> · Depo <code>Usb1Tb</code> → <code>/mnt/pve/Usb1Tb/dump</code></div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="3" style="display:none">
+  <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
   <fieldset><legend>Hedef (Google hesabı)</legend>
     <div class="f"><label class="tip" title="Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.">Hesap</label>
       <div><div class="inline"><select id="e-acct" style="flex:1"></select>
+        <button class="sm primary" onclick="wHesapEkle()">＋ Yeni hesap</button>
         <button class="sm" onclick="openAccounts()">👤 Yönet</button></div>
         <div class="errmsg" id="err-acct"></div>
         <div class="hint" id="e-accthint"></div></div></div>
+    <div id="w-hesap-yuvasi" style="margin:10px 0"></div>
     <div class="f"><label class="tip" title="Hesabın içindeki hedef klasör. Yoksa ilk çalışmada oluşturulur.">Klasör</label>
       <div><input id="e-folder" placeholder="proxmox-yedek">
         <div class="errmsg" id="err-folder"></div>
         <div class="hint"><b>Her plan farklı klasöre yazmalı.</b> Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.</div>
         <div class="eg">Örnek: <code>proxmox-yedek</code> · <code>arsiv/2026</code> · <code>pve/usb1tb</code></div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="4" style="display:none">
+  <div class="wbaslik"><b>4. Saklama</b> <span class="small">Yedekler ne kadar süre kalsın</span></div>
   <fieldset><legend>Saklama süreleri</legend>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
@@ -2356,7 +2630,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
         <div class="eg">Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin. <b>0</b> = çöpe uğramadan hemen kalıcı sil.</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="5" style="display:none">
+  <div class="wbaslik"><b>5. Zamanlama</b> <span class="small">Ne zaman çalışsın, çakışma nasıl önlensin</span></div>
   <fieldset><legend>Zamanlama</legend>
     <div class="f"><label class="tip" title="Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.">Saat</label>
       <div><input id="e-runat" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
@@ -2365,7 +2641,6 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><div class="wd" id="e-wd"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Proxmox ile çakışma koruması</legend>
     <div class="f"><label class="tip" title="Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.">vzdump'ı bekle</label>
       <div><label class="cb"><input type="checkbox" id="e-wv"> Proxmox yedeği biterken bekle</label></div></div>
@@ -2382,7 +2657,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><label class="cb"><input type="checkbox" id="e-pof"> yükleme başarısız olsa da eskileri sil</label>
         <div class="hint">⚠ <b>Kapalı bırak.</b> Açarsan yeni yedek Drive'a çıkmadan eskiler silinebilir — hem yerelde hem Drive'da yedeksiz kalma riski.</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="6" style="display:none">
+  <div class="wbaslik"><b>6. Aktarım</b> <span class="small">Hız ve kaynak kullanımı</span></div>
   <fieldset><legend>Aktarım</legend>
     <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
@@ -2400,7 +2677,6 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><label class="cb"><input type="checkbox" id="e-bwup"> sınır yalnızca yüklemeye uygulansın</label>
         <div class="hint">Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Otomatik bant genişliği</legend>
     <div class="f"><label class="tip" title="Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.">Otomatik mod</label>
       <div><label class="cb"><input type="checkbox" id="e-bwauto" onchange="bwAutoToggle()"> hattaki diğer trafiğe göre kendini ayarla</label>
@@ -2444,7 +2720,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input id="e-extra" placeholder="--tpslimit 5">
         <div class="eg">Örnek: <code>--exclude *.log</code> log dosyalarını yükleme · <code>--tpslimit 5</code> API hızını kıs</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="7" style="display:none">
+  <div class="wbaslik"><b>7. Bildirim</b> <span class="small">Kim, ne zaman haberdar olsun</span></div>
   <fieldset><legend>Bildirim</legend>
     <div class="f"><label class="tip" title="Mailin hangi hesaptan gönderileceği. Mail düğmesinden yeni profil ekleyebilirsin.">Gönderen profili</label>
       <div><div class="inline"><select id="e-smtp" style="flex:1"></select>
@@ -2460,7 +2738,6 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <label class="cb"><input type="checkbox" id="e-nskip"> ⏸ Atlanınca</label></div>
         <div class="hint">Her gün mail istemiyorsan sadece "Hata" ve "Atlandı" bırak; haftalık rapor genel durumu zaten özetler.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Haftalık rapor</legend>
     <div class="f"><label class="tip" title="Haftada bir, son dönemin özetini ve uyarıları mail atar.">Rapor gönder</label>
       <div><label class="cb"><input type="checkbox" id="e-wr"> haftalık özet raporu gönder</label>
@@ -2479,9 +2756,20 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Boş bırakırsan yukarıdaki alıcıya gider.">Rapor alıcısı</label>
       <div><input id="e-rmail" placeholder="(boş = yukarıdaki alıcı)"><div class="errmsg" id="err-rmail"></div></div></div>
   </fieldset>
-
-  <div class="mbtns"><button onclick="closeM('m-edit')">Vazgeç</button>
-    <button class="primary" onclick="savePlan()">Kaydet</button></div>
+</div>
+<div class="wstep" data-step="8" style="display:none">
+  <div class="wbaslik"><b>8. Özet</b> <span class="small">Kaydetmeden önce kontrol et</span></div>
+  <fieldset><legend>Özet</legend>
+    <div id="w-ozet"></div>
+  </fieldset>
+</div>
+  <div class="mbtns">
+    <button onclick="closeM('m-edit')">Vazgeç</button>
+    <span style="flex:1"></span>
+    <button id="w-geri" onclick="wAdim(-1)" style="display:none">‹ Geri</button>
+    <button id="w-ileri" class="primary" onclick="wAdim(1)" style="display:none">İleri ›</button>
+    <button id="w-kaydet" class="primary" onclick="savePlan()">Kaydet</button>
+  </div>
 </div></div>
 
 <div class="mask" id="m-browse"><div class="modal" style="max-width:620px">
@@ -2498,38 +2786,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <h2>👤 Google hesapları</h2>
   <div class="small">Her plan bu hesaplardan birine yazar. Başkasının hesabını da ekleyebilirsin.</div>
   <div id="a-list" style="margin-top:12px"></div>
-  <fieldset><legend>Yeni hesap ekle</legend>
-    <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
-      <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
-        <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
-    <div class="tabs" style="margin:4px 0 10px">
-      <button id="a-tab1" class="on" onclick="acctTab(1)">Tarayıcıyla yetkilendir</button>
-      <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
-    </div>
-    <div id="a-m1">
-      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
-        Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
-      <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
-        <div><input id="a-tunnel" readonly onclick="this.select()">
-          <div class="hint">Tıklayınca seçilir, kopyala-yapıştır yap.</div></div></div>
-      <div class="btns"><button class="primary" onclick="authStart()">▶ Başlat</button>
-        <button onclick="authCancel()">Vazgeç</button></div>
-      <div id="a-authbox" style="display:none;margin-top:10px">
-        <div class="hint">Bu adresi tarayıcında aç ve <b>hedef Google hesabıyla</b> giriş yap:</div>
-        <div class="crumb" id="a-url" style="margin:6px 0"></div>
-        <div class="small" id="a-wait">jeton bekleniyor…</div>
-      </div>
-    </div>
-    <div id="a-m2" style="display:none">
-      <div class="hint">Tarayıcısı olan herhangi bir bilgisayarda
-        <code>rclone authorize "drive" --drive-scope drive.file</code> çalıştır, çıkan JSON'u yapıştır.
-        Hesap sahibi bu adımı kendi bilgisayarında yapıp sana gönderebilir — şifresini paylaşması gerekmez.</div>
-      <div class="f" style="margin-top:8px"><label>Jeton (JSON)</label>
-        <div><textarea id="a-token" rows="4" placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'></textarea>
-          <div class="errmsg" id="err-atoken"></div></div></div>
-      <div class="btns"><button class="primary" onclick="acctPaste()">Ekle</button></div>
-    </div>
-  </fieldset>
+  <div id="hesap-ekle-yuvasi"></div>
   <div class="mbtns"><button onclick="closeM('m-acct')">Kapat</button></div>
 </div></div>
 
@@ -2598,6 +2855,22 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="hint">Sertifika yüklenemezse servis <b>düz HTTP ile ayakta kalır</b> ve log'a sebep yazar —
       hatalı yol yüzünden arayüze erişimi kaybetmezsin. Değişiklik sonrası servisi yeniden başlat.</div>
   </fieldset>
+  <fieldset><legend>Güncelleme</legend>
+    <div id="g-guncel" class="hint" style="margin-bottom:10px"></div>
+    <div class="f"><label class="tip" title="Günde bir kez yeni sürüm var mı diye bakar.">Kontrol et</label>
+      <div><label class="cb"><input type="checkbox" id="g-upcheck"> günlük güncelleme kontrolü</label></div></div>
+    <div class="f"><label class="tip" title="Yeni sürüm bulununca kendiliğinden kurar. Kapalıyken sadece bildirir.">Otomatik kur</label>
+      <div><label class="cb"><input type="checkbox" id="g-upauto"> bulunca kendiliğinden kur</label>
+        <div class="hint">Kurulum <b>yalnızca program dosyasını</b> değiştirir; planların ve ayarların
+          korunur, ikisinin de yedeği alınır. Çalışan bir yedek varken güncelleme yapılmaz.</div></div></div>
+    <div class="f"><label class="tip" title="Yeni sürümün indirileceği adres.">Kaynak</label>
+      <div><input id="g-upurl"></div></div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="upKontrol()">↻ Şimdi kontrol et</button>
+      <button class="sm primary" id="g-upbtn" onclick="upKur()" style="display:none">⬇ Güncellemeyi kur</button>
+      <button class="sm warn" onclick="upGeri()">↶ Önceki sürüme dön</button>
+    </div>
+  </fieldset>
   <fieldset><legend>Erişim kısıtlaması</legend>
     <div class="f"><label class="tip" title="Arayüze yalnızca bu ağlardan erişilebilir. Boş bırakırsan kısıtlama olmaz.">İzinli ağlar</label>
       <div><input id="g-nets" placeholder="10.212.134.0/24">
@@ -2637,6 +2910,40 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <button class="primary" onclick="saveSettings()">Kaydet</button></div>
 </div></div>
 
+<div id="hesap-ekle-panel" style="display:none">
+  <fieldset><legend>Yeni Google hesabı yetkilendir</legend>
+    <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
+      <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
+        <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
+    <div class="tabs" style="margin:4px 0 10px">
+      <button id="a-tab1" class="on" onclick="acctTab(1)">Tarayıcıyla yetkilendir</button>
+      <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
+    </div>
+    <div id="a-m1">
+      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
+        Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
+      <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
+        <div><input id="a-tunnel" readonly onclick="this.select()">
+          <div class="hint">Tıklayınca seçilir, kopyala-yapıştır yap.</div></div></div>
+      <div class="btns"><button class="primary" onclick="authStart()">▶ Başlat</button>
+        <button onclick="authCancel()">Vazgeç</button></div>
+      <div id="a-authbox" style="display:none;margin-top:10px">
+        <div class="hint">Bu adresi tarayıcında aç ve <b>hedef Google hesabıyla</b> giriş yap:</div>
+        <div class="crumb" id="a-url" style="margin:6px 0"></div>
+        <div class="small" id="a-wait">jeton bekleniyor…</div>
+      </div>
+    </div>
+    <div id="a-m2" style="display:none">
+      <div class="hint">Tarayıcısı olan herhangi bir bilgisayarda
+        <code>rclone authorize "drive" --drive-scope drive.file</code> çalıştır, çıkan JSON'u yapıştır.
+        Hesap sahibi bu adımı kendi bilgisayarında yapıp sana gönderebilir — şifresini paylaşması gerekmez.</div>
+      <div class="f" style="margin-top:8px"><label>Jeton (JSON)</label>
+        <div><textarea id="a-token" rows="4" placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'></textarea>
+          <div class="errmsg" id="err-atoken"></div></div></div>
+      <div class="btns"><button class="primary" onclick="acctPaste()">Ekle</button></div>
+    </div>
+  </fieldset>
+</div>
 <div class="flash" id="flash"></div>
 
 <script>
@@ -2749,7 +3056,9 @@ const RX = {
     ip: /^(\d{1,3}\.){3}\d{1,3}$|^localhost$/,
 };
 function errBox(id) {
-    return document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
+    // Kutu adlari iki bicimde: e-name -> err-name, a-name -> err-aname. Ikisini de dene.
+    return document.getElementById("err-" + id.replace("-", ""))
+        || document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
 }
 function bad(id, msg) {
     fld(id).classList.add("bad");
@@ -2982,6 +3291,11 @@ function render() {
     setHtml("tlsrozet", tls && tls.aktif
         ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
         : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
+    const g = S.guncelleme;
+    setHtml("uprozet", g && g.yeni_var
+        ? '<span class="pill run" title="Yeni sürüm var: ' + esc(g.uzak || "")
+            + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + " hazır</span>"
+        : '<span class="small" title="Kurulu sürüm">v' + esc(S.surum || "?") + "</span>");
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
@@ -3039,6 +3353,124 @@ async function delPlan(pid) {
     void refresh();
 }
 async function logout() { await api("/logout", { method: "POST" }); location.reload(); }
+/* ---------- plan sihirbazi ---------- */
+const ADIMLAR = ["Plan", "Kaynak", "Hedef", "Saklama", "Zamanlama", "Aktarım", "Bildirim", "Özet"];
+/** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
+const ADIM_ALANLARI = [
+    ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
+    ["e-runat", "e-wvm", "e-mage"],
+    ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
+    ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
+];
+let wAktif = 1;
+let wSihirbaz = false;
+function wGoster() {
+    Array.prototype.slice.call(document.querySelectorAll(".wstep")).forEach((d) => {
+        const n = Number(d.getAttribute("data-step"));
+        d.style.display = !wSihirbaz || n === wAktif ? "" : "none";
+    });
+    el("w-adimlar").style.display = wSihirbaz ? "" : "none";
+    if (wSihirbaz) {
+        setHtml("w-adimlar", ADIMLAR.map((ad, i) => {
+            const n = i + 1;
+            const sinif = n === wAktif ? "on" : (n < wAktif ? "ok" : "");
+            return '<span class="' + sinif + '">' + n + ". " + esc(ad) + "</span>";
+        }).join(""));
+    }
+    const son = wAktif === ADIMLAR.length;
+    el("w-geri").style.display = wSihirbaz && wAktif > 1 ? "" : "none";
+    el("w-ileri").style.display = wSihirbaz && !son ? "" : "none";
+    el("w-kaydet").style.display = !wSihirbaz || son ? "" : "none";
+    if (wSihirbaz && son)
+        wOzet();
+}
+/** Yalnizca verilen alanlari dogrular; digerlerini bozmadan birakir. */
+function wAdimGecerli(adim) {
+    const alanlar = ADIM_ALANLARI[adim - 1] || [];
+    if (!alanlar.length)
+        return true;
+    const oncekiHatalar = alanlar.filter((id) => document.getElementById(id))
+        .map((id) => [id, fld(id).classList.contains("bad")]);
+    const tumu = validatePlan();
+    if (tumu)
+        return true;
+    // Bu adimin alanlarindan biri hatali mi?
+    const buAdimHatali = alanlar.some((id) => document.getElementById(id) && fld(id).classList.contains("bad"));
+    if (!buAdimHatali) {
+        // Hata baska adimda: bu adimin gorunumunu temizle, gecise izin ver
+        oncekiHatalar.forEach(([id, vardi]) => { if (!vardi)
+            good(id); });
+        return true;
+    }
+    return false;
+}
+function wAdim(yon) {
+    if (yon > 0 && !wAdimGecerli(wAktif)) {
+        flash("bu adımda eksik veya hatalı alan var", false);
+        return;
+    }
+    wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
+    wGoster();
+    el("m-edit").scrollTop = 0;
+}
+function wSatir(baslik, deger, uyari) {
+    return '<tr' + (uyari ? ' class="uyari"' : "") + "><td>" + esc(baslik) + "</td><td>"
+        + esc(deger) + "</td></tr>";
+}
+function wOzet() {
+    const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
+        .map((c) => WD[Number(c.value) - 1]);
+    const bildirim = [chk("e-nsuc") ? "başarılı" : "", chk("e-nerr") ? "hata" : "",
+        chk("e-nskip") ? "atlandı" : ""].filter(Boolean).join(", ") || "hiçbiri";
+    const oto = chk("e-bwauto");
+    const hiz = oto ? ("otomatik (" + val("e-bwmin") + " – " + (val("e-bwmax") || val("e-bw")) + ")")
+        : (val("e-bwsch") ? "çizelge: " + val("e-bwsch") : val("e-bw"));
+    let h = '<table class="ozet"><tbody>';
+    h += wSatir("Plan adı", val("e-name"));
+    h += wSatir("Durum", chk("e-enabled") ? "etkin" : "kapalı (zamanlayıcı atlar)", !chk("e-enabled"));
+    h += wSatir("Kaynak", val("e-src"));
+    h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
+    h += wSatir("Saklama", val("e-kd") + " gün · misafir başına en az " + val("e-kc") + " set");
+    h += wSatir("Çöp süresi", val("e-td") + " gün sonra kalıcı silinir");
+    h += wSatir("Program", (wd.length ? wd.join(",") : "her gün") + " saat " + val("e-runat"));
+    h += wSatir("vzdump koruması", chk("e-wv")
+        ? "bekle, en fazla " + val("e-wvm") + " dk" : "beklemeden çalış", !chk("e-wv"));
+    h += wSatir("Hatada retention", chk("e-pof")
+        ? "ÇALIŞIR — yükleme başarısızsa da siler" : "çalışmaz (güvenli)", chk("e-pof"));
+    h += wSatir("Hız", hiz);
+    h += wSatir("Mail", (val("e-mail") || "—") + "  ·  " + bildirim);
+    h += wSatir("Haftalık rapor", chk("e-wr")
+        ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + " günlük dönem)"
+        : "kapalı");
+    h += "</tbody></table>";
+    const uyarilar = [];
+    if (!val("e-acct"))
+        uyarilar.push("Google hesabı seçilmedi — 3. adıma dön.");
+    if (Number(val("e-kc")) === 0)
+        uyarilar.push("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.");
+    if (chk("e-pof"))
+        uyarilar.push("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir.");
+    if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
+        uyarilar.push("Bildirim seçili ama alıcı adresi boş.");
+    if (uyarilar.length) {
+        h += '<div class="hint" style="margin-top:10px;color:#ffd479">'
+            + uyarilar.map((u) => "⚠ " + esc(u)).join("<br>") + "</div>";
+    }
+    setHtml("w-ozet", h);
+}
+/** Hesap ekleme paneli tek bir DOM parcasidir; sihirbaz ile modal arasinda tasinir. */
+function hesapPaneliTasi(hedefId, gorunur) {
+    const panel = el("hesap-ekle-panel");
+    const yuva = document.getElementById(hedefId);
+    if (yuva && panel.parentElement !== yuva)
+        yuva.appendChild(panel);
+    panel.style.display = gorunur ? "" : "none";
+}
+function wHesapEkle() {
+    hesapPaneliTasi("w-hesap-yuvasi", true);
+    acctTab(1);
+    fld("a-name").focus();
+}
 const PRESETS = {
     gunluk: { keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
         bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", min_age_min: 10,
@@ -3102,7 +3534,12 @@ function openEditor(pid) {
     const p = pid && S ? S.plans.filter((x) => x.id === pid)[0] : undefined;
     EDIT = pid || null;
     dirty = false;
-    setTxt("ed-title", p ? "Plan: " + p.name : "Yeni plan");
+    wSihirbaz = !pid; // yeni plan: sihirbaz, mevcut plan: tek sayfa form
+    wAktif = 1;
+    setTxt("ed-title", p ? "Plan: " + p.name : "🧭 Yeni plan sihirbazı");
+    setTxt("ed-alt", p
+        ? "Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar."
+        : "Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın.");
     const d = {
         name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
         keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
@@ -3169,6 +3606,8 @@ function openEditor(pid) {
         .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
     fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
     fld("e-tr").oninput = () => { ramHint(); markDirty(); };
+    hesapPaneliTasi("w-hesap-yuvasi", false);
+    wGoster();
     openM("m-edit");
 }
 function validatePlan() {
@@ -3252,6 +3691,7 @@ async function savePlan() {
     flash(j.msg || "", j.ok);
     if (j.ok) {
         dirty = false;
+        wSihirbaz = false;
         closeM("m-edit");
         sel = j.id || sel;
         remember();
@@ -3305,6 +3745,7 @@ async function loadRemotes(selName) {
 }
 function openAccounts() {
     openM("m-acct");
+    hesapPaneliTasi("hesap-ekle-yuvasi", true);
     acctTab(1);
     void renderAccounts();
     void api("/api/remote/auth/status").then((j) => {
@@ -3372,6 +3813,11 @@ async function acctPaste() {
         setVal("a-name", "");
         void renderAccounts();
         void loadRemotes(j.name);
+        if (wSihirbaz) {
+            hesapPaneliTasi("w-hesap-yuvasi", false);
+            good("e-acct");
+            markDirty();
+        }
     }
 }
 async function authStart() {
@@ -3407,6 +3853,11 @@ function pollAuth() {
                     setVal("a-name", "");
                     void renderAccounts();
                     void loadRemotes(j.name);
+                    if (wSihirbaz) {
+                        hesapPaneliTasi("w-hesap-yuvasi", false);
+                        good("e-acct");
+                        markDirty();
+                    }
                 }
             }
             else if (!st.waiting) {
@@ -3562,6 +4013,10 @@ function openSettings() {
     setVal("g-cert", s.ssl_cert || "");
     setVal("g-key", s.ssl_key || "");
     setVal("g-nets", (s.allow_networks || []).join(", "));
+    setChk("g-upcheck", s.update_check !== false);
+    setChk("g-upauto", !!s.update_auto);
+    setVal("g-upurl", s.update_url || "");
+    upDurum();
     setChk("g-cookiesec", !!s.cookie_secure);
     const t = S && S.tls;
     const c = t && t.sertifika;
@@ -3605,6 +4060,7 @@ async function saveSettings() {
         rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
         ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
         allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
+        update_check: chk("g-upcheck"), update_auto: chk("g-upauto"), update_url: val("g-upurl"),
         browse_roots: val("g-roots").split(",").map((x) => x.trim()).filter(Boolean),
     };
     if (val("g-pass"))
@@ -3615,6 +4071,47 @@ async function saveSettings() {
         closeM("m-set");
         void refresh();
     }
+}
+/* ---------- guncelleme ---------- */
+function upDurum() {
+    const g = S && S.guncelleme;
+    const v = (S && S.surum) || "?";
+    let h = "Kurulu sürüm: <b>v" + esc(v) + "</b>";
+    if (g && g.hata)
+        h += ' · <span style="color:#ff9b9b">kontrol hatası: ' + esc(g.hata) + "</span>";
+    else if (g && g.yeni_var)
+        h += ' · <span style="color:#ffd479">yeni sürüm hazır: <b>v'
+            + esc(g.uzak || "") + "</b></span>";
+    else if (g && g.uzak)
+        h += " · güncel";
+    setHtml("g-guncel", h);
+    el("g-upbtn").style.display = g && g.yeni_var ? "" : "none";
+}
+async function upKontrol() {
+    flash("kontrol ediliyor…", true);
+    const j = await api("/api/update/check?force=1");
+    await refresh();
+    upDurum();
+    flash(j.hata ? "hata: " + j.hata
+        : (j.yeni_var ? "yeni sürüm var: v" + j.uzak : "güncel: v" + j.surum), !j.hata);
+}
+async function upKur() {
+    if (!confirm("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n"
+        + "Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?"))
+        return;
+    flash("indiriliyor ve doğrulanıyor…", true);
+    const j = await api("/api/update/apply", { method: "POST" });
+    flash(j.msg || "", j.ok);
+    if (j.ok)
+        window.setTimeout(() => location.reload(), 6000);
+}
+async function upGeri() {
+    if (!confirm("Önceki sürüme dönülecek. Devam edilsin mi?"))
+        return;
+    const j = await api("/api/update/rollback", { method: "POST" });
+    flash(j.msg || "", j.ok);
+    if (j.ok)
+        window.setTimeout(() => location.reload(), 6000);
 }
 /* ---------- baslangic ---------- */
 Array.prototype.slice.call(document.querySelectorAll(".mask")).forEach((m) => {
@@ -3664,6 +4161,11 @@ def main():
             if pid and p["id"] != pid: continue
             put_pstate(p["id"], update_snapshot(p)); print("ok:", p["id"])
     elif cmd == "status": print(json.dumps(public_status(), ensure_ascii=False, indent=2))
+    elif cmd in ("version", "--version", "-V"): print(SURUM)
+    elif cmd == "update":
+        if "--check" in a: print(json.dumps(guncelleme_kontrol(zorla=True), ensure_ascii=False, indent=2))
+        elif "--rollback" in a: print(guncelleme_geri_al()["msg"])
+        else: print(guncelleme_uygula(zorla="--force" in a)["msg"])
     elif cmd == "plans":
         for p in cfg().get("plans", []):
             nr = next_run(p)

@@ -2,6 +2,7 @@
 <header>
   <h1>🗄️ Proxmox → Google Drive Yedek</h1>
   <span id="tlsrozet"></span>
+  <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
   <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
@@ -21,8 +22,10 @@
 
 <div class="mask" id="m-edit"><div class="modal">
   <h2 id="ed-title">Plan</h2>
-  <div class="small">Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.</div>
-
+  <div class="small" id="ed-alt">Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.</div>
+  <div id="w-adimlar" class="wsteps"></div>
+<div class="wstep" data-step="1" style="display:none">
+  <div class="wbaslik"><b>1. Plan</b> <span class="small">Bu plana bir ad ver</span></div>
   <fieldset><legend>Hazır senaryolar</legend>
     <div class="btns">
       <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
@@ -32,7 +35,6 @@
     </div>
     <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
   </fieldset>
-
   <fieldset><legend>Genel</legend>
     <div class="f"><label class="tip" title="Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.">Plan adı</label>
       <div><input id="e-name" placeholder="Günlük VM yedeği">
@@ -41,7 +43,9 @@
     <div class="f"><label class="tip" title="Kapalıysa zamanlayıcı bu planı atlar. Elle 'Yedekle' ile yine çalıştırabilirsin.">Etkin</label>
       <div><label class="cb"><input type="checkbox" id="e-enabled"> zamanlayıcı bu planı çalıştırsın</label></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="2" style="display:none">
+  <div class="wbaslik"><b>2. Kaynak</b> <span class="small">Proxmox'ta hangi klasör yedeklenecek</span></div>
   <fieldset><legend>Kaynak (Proxmox)</legend>
     <div class="f"><label class="tip" title="Proxmox'un vzdump çıktılarını yazdığı klasör. Depo başına ayrı bir dump klasörü olur.">Yedek klasörü</label>
       <div><div class="inline"><input id="e-src" placeholder="/var/lib/vz/dump">
@@ -50,20 +54,26 @@
         <div class="hint" id="e-srchint"></div><div id="e-stor" class="hint"></div>
         <div class="eg">Depo <code>local</code> → <code>/var/lib/vz/dump</code> · Depo <code>Usb1Tb</code> → <code>/mnt/pve/Usb1Tb/dump</code></div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="3" style="display:none">
+  <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
   <fieldset><legend>Hedef (Google hesabı)</legend>
     <div class="f"><label class="tip" title="Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.">Hesap</label>
       <div><div class="inline"><select id="e-acct" style="flex:1"></select>
+        <button class="sm primary" onclick="wHesapEkle()">＋ Yeni hesap</button>
         <button class="sm" onclick="openAccounts()">👤 Yönet</button></div>
         <div class="errmsg" id="err-acct"></div>
         <div class="hint" id="e-accthint"></div></div></div>
+    <div id="w-hesap-yuvasi" style="margin:10px 0"></div>
     <div class="f"><label class="tip" title="Hesabın içindeki hedef klasör. Yoksa ilk çalışmada oluşturulur.">Klasör</label>
       <div><input id="e-folder" placeholder="proxmox-yedek">
         <div class="errmsg" id="err-folder"></div>
         <div class="hint"><b>Her plan farklı klasöre yazmalı.</b> Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.</div>
         <div class="eg">Örnek: <code>proxmox-yedek</code> · <code>arsiv/2026</code> · <code>pve/usb1tb</code></div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="4" style="display:none">
+  <div class="wbaslik"><b>4. Saklama</b> <span class="small">Yedekler ne kadar süre kalsın</span></div>
   <fieldset><legend>Saklama süreleri</legend>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
@@ -75,7 +85,9 @@
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
         <div class="eg">Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin. <b>0</b> = çöpe uğramadan hemen kalıcı sil.</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="5" style="display:none">
+  <div class="wbaslik"><b>5. Zamanlama</b> <span class="small">Ne zaman çalışsın, çakışma nasıl önlensin</span></div>
   <fieldset><legend>Zamanlama</legend>
     <div class="f"><label class="tip" title="Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.">Saat</label>
       <div><input id="e-runat" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
@@ -84,7 +96,6 @@
       <div><div class="wd" id="e-wd"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Proxmox ile çakışma koruması</legend>
     <div class="f"><label class="tip" title="Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.">vzdump'ı bekle</label>
       <div><label class="cb"><input type="checkbox" id="e-wv"> Proxmox yedeği biterken bekle</label></div></div>
@@ -101,7 +112,9 @@
       <div><label class="cb"><input type="checkbox" id="e-pof"> yükleme başarısız olsa da eskileri sil</label>
         <div class="hint">⚠ <b>Kapalı bırak.</b> Açarsan yeni yedek Drive'a çıkmadan eskiler silinebilir — hem yerelde hem Drive'da yedeksiz kalma riski.</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="6" style="display:none">
+  <div class="wbaslik"><b>6. Aktarım</b> <span class="small">Hız ve kaynak kullanımı</span></div>
   <fieldset><legend>Aktarım</legend>
     <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
@@ -119,7 +132,6 @@
       <div><label class="cb"><input type="checkbox" id="e-bwup"> sınır yalnızca yüklemeye uygulansın</label>
         <div class="hint">Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Otomatik bant genişliği</legend>
     <div class="f"><label class="tip" title="Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.">Otomatik mod</label>
       <div><label class="cb"><input type="checkbox" id="e-bwauto" onchange="bwAutoToggle()"> hattaki diğer trafiğe göre kendini ayarla</label>
@@ -163,7 +175,9 @@
       <div><input id="e-extra" placeholder="--tpslimit 5">
         <div class="eg">Örnek: <code>--exclude *.log</code> log dosyalarını yükleme · <code>--tpslimit 5</code> API hızını kıs</div></div></div>
   </fieldset>
-
+</div>
+<div class="wstep" data-step="7" style="display:none">
+  <div class="wbaslik"><b>7. Bildirim</b> <span class="small">Kim, ne zaman haberdar olsun</span></div>
   <fieldset><legend>Bildirim</legend>
     <div class="f"><label class="tip" title="Mailin hangi hesaptan gönderileceği. Mail düğmesinden yeni profil ekleyebilirsin.">Gönderen profili</label>
       <div><div class="inline"><select id="e-smtp" style="flex:1"></select>
@@ -179,7 +193,6 @@
         <label class="cb"><input type="checkbox" id="e-nskip"> ⏸ Atlanınca</label></div>
         <div class="hint">Her gün mail istemiyorsan sadece "Hata" ve "Atlandı" bırak; haftalık rapor genel durumu zaten özetler.</div></div></div>
   </fieldset>
-
   <fieldset><legend>Haftalık rapor</legend>
     <div class="f"><label class="tip" title="Haftada bir, son dönemin özetini ve uyarıları mail atar.">Rapor gönder</label>
       <div><label class="cb"><input type="checkbox" id="e-wr"> haftalık özet raporu gönder</label>
@@ -198,9 +211,20 @@
     <div class="f"><label class="tip" title="Boş bırakırsan yukarıdaki alıcıya gider.">Rapor alıcısı</label>
       <div><input id="e-rmail" placeholder="(boş = yukarıdaki alıcı)"><div class="errmsg" id="err-rmail"></div></div></div>
   </fieldset>
-
-  <div class="mbtns"><button onclick="closeM('m-edit')">Vazgeç</button>
-    <button class="primary" onclick="savePlan()">Kaydet</button></div>
+</div>
+<div class="wstep" data-step="8" style="display:none">
+  <div class="wbaslik"><b>8. Özet</b> <span class="small">Kaydetmeden önce kontrol et</span></div>
+  <fieldset><legend>Özet</legend>
+    <div id="w-ozet"></div>
+  </fieldset>
+</div>
+  <div class="mbtns">
+    <button onclick="closeM('m-edit')">Vazgeç</button>
+    <span style="flex:1"></span>
+    <button id="w-geri" onclick="wAdim(-1)" style="display:none">‹ Geri</button>
+    <button id="w-ileri" class="primary" onclick="wAdim(1)" style="display:none">İleri ›</button>
+    <button id="w-kaydet" class="primary" onclick="savePlan()">Kaydet</button>
+  </div>
 </div></div>
 
 <div class="mask" id="m-browse"><div class="modal" style="max-width:620px">
@@ -217,38 +241,7 @@
   <h2>👤 Google hesapları</h2>
   <div class="small">Her plan bu hesaplardan birine yazar. Başkasının hesabını da ekleyebilirsin.</div>
   <div id="a-list" style="margin-top:12px"></div>
-  <fieldset><legend>Yeni hesap ekle</legend>
-    <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
-      <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
-        <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
-    <div class="tabs" style="margin:4px 0 10px">
-      <button id="a-tab1" class="on" onclick="acctTab(1)">Tarayıcıyla yetkilendir</button>
-      <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
-    </div>
-    <div id="a-m1">
-      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
-        Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
-      <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
-        <div><input id="a-tunnel" readonly onclick="this.select()">
-          <div class="hint">Tıklayınca seçilir, kopyala-yapıştır yap.</div></div></div>
-      <div class="btns"><button class="primary" onclick="authStart()">▶ Başlat</button>
-        <button onclick="authCancel()">Vazgeç</button></div>
-      <div id="a-authbox" style="display:none;margin-top:10px">
-        <div class="hint">Bu adresi tarayıcında aç ve <b>hedef Google hesabıyla</b> giriş yap:</div>
-        <div class="crumb" id="a-url" style="margin:6px 0"></div>
-        <div class="small" id="a-wait">jeton bekleniyor…</div>
-      </div>
-    </div>
-    <div id="a-m2" style="display:none">
-      <div class="hint">Tarayıcısı olan herhangi bir bilgisayarda
-        <code>rclone authorize "drive" --drive-scope drive.file</code> çalıştır, çıkan JSON'u yapıştır.
-        Hesap sahibi bu adımı kendi bilgisayarında yapıp sana gönderebilir — şifresini paylaşması gerekmez.</div>
-      <div class="f" style="margin-top:8px"><label>Jeton (JSON)</label>
-        <div><textarea id="a-token" rows="4" placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'></textarea>
-          <div class="errmsg" id="err-atoken"></div></div></div>
-      <div class="btns"><button class="primary" onclick="acctPaste()">Ekle</button></div>
-    </div>
-  </fieldset>
+  <div id="hesap-ekle-yuvasi"></div>
   <div class="mbtns"><button onclick="closeM('m-acct')">Kapat</button></div>
 </div></div>
 
@@ -317,6 +310,22 @@
     <div class="hint">Sertifika yüklenemezse servis <b>düz HTTP ile ayakta kalır</b> ve log'a sebep yazar —
       hatalı yol yüzünden arayüze erişimi kaybetmezsin. Değişiklik sonrası servisi yeniden başlat.</div>
   </fieldset>
+  <fieldset><legend>Güncelleme</legend>
+    <div id="g-guncel" class="hint" style="margin-bottom:10px"></div>
+    <div class="f"><label class="tip" title="Günde bir kez yeni sürüm var mı diye bakar.">Kontrol et</label>
+      <div><label class="cb"><input type="checkbox" id="g-upcheck"> günlük güncelleme kontrolü</label></div></div>
+    <div class="f"><label class="tip" title="Yeni sürüm bulununca kendiliğinden kurar. Kapalıyken sadece bildirir.">Otomatik kur</label>
+      <div><label class="cb"><input type="checkbox" id="g-upauto"> bulunca kendiliğinden kur</label>
+        <div class="hint">Kurulum <b>yalnızca program dosyasını</b> değiştirir; planların ve ayarların
+          korunur, ikisinin de yedeği alınır. Çalışan bir yedek varken güncelleme yapılmaz.</div></div></div>
+    <div class="f"><label class="tip" title="Yeni sürümün indirileceği adres.">Kaynak</label>
+      <div><input id="g-upurl"></div></div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="upKontrol()">↻ Şimdi kontrol et</button>
+      <button class="sm primary" id="g-upbtn" onclick="upKur()" style="display:none">⬇ Güncellemeyi kur</button>
+      <button class="sm warn" onclick="upGeri()">↶ Önceki sürüme dön</button>
+    </div>
+  </fieldset>
   <fieldset><legend>Erişim kısıtlaması</legend>
     <div class="f"><label class="tip" title="Arayüze yalnızca bu ağlardan erişilebilir. Boş bırakırsan kısıtlama olmaz.">İzinli ağlar</label>
       <div><input id="g-nets" placeholder="10.212.134.0/24">
@@ -356,4 +365,38 @@
     <button class="primary" onclick="saveSettings()">Kaydet</button></div>
 </div></div>
 
+<div id="hesap-ekle-panel" style="display:none">
+  <fieldset><legend>Yeni Google hesabı yetkilendir</legend>
+    <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
+      <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
+        <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
+    <div class="tabs" style="margin:4px 0 10px">
+      <button id="a-tab1" class="on" onclick="acctTab(1)">Tarayıcıyla yetkilendir</button>
+      <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
+    </div>
+    <div id="a-m1">
+      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
+        Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
+      <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
+        <div><input id="a-tunnel" readonly onclick="this.select()">
+          <div class="hint">Tıklayınca seçilir, kopyala-yapıştır yap.</div></div></div>
+      <div class="btns"><button class="primary" onclick="authStart()">▶ Başlat</button>
+        <button onclick="authCancel()">Vazgeç</button></div>
+      <div id="a-authbox" style="display:none;margin-top:10px">
+        <div class="hint">Bu adresi tarayıcında aç ve <b>hedef Google hesabıyla</b> giriş yap:</div>
+        <div class="crumb" id="a-url" style="margin:6px 0"></div>
+        <div class="small" id="a-wait">jeton bekleniyor…</div>
+      </div>
+    </div>
+    <div id="a-m2" style="display:none">
+      <div class="hint">Tarayıcısı olan herhangi bir bilgisayarda
+        <code>rclone authorize "drive" --drive-scope drive.file</code> çalıştır, çıkan JSON'u yapıştır.
+        Hesap sahibi bu adımı kendi bilgisayarında yapıp sana gönderebilir — şifresini paylaşması gerekmez.</div>
+      <div class="f" style="margin-top:8px"><label>Jeton (JSON)</label>
+        <div><textarea id="a-token" rows="4" placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'></textarea>
+          <div class="errmsg" id="err-atoken"></div></div></div>
+      <div class="btns"><button class="primary" onclick="acctPaste()">Ekle</button></div>
+    </div>
+  </fieldset>
+</div>
 <div class="flash" id="flash"></div>

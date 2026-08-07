@@ -1,0 +1,8 @@
+ui/node_modules/
+ui/dist/
+tests/
+docs/
+.git/
+*.log
+*-state.json
+progress-*.json

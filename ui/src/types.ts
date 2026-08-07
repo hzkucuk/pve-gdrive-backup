@@ -97,6 +97,7 @@ interface Settings {
   rclone_tail_lines: number; snapshot_max_rows: number; log_max_mb: number;
   log_keep: number; stats_interval_sec: number; log_file: string; state_file: string;
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;
+  update_check: boolean; update_auto: boolean; update_url: string; update_backup_keep: number;
   allow_networks: string[];
 }
 
@@ -114,6 +115,8 @@ interface Status {
   smtp: SmtpProfile[];
   smtp_ready: boolean;
   tls?: { aktif: boolean; sertifika: { konu: string; veren: string; bitis: string } | null };
+  surum?: string;
+  guncelleme?: { uzak: string | null; yeni_var: boolean; otomatik: boolean; hata: string };
   csrf: string;
   login?: boolean;
 }

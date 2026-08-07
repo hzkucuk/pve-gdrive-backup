@@ -1,0 +1,3 @@
+#!/bin/sh
+case "$*" in *vzdump*) [ -n "$MOCK_VZDUMP" ] && { echo 4242; exit 0; };; esac
+exit 1
