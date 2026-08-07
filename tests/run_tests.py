@@ -439,6 +439,30 @@ def t_ag():
         dogru(G.ip_izinli("8.8.8.8"), "bos liste = kisitlama yok")
     finally: o.temizle()
 
+@test("sunucunun yerel agi her zaman izinlidir", "erisim")
+def t_lan_acik():
+    """Kurulumu VPN'den yapip sonra yerel agdan girmek isteyen kullanici
+    kendini disarida birakmasin diye yerel ag kurala dahildir."""
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["allow_networks"] = ["10.212.134.0/24"]; c["lan_hep_acik"] = True
+        o.yaz_cfg(c)
+        G = o.modul()
+        import ipaddress
+        G._LAN_ONBELLEK.update(zaman=time.time(),
+                               aglar=[ipaddress.ip_network("192.168.2.0/24")])
+        dogru(G.ip_izinli("10.212.134.5"), "VPN agi izinli")
+        dogru(G.ip_izinli("192.168.2.77"), "yerel ag da izinli olmali")
+        dogru(not G.ip_izinli("8.8.8.8"), "yabanci adres reddedilmeli")
+        # loopback gercek host_lan_aglari() ciktisinda hep bulunur
+        G._LAN_ONBELLEK.update(zaman=0, aglar=[])
+        dogru(G.ip_izinli("127.0.0.1"), "loopback her zaman izinli olmali")
+        c["lan_hep_acik"] = False; o.yaz_cfg(c); G.cfg(force=True)
+        G._LAN_ONBELLEK.update(zaman=time.time(),
+                               aglar=[ipaddress.ip_network("192.168.2.0/24")])
+        dogru(not G.ip_izinli("192.168.2.77"), "kapatilinca yerel ag da reddedilmeli")
+    finally: o.temizle()
+
 @test("ag kurtarma komutu listeyi dogru yonetir", "erisim")
 def t_ag_yonet():
     """Yanlis kisitlama yuzunden arayuze girilemez duruma dusuldugunde kurtarma yolu."""

@@ -30,7 +30,9 @@ M = {
   "b_ag": "Erişim",
   "s_ag": "Hangilerine izin verilsin? (numaraları virgülle yaz, ya da CIDR yapıştır)",
   "ag_ipucu": "SSH ile {0} adresinden bağlandın",
-  "ag_lan": "Sunucunun kendi yerel ağı ({0})",
+  "ag_lan": "Sunucunun kendi yerel ağı ({0}) — zaten her zaman açık",
+  "ag_lan_bilgi": "Sunucunun yerel ağı ({0}) her zaman açık kalır; kendini kilitleyemezsin.",
+  "ag_ek": "Buna EK olarak hangi ağlardan erişilsin? (ör. VPN)",
   "ag_hepsi": "Kısıtlama yok — ağdaki herkes erişebilir",
   "ag_uyari": "DİKKAT: Buraya yazmadığın bir ağdan arayüze giremezsin (403).\n"
               "  Şimdi VPN'den bağlıysan ama sonra yerel ağdan da gireceksen İKİSİNİ de seç.",
@@ -88,7 +90,9 @@ M = {
   "b_ag": "Access",
   "s_ag": "Which ones to allow? (comma separated numbers, or paste a CIDR)",
   "ag_ipucu": "You connected over SSH from {0}",
-  "ag_lan": "The server's own local network ({0})",
+  "ag_lan": "The server's own local network ({0}) — always allowed",
+  "ag_lan_bilgi": "The server's local network ({0}) always stays open; you cannot lock yourself out.",
+  "ag_ek": "Which ADDITIONAL networks should be allowed? (e.g. VPN)",
   "ag_hepsi": "No restriction — anyone on the network can reach it",
   "ag_uyari": "CAREFUL: You cannot reach the UI from a network you do not list here (403).\n"
               "  If you are on VPN now but will also connect from the LAN, pick BOTH.",
@@ -256,9 +260,11 @@ def main():
     if ip and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip[0]):
         o = ip[0].split(".")
         adaylar.append((f"{o[0]}.{o[1]}.{o[2]}.0/24", t("ag_ipucu", ip[0])))
-    for cidr, ad in host_aglari():
-        if not any(cidr == c for c, _ in adaylar):
-            adaylar.append((cidr, t("ag_lan", ad)))
+    lan = host_aglari()
+    lan_cidr = [c for c, _ in lan]
+    adaylar = [(c, a) for c, a in adaylar if c not in lan_cidr]   # yereli aday listesinden cikar
+    if lan:
+        print(f"  {G}✓{R} " + t("ag_lan_bilgi", ", ".join(lan_cidr)))
     print(f"  {Y}{t('ag_uyari')}{R}")
     print(f"  {t('ag_kurtarma')}\n")
     for i, (cidr, ac) in enumerate(adaylar, 1):
@@ -273,7 +279,7 @@ def main():
             elif not re.match(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$", x): return False, None
         return True, None
     varsayilan = ",".join(str(i) for i in range(1, len(adaylar) + 1)) if adaylar else "0"
-    secim = sor(t("s_ag"), varsayilan, d_ag)
+    secim = sor(t("ag_ek") if lan else t("s_ag"), varsayilan, d_ag)
     aglar = []
     for x in [y.strip() for y in secim.split(",") if y.strip()]:
         if x == "0": aglar = []; break
@@ -336,7 +342,7 @@ def main():
 
     c = {"ui_bind": "0.0.0.0", "ui_port": port, "ui_user": kul, "ui_pass": sifre,
          "allow_networks": aglar, "ssl_cert": cert if tls else "", "ssl_key": key if tls else "",
-         "cookie_secure": bool(tls), "smtp_profiles": [],
+         "cookie_secure": bool(tls), "lan_hep_acik": True, "smtp_profiles": [],
          "plans": [{"id": "gunluk", "name": "Gunluk yedek" if L == "tr" else "Daily backup",
                     "enabled": False, "src_dir": src, "remote": "gdrive:proxmox-yedek",
                     "keep_days": gun, "keep_count": taban, "drive_trash_days": cop,

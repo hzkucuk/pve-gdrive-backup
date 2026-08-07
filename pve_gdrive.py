@@ -71,6 +71,9 @@ GLOBAL_DEFAULTS = {
     # Firewall kurmaya gerek kalmaz; yanlis yazarsan config'ten geri alinir,
     # SSH ve Proxmox arayuzu bu ayardan hic etkilenmez.
     "allow_networks": [],
+    # Sunucunun KENDI yerel agi her zaman izinlidir; yanlis bir kisitlama yuzunden
+    # arayuze hic erisemez duruma dusulmez. Kapatmak icin false yap.
+    "lan_hep_acik": True,
     "smtp_profiles": [],        # birden fazla gonderici hesap; her plan birini secer
     # --- asagidakiler eskiye uyumluluk icin; ilk acilista profile donusturulur ---
     "smtp_host": "smtp.gmail.com",
@@ -2026,11 +2029,46 @@ def ensure_hashed_pw():
         except Exception as e:
             log(f"sifre hash'lenemedi: {e}")
 
+_LAN_ONBELLEK = {"zaman": 0, "aglar": []}
+
+def host_lan_aglari():
+    """Sunucunun kendi IPv4 aglari. 60 sn onbelleklenir: her istekte 'ip addr'
+    calistirmak gereksiz olur."""
+    if time.time() - _LAN_ONBELLEK["zaman"] < 60:
+        return _LAN_ONBELLEK["aglar"]
+    out = []
+    try:
+        r = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, timeout=10)
+        for satir in r.stdout.splitlines():
+            p = satir.split()
+            if len(p) < 4: continue
+            try: out.append(ipaddress.ip_network(p[3], strict=False))
+            except Exception as e: yut("host_lan_aglari", e)
+    except Exception as e:
+        yut("host_lan_aglari", e)
+    # Loopback her zaman dahil: sunucunun kendi uzerindeki saglik kontrolu veya
+    # yerel ters vekil sessizce 403 almasin. Buraya ancak host'ta shell'i olan
+    # biri erisebilir, o da zaten root'tur.
+    for lo in ("127.0.0.0/8", "::1/128"):
+        try: out.append(ipaddress.ip_network(lo))
+        except Exception as e: yut("host_lan_aglari", e)
+    _LAN_ONBELLEK.update(zaman=time.time(), aglar=out)
+    return out
+
 def izinli_aglar():
+    """Yapilandirilmis aglar + (acikken) sunucunun kendi yerel agi.
+
+    Yerel ag her zaman eklenir: kurulumu VPN'den yapip sonra yerel agdan girmek
+    isteyen kullanici kendini disarida birakmasin. lan_hep_acik ile kapatilabilir."""
     aglar = []
     for x in cfg().get("allow_networks") or []:
         try: aglar.append(ipaddress.ip_network(str(x).strip(), strict=False))
-        except Exception: log(f"UYARI: gecersiz ag tanimi yok sayildi: {x}")
+        except Exception as e:
+            yut("izinli_aglar", e)
+            log(f"UYARI: gecersiz ag tanimi yok sayildi: {x}")
+    if aglar and cfg().get("lan_hep_acik", True):
+        aglar += host_lan_aglari()
     return aglar
 
 def ip_izinli(ip):
@@ -2183,7 +2221,7 @@ def public_status():
                           "log_tail_lines", "ui_refresh_sec", "rclone_timeout_min", "dump_regex",
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
-                          "ssl_cert", "ssl_key", "cookie_secure", "allow_networks",
+                          "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
                           "quota_cache_min",
                           "remember_enabled", "remember_days", "session_timeout_min",
@@ -2540,7 +2578,7 @@ def save_settings(data):
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
-    for k in ("update_check", "update_auto", "debug", "remember_enabled"):
+    for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik"):
         if k in data: C[k] = bool(data[k])
     for k in ("remember_days", "session_timeout_min"):
         if k in data:
@@ -4725,6 +4763,9 @@ def main():
         if not r.get("ok"): print("HATA:", r.get("msg")); return
         ag = r["aglar"]
         print("izinli aglar:", ", ".join(ag) if ag else "(kisitlama yok - herkes erisebilir)")
+        if ag and cfg().get("lan_hep_acik", True):
+            print("ayrica hep acik (yerel ag):",
+                  ", ".join(str(x) for x in host_lan_aglari()) or "(bulunamadi)")
         if len(a) > 1:
             print("degisiklik icin servisi yeniden baslat: systemctl restart pve-gdrive-ui")
     elif cmd in ("disa-aktar", "export"):
