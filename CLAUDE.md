@@ -56,7 +56,23 @@ Bu bir yedekleme aracı. Veri kaybettiren hata, diğer tüm hatalardan ağırdı
 - Varsayılanlar her zaman güvenli tarafta olsun (`prune_on_failure: false`,
   `allow_account_cleanup: false`).
 
-### 6. Linux'un imkânlarını kullan, kaynak tüketimini yönet
+### 6. Canlı sistemde yalnızca istenen işi yap
+
+Proxmox host'u üretimde çalışıyor; üstünde VM ve CT'ler var. Orada yaptığın her şey
+gerçek ve çoğu geri alınamaz.
+
+- **Sadece istenen işi yap.** Yanında "temizlik", "düzen", "nasılsa iyi olur" türü
+  hiçbir ek işlem yapma. İstenmeyen iyileştirme, iyileştirme değildir.
+- **`apt autoremove`, `apt upgrade`, `apt purge` gibi komutları kendi kararınla
+  çalıştırma.** Paket kaldırman gerekiyorsa yalnızca hedef paketi kaldır; artık
+  bağımlılıkları kullanıcıya bırak. Gerekliyse önce `--dry-run` ile ne olacağını göster.
+  (2026-08-08: nginx purge sonrası çalıştırılan `autoremove` 19 Proxmox çekirdeğini sildi.)
+- **Yeni servis/paket kurmadan önce sor.** Ortamda o işi zaten yapan bir şey olabilir.
+- Sistem durumunu değiştiren komutlardan önce: *"Bu, benden istenen işin parçası mı?"*
+  Cevap net "evet" değilse çalıştırma, sor.
+- Yıkıcı veya geri alınamaz bir adım gerekiyorsa önce ölç ve göster, sonra onay iste.
+
+### 7. Linux'un imkânlarını kullan, kaynak tüketimini yönet
 
 Bu bir hipervizör üzerinde çalışıyor. Yedekleme işi, üstünde koşan VM ve CT'leri
 yavaşlatmamalı. Performans ve kaynak kullanımı senin sorumluluğunda, sonradan
@@ -72,14 +88,14 @@ düşünülecek bir konu değil.
   denetimleri koy; kaçak bir süreç host'u etkilemesin.
 - Optimizasyon iddiası da ölçülür: "hızlandı" demeden önce önce/sonra sayısını göster.
 
-### 7. Hata dayanıklılığı
+### 8. Hata dayanıklılığı
 
 - Bir planın hatası diğer planları durdurmamalı.
 - API 500 döndürmemeli; anlamlı bir mesajla dönmeli.
 - Rapor/mail üretimi patlarsa en azından kısa bir bildirim gitmeli.
 - Uzun süre çalışan serviste bellek ve disk sınırsız büyümemeli.
 
-### 8. Değişiklikten sonra regresyon koş
+### 9. Değişiklikten sonra regresyon koş
 
 Kod değiştirdiysen mevcut test paketini yeniden koş ve sonucu göster. Yeni özellik eklediysen
 o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
