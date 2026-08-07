@@ -226,6 +226,16 @@ pve_gdrive.py prune [--plan ID]     # sadece retention
 pve_gdrive.py purgetrash [--plan ID]# sadece çöp temizliği
 ```
 
+```bash
+pve_gdrive.py version                 # sürüm
+pve_gdrive.py update --check          # yeni sürüm var mı
+pve_gdrive.py update                  # güncellemeyi kur
+pve_gdrive.py update --rollback       # önceki sürüme dön
+pve_gdrive.py disa-aktar              # plan/mail ayarlarını JSON olarak yaz
+pve_gdrive.py disa-aktar --sirlarla   # SMTP şifreleri dahil
+pve_gdrive.py ice-aktar < ayar.json   # ayar yükle (planlar kapalı gelir)
+```
+
 `PVE_GDRIVE_CONF` ortam değişkeniyle farklı config kullanılabilir.
 
 ## HTTP API

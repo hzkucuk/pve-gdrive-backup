@@ -14,6 +14,8 @@ Komutlar:
   python3 pve_gdrive.py snapshot [--plan ID]  # Drive durumunu tazeler
   python3 pve_gdrive.py status            # durum JSON (stdout)
   python3 pve_gdrive.py plans             # planlari listeler
+  python3 pve_gdrive.py disa-aktar        # plan/mail ayarlarini JSON olarak yazar
+  python3 pve_gdrive.py ice-aktar         # stdin'den ayar yukler
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
 import hashlib, secrets, random, ssl, ipaddress, shutil, urllib.request, html as _html
@@ -2635,6 +2637,64 @@ def serve():
         log("TLS kapali - arayuz duz HTTP. VPN disinda kullanma.")
     httpd.serve_forever()
 
+def disa_aktar(sirlar=False):
+    """Planlari ve mail profillerini baska bir kuruluma tasimak icin JSON uretir.
+
+    Varsayilan olarak SIR ICERMEZ: SMTP sifreleri, UI sifresi ve rclone jetonlari
+    disari cikmaz. Hedef hostta hesaplar yeniden yetkilendirilir, mail sifreleri
+    yeniden girilir. --sirlarla ile SMTP sifreleri de eklenir (dosyayi koru!)."""
+    C = cfg()
+    profiller = []
+    for x in smtp_profiles(C):
+        y = dict(x)
+        if not sirlar: y["pass"] = ""
+        profiller.append(y)
+    return {
+        "_aciklama": "pve-gdrive-backup ayar aktarimi. 'pve_gdrive.py ice-aktar < dosya' ile yukle.",
+        "_surum": SURUM, "_zaman": now_str(), "_sirlar_dahil": bool(sirlar),
+        "plans": [dict(p) for p in C.get("plans", [])],
+        "smtp_profiles": profiller,
+        "ayarlar": {k: C.get(k) for k in (
+            "ui_port", "ui_user", "ui_refresh_sec", "browse_roots", "dump_regex",
+            "history_max", "log_tail_lines", "rclone_tail_lines", "snapshot_max_rows",
+            "log_max_mb", "log_keep", "rclone_timeout_min", "stats_interval_sec",
+            "purge_batch", "quota_cache_min", "oneri_pay_pct", "allow_account_cleanup",
+            "remember_enabled", "remember_days", "session_timeout_min",
+            "update_check", "update_auto", "scheduler_interval_sec")},
+    }
+
+def ice_aktar(veri, plan_kipi="ekle"):
+    """Disa aktarilmis ayarlari yukler.
+
+    plan_kipi: 'ekle' (mevcutlarin uzerine ekler, ayni id varsa yenisi atlanir)
+               'degistir' (mevcut planlarin yerine gecer)
+    UI sifresi, TLS yollari ve izinli aglar ASLA aktarilmaz: bunlar hosta ozeldir.
+    Planlar KAPALI gelir; hesap ve klasor dogrulanmadan yedek baslamasin."""
+    if not isinstance(veri, dict): return {"ok": False, "msg": "gecersiz dosya"}
+    C = cfg()
+    mevcut = {p["id"] for p in C.get("plans", [])}
+    gelen = [norm_plan({**p, "enabled": False}) for p in (veri.get("plans") or [])]
+    if plan_kipi == "degistir":
+        C["plans"] = gelen; eklenen = len(gelen); atlanan = 0
+    else:
+        yeni = [p for p in gelen if p["id"] not in mevcut]
+        atlanan = len(gelen) - len(yeni)
+        C["plans"] = list(C.get("plans", [])) + yeni
+        eklenen = len(yeni)
+    mevcut_smtp = {x["id"] for x in smtp_profiles(C)}
+    yeni_smtp = [norm_smtp(x) for x in (veri.get("smtp_profiles") or [])
+                 if norm_smtp(x)["id"] not in mevcut_smtp]
+    C["smtp_profiles"] = list(C.get("smtp_profiles", [])) + yeni_smtp
+    for k, v in (veri.get("ayarlar") or {}).items():
+        if k in GLOBAL_DEFAULTS and v is not None: C[k] = v
+    save_cfg(C)
+    sifresiz = [x["name"] for x in yeni_smtp if not x.get("pass")]
+    log(f"ayar aktarimi: {eklenen} plan, {len(yeni_smtp)} mail profili yuklendi")
+    return {"ok": True, "eklenen_plan": eklenen, "atlanan_plan": atlanan,
+            "eklenen_smtp": len(yeni_smtp), "sifresiz_smtp": sifresiz,
+            "msg": f"{eklenen} plan ve {len(yeni_smtp)} mail profili yuklendi. "
+                   f"Planlar KAPALI geldi: hedef hesabi secip etkinlestir."}
+
 def init_conf():
     if os.path.exists(CONFIG_PATH):
         print(f"{CONFIG_PATH} zaten var, dokunulmadi."); return
@@ -4632,6 +4692,21 @@ def main():
             put_pstate(p["id"], update_snapshot(p)); print("ok:", p["id"])
     elif cmd == "status": print(json.dumps(public_status(), ensure_ascii=False, indent=2))
     elif cmd in ("version", "--version", "-V"): print(SURUM)
+    elif cmd in ("disa-aktar", "export"):
+        print(json.dumps(disa_aktar("--sirlarla" in a), ensure_ascii=False, indent=2))
+    elif cmd in ("ice-aktar", "import"):
+        kaynak = opt("--dosya")
+        try:
+            ham = open(kaynak).read() if kaynak else sys.stdin.read()
+            veri = json.loads(ham)
+        except Exception as e:
+            print(f"okunamadi: {e}"); return
+        kip = "degistir" if "--degistir" in a else "ekle"
+        r = ice_aktar(veri, kip)
+        print(r["msg"] if r.get("ok") else "HATA: " + r.get("msg", ""))
+        if r.get("sifresiz_smtp"):
+            print("Sifresi olmayan mail profilleri (arayuzden gir): "
+                  + ", ".join(r["sifresiz_smtp"]))
     elif cmd == "update":
         if "--check" in a: print(json.dumps(guncelleme_kontrol(zorla=True), ensure_ascii=False, indent=2))
         elif "--rollback" in a: print(guncelleme_geri_al()["msg"])

@@ -31,6 +31,21 @@ cd pve-gdrive-backup
 ./install.sh
 ```
 
+Terminal etkileşimliyse **soru soran bir sihirbaz** açılır (Türkçe / English). Ortamı ölçer
+ve varsayılanları önerir; Enter'a basarak geçebilirsin:
+
+- **İzinli ağlar** — SSH ile bağlandığın adresin ağı önerilir (ör. `10.212.134.0/24`)
+- **Kaynak klasör** — `storage.cfg`'deki yedek depoları taranır, en çok dosya içeren önerilir
+- **HTTPS** — Proxmox sertifikası bulunursa açılması önerilir
+- **Saklama süresi** — klasör ölçülür, seçtiğin süre için gereken alan anında hesaplanır
+- **Şifre** — boş bırakırsan rastgele üretilir ve kurulum sonunda bir kez gösterilir
+
+Sihirbazı atlamak için `PGD_SESSIZ=1 ./install.sh` veya değerleri ortam değişkeniyle ver:
+
+```bash
+PGD_ALLOW_NETWORKS="10.8.0.0/24" PGD_SRC_DIR=/mnt/pve/depo/dump ./install.sh
+```
+
 `install.sh` şunları yapar:
 
 | Adım | Sonuç |
@@ -222,6 +237,33 @@ iptables -A INPUT -p tcp --dport 8787 -j DROP
 > Proxmox arayüzüne gerçek bir menü sekmesi eklemek `pvemanagerlib.js` yamalamayı gerektirir;
 > her `pve-manager` güncellemesinde yama silinir. Yedekleme aracının sessizce kaybolması
 > riskine değmez, bu yüzden depoda yer almıyor.
+
+## 9b. İkinci bir Proxmox'a kurmak
+
+Her kurulum kendi ortamına göre yapılandırılır; sihirbaz izinli ağı, kaynak klasörü ve
+sertifikayı o makinede yeniden ölçer. Sıfırdan girmek istemediğin şeyler için:
+
+```bash
+# eski hostta — planlar ve mail profilleri (SIR İÇERMEZ)
+pve_gdrive.py disa-aktar > ayarlar.json
+
+# yeni hostta
+./install.sh                      # sihirbaz: ağ, kaynak, şifre
+pve_gdrive.py ice-aktar < ayarlar.json
+```
+
+Aktarımda **taşınmayanlar** bilinçlidir: UI şifresi, TLS yolları, izinli ağlar, SMTP
+şifreleri ve Google jetonları. Bunlar makineye özeldir; her host kendi kimliğini taşımalı.
+Aktarılan planlar **kapalı** gelir — hedef hesabı seçip gözden geçirmeden yedek başlamasın.
+
+Google hesabı her hostta yeniden yetkilendirilir (jeton makineye bağlıdır):
+
+```bash
+ssh -N -L 53682:127.0.0.1:53682 root@<yeni-host>    # kendi bilgisayarında
+# sonra arayüzde: + Yeni Plan → 3. adım → ＋ Yeni hesap → Başlat
+```
+
+`--sirlarla` ile SMTP şifreleri de aktarılabilir; o dosyayı korumak sana ait.
 
 ## 10. Güncelleme
 
