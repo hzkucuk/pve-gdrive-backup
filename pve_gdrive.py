@@ -299,16 +299,20 @@ def rotate_log(lf):
         os.replace(lf, f"{lf}.1")
     except Exception: pass
 
+_LOG_KILIT = threading.Lock()
+
 def log(msg, plan=None):
+    """Birden fazla is parcacigi ayni anda yazabilir; satirlar ic ice girmesin."""
     line = f"{now_str()} | {('['+plan+'] ') if plan else ''}{msg}"
-    try:
-        lf = cfg()["log_file"]
-        os.makedirs(os.path.dirname(lf), exist_ok=True)
-        rotate_log(lf)
-        with open(lf, "a") as f: f.write(line + "\n")
-    except Exception: pass
-    # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
-    if not os.environ.get("PVE_GDRIVE_QUIET"): print(line)
+    with _LOG_KILIT:
+      try:
+          lf = cfg()["log_file"]
+          os.makedirs(os.path.dirname(lf), exist_ok=True)
+          rotate_log(lf)
+          with open(lf, "a") as f: f.write(line + "\n")
+      except Exception: pass
+      # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
+      if not os.environ.get("PVE_GDRIVE_QUIET"): print(line, flush=True)
 
 def tail_bytes(path, maxbytes=1024 * 1024):
     """Dosyanin sadece son maxbytes'ini okur - log buyuse de bellek sabit kalir."""
