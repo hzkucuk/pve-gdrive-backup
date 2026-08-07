@@ -12,7 +12,7 @@ let LOGSRC = "all";
 let dirty = false;
 let running = 0;
 
-const WD = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
+const WD = ["Pzt", "Sal", C("Çar"), "Per", "Cum", "Cmt", "Paz"];
 
 /* ---------- DOM yardimcilari (tip guvenli) ---------- */
 type Field = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
@@ -158,10 +158,10 @@ async function loadIfaces(secili: string): Promise<void> {
     const j = await api<{ default: string; ifaces: { name: string; tx: number; default: boolean }[] }>("/api/ifaces");
     const list = j.ifaces || [];
     setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-      + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+      + list.map((i) => '<option value="' + esc(i.name) + '">C(' + esc(i.name)
         + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
     setVal("e-bwif", secili);
-    setTxt("e-bwifhint", "Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
+    setTxt("e-bwifhint", "Proxmox')ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
       + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
   } catch { /* yok say */ }
 }
@@ -226,8 +226,8 @@ function progBox(p: Plan): string {
     h += '<tr><td class="small">Kalan süre</td><td class="r">' + esc(eta || "—")
       + '</td><td class="small">Tahmini bitiş</td><td class="r">' + bitis + "</td></tr>";
   }
-  h += '</tbody></table><div class="hint">Bu iş sunucuda çalışıyor — sayfayı yenilesen de '
-    + "kapatsan da devam eder.</div></div>";
+  h += '</tbody></table><div class="hintC(">Bu iş sunucuda çalışıyor — sayfayı yenilesen de '
+    + ")kapatsan da devam eder.</div></div>";
   return h;
 }
 function planCard(p: Plan): string {
@@ -241,9 +241,9 @@ function planCard(p: Plan): string {
     + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
     + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
     + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
-    + '<div class="row"><span>Saklama</span><b>' + p.keep_days + " gün · min " + p.keep_count
+    + '<div class="row"><span>Saklama</span><b>C(' + p.keep_days + " gün · min " + p.keep_count
     + " set · çöp " + p.drive_trash_days + " gün</b></div>"
-    + '<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
+    + ')<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
     + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
     + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
     + '<div class="pbtns" onclick="event.stopPropagation()">'
@@ -279,9 +279,9 @@ function detail(p: Plan | undefined): string {
     + '<div class="grid">' + cards.map((c) => '<div class="card"><div class="k">' + c[0]
       + '</div><div class="v">' + c[1] + "</div></div>").join("") + "</div>"
     + '<h2>Google Drive kullanımı</h2><div class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>'
-    + '<div class="small" style="margin-top:8px">' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
+    + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
     + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
-    + '<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
+    + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
     + '<th>Misafir</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
     + (b.slice(0, 40).map((x) => {
         const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
@@ -310,25 +310,29 @@ function render(): void {
   running = ps.filter((p) => p.running).length;
   const tls = S.tls;
   setHtml("tlsrozet", tls && tls.aktif
-    ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
-    : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
+    ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
+    : '<span class="pill err" title=C("Trafik şifresiz — yalnızca VPN içinde kullan")>⚠ HTTP</span>');
   const g = S.guncelleme;
   setHtml("uprozet", g && g.yeni_var
-    ? '<span class="pill run" title="Yeni sürüm var: ' + esc(g.uzak || "")
-      + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + " hazır</span>"
-    : '<span class="small" title="Kurulu sürüm">v' + esc(S.surum || "?") + "</span>");
+    ? '<span class="pill run" title=C("Yeni sürüm var: ' + esc(g.uzak || ")")
+      + '" style="cursor:pointer" onclick="openSettings()">⬆ C(' + esc(g.uzak || "") + " hazır</span>"
+    : ')<span class="small" title=C("Kurulu sürüm")>vC(' + esc(S.surum || "?") + "</span>");
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
-    || '<div class="card">Henüz plan yok. Sağ üstten "+ Yeni Plan" ile başla.</div>');
+    || ')<div class="card">Henüz plan yok. Sağ üstten C("+ Yeni Plan") ile başla.</div>');
   hesapSerit();
   setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
+  ceviriUygula();
   const tabs: [string, string][] = ([["all", "Tümü"], ["system", "Sistem"]] as [string, string][])
     .concat(ps.map((p) => [p.id, p.name] as [string, string]));
   setHtml("logtabs", tabs.map((t) => '<button class="' + (LOGSRC === t[0] ? "on" : "")
     + "\" onclick=\"setLog('" + t[0] + "')\">" + esc(t[1]) + "</button>").join(""));
 }
 function setLog(src: string): void { LOGSRC = src; remember(); void loadLog(); }
+
+/** Dinamik uretilen icerik de cevrilsin (kartlar, tablolar, modallar). */
+function ceviriUygula(): void { if (dilAl() !== "tr") sayfayiCevir(); }
 
 /** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
  *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
@@ -340,7 +344,7 @@ function hesapSerit(): void {
     if (!q.ok) {
       return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
         + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '
-        + esc(q.error || "kota okunamadı") + "</div></div>";
+        + esc(q.error || C("kota okunamadı")) + "</div></div>";
     }
     const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
     const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
@@ -348,7 +352,7 @@ function hesapSerit(): void {
       + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
       + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
       + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
-      + (q.trashed ? " · çöp " + hb(q.trashed) : "") + "</div></div>";
+      + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "") + "</div></div>";
   }).join(""));
 }
 
@@ -373,7 +377,7 @@ async function refresh(): Promise<void> {
 }
 
 async function act(d: string, pid: string): Promise<void> {
-  flash("çalışıyor…", true);
+  flash(C("çalışıyor…"), true);
   try {
     const j = await api("/api/action?do=" + d + "&plan=" + encodeURIComponent(pid), { method: "POST" });
     flash(j.msg || "tamam", j.ok);
@@ -381,7 +385,7 @@ async function act(d: string, pid: string): Promise<void> {
   window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid: string): Promise<void> {
-  if (!confirm("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")) return;
+  if (!confirm(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))) return;
   const j = await api("/api/plan/delete?plan=" + encodeURIComponent(pid), { method: "POST" });
   flash(j.msg || "", j.ok);
   void refresh();
@@ -389,7 +393,7 @@ async function delPlan(pid: string): Promise<void> {
 async function logout(): Promise<void> { await api("/logout", { method: "POST" }); location.reload(); }
 
 /* ---------- plan sihirbazi ---------- */
-const ADIMLAR = ["Plan", "Kaynak", "Hedef", "Saklama", "Zamanlama", "Aktarım", "Bildirim", "Özet"];
+const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI: string[][] = [
   ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
@@ -440,7 +444,7 @@ function wAdimGecerli(adim: number): boolean {
 
 function wAdim(yon: number): void {
   if (yon > 0 && !wAdimGecerli(wAktif)) {
-    flash("bu adımda eksik veya hatalı alan var", false);
+    flash(C("bu adımda eksik veya hatalı alan var"), false);
     return;
   }
   wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
@@ -456,35 +460,35 @@ function wSatir(baslik: string, deger: string, uyari?: boolean): string {
 function wOzet(): void {
   const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
     .map((c: HTMLInputElement) => WD[Number(c.value) - 1]);
-  const bildirim = [chk("e-nsuc") ? "başarılı" : "", chk("e-nerr") ? "hata" : "",
-    chk("e-nskip") ? "atlandı" : ""].filter(Boolean).join(", ") || "hiçbiri";
+  const bildirim = [chk("e-nsuc") ? C("başarılı") : "", chk("e-nerr") ? "hata" : "",
+    chk("e-nskip") ? C("atlandı") : ""].filter(Boolean).join(", ") || C("hiçbiri");
   const oto = chk("e-bwauto");
   const hiz = oto ? ("otomatik (" + val("e-bwmin") + " – " + (val("e-bwmax") || val("e-bw")) + ")")
-    : (val("e-bwsch") ? "çizelge: " + val("e-bwsch") : val("e-bw"));
+    : (val("e-bwsch") ? C("çizelge: ") + val("e-bwsch") : val("e-bw"));
   let h = '<table class="ozet"><tbody>';
-  h += wSatir("Plan adı", val("e-name"));
-  h += wSatir("Durum", chk("e-enabled") ? "etkin" : "kapalı (zamanlayıcı atlar)", !chk("e-enabled"));
+  h += wSatir(C("Plan adı"), val("e-name"));
+  h += wSatir("Durum", chk("e-enabled") ? "etkin" : C("kapalı (zamanlayıcı atlar)"), !chk("e-enabled"));
   h += wSatir("Kaynak", val("e-src"));
   h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
-  h += wSatir("Saklama", val("e-kd") + " gün · misafir başına en az " + val("e-kc") + " set");
-  h += wSatir("Çöp süresi", val("e-td") + " gün sonra kalıcı silinir");
-  h += wSatir("Program", (wd.length ? wd.join(",") : "her gün") + " saat " + val("e-runat"));
-  h += wSatir("vzdump koruması", chk("e-wv")
-    ? "bekle, en fazla " + val("e-wvm") + " dk" : "beklemeden çalış", !chk("e-wv"));
+  h += wSatir("Saklama", val("e-kd") + C(" gün · misafir başına en az ") + val("e-kc") + C(" set"));
+  h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
+  h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
+  h += wSatir(C("vzdump koruması"), chk("e-wv")
+    ? C("bekle, en fazla ") + val("e-wvm") + C(" dk") : C("beklemeden çalış"), !chk("e-wv"));
   h += wSatir("Hatada retention", chk("e-pof")
-    ? "ÇALIŞIR — yükleme başarısızsa da siler" : "çalışmaz (güvenli)", chk("e-pof"));
-  h += wSatir("Hız", hiz);
+    ? C("ÇALIŞIR — yükleme başarısızsa da siler") : C("çalışmaz (güvenli)"), chk("e-pof"));
+  h += wSatir(C("Hız"), hiz);
   h += wSatir("Mail", (val("e-mail") || "—") + "  ·  " + bildirim);
-  h += wSatir("Haftalık rapor", chk("e-wr")
-    ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + " günlük dönem)"
-    : "kapalı");
+  h += wSatir(C("Haftalık rapor"), chk("e-wr")
+    ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + C(" günlük dönem)")
+    : C("kapalı"));
   h += "</tbody></table>";
   const uyarilar: string[] = [];
-  if (!val("e-acct")) uyarilar.push("Google hesabı seçilmedi — 3. adıma dön.");
-  if (Number(val("e-kc")) === 0) uyarilar.push("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.");
-  if (chk("e-pof")) uyarilar.push("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir.");
+  if (!val("e-acct")) uyarilar.push(C("Google hesabı seçilmedi — 3. adıma dön."));
+  if (Number(val("e-kc")) === 0) uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir."));
+  if (chk("e-pof")) uyarilar.push(C("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir."));
   if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
-    uyarilar.push("Bildirim seçili ama alıcı adresi boş.");
+    uyarilar.push(C("Bildirim seçili ama alıcı adresi boş."));
   if (uyarilar.length) {
     h += '<div class="hint" style="margin-top:10px;color:#ffd479">'
       + uyarilar.map((u) => "⚠ " + esc(u)).join("<br>") + "</div>";
@@ -543,15 +547,15 @@ function preset(k: string): void {
   });
   setVal("e-bwsch", ""); good("e-bwsch");
   ramHint(); markDirty();
-  flash("senaryo yüklendi — kaydetmeden uygulanmaz", true);
+  flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
 }
 function ramHint(): void {
   const c = String(val("e-chunk") || "").match(/^(\d+(?:\.\d+)?)([KMG])$/i);
   const t = Number(val("e-tr")) || 1;
-  if (!c) { setTxt("e-ram", "RAM ≈ parça × transfer"); return; }
+  if (!c) { setTxt("e-ram", C("RAM ≈ parça × transfer")); return; }
   const carp: Record<string, number> = { K: 1 / 1024, M: 1, G: 1024 };
   const mb = parseFloat(c[1]) * carp[c[2].toUpperCase()];
-  setTxt("e-ram", "Tahmini rclone RAM kullanımı: " + Math.round(mb * t) + " MB ("
+  setTxt("e-ram", C("Tahmini rclone RAM kullanımı: ") + Math.round(mb * t) + " MB ("
     + c[0] + " × " + t + " transfer)");
 }
 
@@ -561,12 +565,12 @@ function openEditor(pid: string | null): void {
   dirty = false;
   wSihirbaz = !pid;                 // yeni plan: sihirbaz, mevcut plan: tek sayfa form
   wAktif = 1;
-  setTxt("ed-title", p ? "Plan: " + p.name : "🧭 Yeni plan sihirbazı");
+  setTxt("ed-title", p ? C("Plan: ") + p.name : C("🧭 Yeni plan sihirbazı"));
   setTxt("ed-alt", p
-    ? "Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar."
-    : "Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın.");
+    ? C("Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar.")
+    : C("Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın."));
   const d = {
-    name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
+    name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: C("gdrive:proxmox-yedek"),
     keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [] as number[],
     bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
     transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [] as string[],
@@ -579,14 +583,14 @@ function openEditor(pid: string | null): void {
   const v = (p || d) as unknown as Plan;
   // Ortak alanlar tablodan doldurulur (bkz. alanlar.ts); asagidakiler ozel durumlar.
   alanlariDoldur(v as unknown as Record<string, unknown>);
-  const rp = String(v.remote || "gdrive:proxmox-yedek").split(":");
+  const rp = String(v.remote || C("gdrive:proxmox-yedek")).split(":");
   setVal("e-folder", rp.slice(1).join(":"));
   void loadIfaces(v.bw_auto_iface || ""); bwAutoToggle();
   setHtml("e-rday", WD.map((n, i) => '<option value="' + (i + 1) + '">' + n + "</option>").join(""));
   setVal("e-rday", v.report_day || 1);
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
     + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
-  setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : "⚠ klasör bulunamadı") : "");
+  setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
   void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages(); ramHint();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
@@ -595,6 +599,7 @@ function openEditor(pid: string | null): void {
   fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
   fld("e-tr").oninput = () => { ramHint(); markDirty(); };
   hesapPaneliTasi("w-hesap-yuvasi", false);
+  ceviriUygula();
   KAP = null; kapAnahtar = "";
   wGoster();
   if (!wSihirbaz) void kapasiteYukle();
@@ -605,21 +610,21 @@ function validatePlan(): boolean {
   // Alanlarin tamami tablodan dogrulanir (bkz. alanlar.ts).
   // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
   let ok = alanlariDogrula();
-  if (!val("e-acct")) ok = bad("e-acct", "önce bir Google hesabı ekle") && ok; else good("e-acct");
-  ok = vRx("e-folder", RX.folder, 'klasör adında : * ? " < > | olamaz') && ok;
-  if (!val("e-folder").trim()) ok = bad("e-folder", "hedef klasör gerekli") && ok;
+  if (!val("e-acct")) ok = bad("e-acct", C("önce bir Google hesabı ekle")) && ok; else good("e-acct");
+  ok = vRx("e-folder", RX.folder, C('klasör adında : * ? " < > | olamaz')) && ok;
+  if (!val("e-folder").trim()) ok = bad("e-folder", C("hedef klasör gerekli")) && ok;
   if (chk("e-bwauto")) {
     const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
-    if (ust && alt && alt > ust) ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
+    if (ust && alt && alt > ust) ok = bad("e-bwmin", C("alt sınır üst sınırdan büyük olamaz")) && ok;
   }
   if (Number(val("e-kc")) === 0 && Number(val("e-kd")) === 0) {
-    ok = bad("e-kc", "ikisi birden 0 olamaz — hiç yedek kalmaz") && ok;
+    ok = bad("e-kc", C("ikisi birden 0 olamaz — hiç yedek kalmaz")) && ok;
   }
   return ok;
 }
 
 async function savePlan(): Promise<void> {
-  if (!validatePlan()) { flash("form hatalı — kırmızı alanlara bak", false); return; }
+  if (!validatePlan()) { flash(C("form hatalı — kırmızı alanlara bak"), false); return; }
   const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
     .map((c: HTMLInputElement) => Number(c.value));
   const body: Record<string, unknown> = {
@@ -649,15 +654,15 @@ let kapAnahtar = "";
  *  Saklama suresini tahminle degil olcumle secmek icin. */
 async function kapasiteYukle(zorla?: boolean): Promise<void> {
   const src = val("e-src").trim(), hesap = val("e-acct");
-  if (!src || !hesap) { setTxt("kap-durum", "Kaynak ve hesap seçilince kapasite hesabı burada çıkar."); return; }
+  if (!src || !hesap) { setTxt("kap-durum", C("Kaynak ve hesap seçilince kapasite hesabı burada çıkar.")); return; }
   const anahtar = src + "|" + hesap;
   if (!zorla && anahtar === kapAnahtar && KAP) { kapasiteCiz(); return; }
-  setTxt("kap-durum", "ölçülüyor…");
+  setTxt("kap-durum", C("ölçülüyor…"));
   try {
     KAP = await api<{ analiz: Analiz; kota: Quota; oneri?: number; oneri_pay_pct?: number }>(
       "/api/analiz?src=" + encodeURIComponent(src) + "&hesap=" + encodeURIComponent(hesap));
     kapAnahtar = anahtar;
-  } catch { setTxt("kap-durum", "ölçüm başarısız"); return; }
+  } catch { setTxt("kap-durum", C("ölçüm başarısız")); return; }
   kapasiteCiz();
 }
 
@@ -666,7 +671,7 @@ function kapasiteCiz(): void {
   const a = KAP.analiz, q = KAP.kota || {};
   const goster = (id: string, g: boolean) => { el(id).style.display = g ? "" : "none"; };
   if (!a.ok) {
-    setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || "ölçülemedi") + "</span>");
+    setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || C("ölçülemedi")) + "</span>");
     ["kap-bar", "kap-alt", "kap-btn"].forEach((i) => goster(i, false));
     setHtml("kap-misafir", "");
     return;
@@ -680,9 +685,9 @@ function kapasiteCiz(): void {
   const sigar = gereken < bos;
 
   setHtml("kap-durum",
-    "Ölçüldü: günde <b>" + hb(gunluk) + "</b> üretiliyor ("
-    + (a.set_sayisi || 0) + " günlük set, toplam " + hb(a.toplam) + ").<br>"
-    + "<b>" + gun + " gün</b> saklama + <b>" + cop + " gün</b> çöp → Drive'da <b>" + hb(gereken)
+    C("Ölçüldü: günde <b>") + hb(gunluk) + "</b> üretiliyor ("
+    + (a.set_sayisi || 0) + C(" günlük set, toplam ") + hb(a.toplam) + ").<br>"
+    + "<b>" + gun + C(" gün</b> saklama + <b>") + cop + C(" gün</b> çöp → Drive'da <b>") + hb(gereken)
     + "</b> gerekir.");
   goster("kap-bar", true); goster("kap-alt", true); goster("kap-btn", true);
   const bar = el("kap-bar");
@@ -697,16 +702,16 @@ function kapasiteCiz(): void {
 
   let uyari = "";
   if (!sigar) {
-    uyari = "⚠ Bu süre hesaba <b>sığmaz</b>: " + hb(gereken) + " gerekiyor, " + hb(bos) + " boş var.";
+    uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
   } else if (sonraPct >= 85) {
-    uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + " dolar. Misafirler büyürse yer biter.";
+    uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. Misafirler büyürse yer biter.");
   }
   if (KAP.oneri) {
-    uyari += (uyari ? "<br>" : "") + "Önerilen: <b>" + KAP.oneri + " gün</b> (boş alanın %"
-      + (KAP.oneri_pay_pct || 60) + "'ini kullanır, büyümeye pay bırakır).";
+    uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
+      + (KAP.oneri_pay_pct || 60) + C("'ini kullanır, büyümeye pay bırakır).");
   }
   const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
-    + " set var); hedef doluluğa ancak " + gun + " gün sonra ulaşılır.";
+    + C(" set var); hedef doluluğa ancak ") + gun + C(" gün sonra ulaşılır.");
   setHtml("kap-misafir",
     (uyari ? '<div class="kap-uyari">' + uyari + ilk + "</div>" : '<div class="kap-uyari">' + ilk.slice(4) + "</div>")
     + "<table><tbody>" + (a.misafirler || []).map((m) =>
@@ -717,7 +722,7 @@ function kapasiteCiz(): void {
 function kapasiteOner(): void {
   if (!KAP || !KAP.oneri) return;
   setVal("e-kd", KAP.oneri); good("e-kd"); markDirty(); kapasiteCiz();
-  flash(KAP.oneri + " gün uygulandı", true);
+  flash(KAP.oneri + C(" gün uygulandı"), true);
 }
 
 /* ---------- klasor gezgini ---------- */
@@ -725,7 +730,7 @@ async function loadStorages(): Promise<void> {
   try {
     const j = await api<{ storages: { name: string; path: string; dumps: number }[] }>("/api/storages");
     const s = j.storages || [];
-    setHtml("e-stor", s.length ? "Proxmox depoları: " + s.map((x) =>
+    setHtml("e-stor", s.length ? C("Proxmox depoları: ") + s.map((x) =>
       "<a href=\"#\" onclick=\"setSrc('" + x.path + "');return false\" style=\"color:#58a6ff\">"
       + esc(x.name) + " (" + x.dumps + ")</a>").join(" · ") : "");
   } catch { /* yok say */ }
@@ -738,7 +743,7 @@ async function goDir(p: string): Promise<void> {
   setTxt("b-path", j.path + (j.error ? "  ⚠ " + j.error : "  (" + j.dumps + " dosya)"));
   setHtml("b-stor", (j.roots || []).map((r) => "<button class=\"sm\" onclick=\"goDir('" + r + "')\">"
     + esc(r) + "</button>").join(""));
-  let h = j.parent ? "<div onclick=\"goDir('" + j.parent + "')\"><span>⬆ üst klasör</span><span></span></div>" : "";
+  let h = j.parent ? "<div onclick=\"goDir('" + j.parent + C("')\"><span>⬆ üst klasör</span><span></span></div>") : "";
   h += (j.dirs || []).map((d) => "<div onclick=\"goDir('" + d.path + "')\"><span>📁 " + esc(d.name)
     + '</span><span class="small">' + (d.dumps ? d.dumps + " dosya" : "") + "</span></div>").join("");
   setHtml("b-list", h || '<div><span class="small">alt klasör yok</span><span></span></div>');
@@ -756,7 +761,7 @@ async function loadRemotes(selName?: string): Promise<void> {
   setHtml("e-acct", REM.map((r) => '<option value="' + esc(r.name) + '">' + esc(r.name)
     + "</option>").join("") || '<option value="">(hesap yok)</option>');
   if (selName) setVal("e-acct", selName);
-  setTxt("e-accthint", REM.length ? REM.length + " hesap tanımlı" : "Henüz hesap yok — 'Yönet' ile ekle.");
+  setTxt("e-accthint", REM.length ? REM.length + C(" hesap tanımlı") : C("Henüz hesap yok — 'Yönet' ile ekle."));
 }
 function openAccounts(): void {
   openM("m-acct"); hesapPaneliTasi("hesap-ekle-yuvasi", true); acctTab(1); void renderAccounts();
@@ -775,14 +780,14 @@ async function renderAccounts(): Promise<void> {
   REM = j.remotes || [];
   setHtml("a-list", REM.length ? REM.map((r) => {
     const q = r.quota || {};
-    const line = q.ok ? hb(q.used) + " / " + hb(q.total) + "  ·  çöp " + hb(q.trashed || 0)
-      + "  ·  boş " + hb(q.free || 0) : "⚠ " + esc(q.error || "kota okunamadı");
+    const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
+      + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
     return '<div class="card" style="margin-bottom:8px"><div style="display:flex;'
       + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
       + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
       + '<span style="flex:1"></span>'
       + "<button class=\"sm\" onclick=\"acctTest('" + r.name + "')\">Test</button>"
-      + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + "')\">Sil</button></div>"
+      + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + C("')\">Sil</button></div>")
       + '<div class="small" style="margin-top:6px">' + line + "</div></div>";
   }).join("") : '<div class="small">Henüz hesap yok.</div>');
 }
@@ -792,14 +797,14 @@ async function acctTest(n: string): Promise<void> {
   flash(j.msg || "", j.ok);
 }
 async function acctDel(n: string): Promise<void> {
-  if (!confirm("'" + n + "' kaldırılsın mı? Drive'daki dosyalara dokunulmaz.")) return;
+  if (!confirm("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz."))) return;
   const j = await api("/api/remote/delete?name=" + encodeURIComponent(n), { method: "POST" });
   flash(j.msg || "", j.ok); void renderAccounts(); void loadRemotes();
 }
 async function acctPaste(): Promise<void> {
   if (!RX.acct.test(val("a-name").trim())) { bad("a-name", "sadece harf, rakam, - ve _"); return; }
   good("a-name");
-  try { JSON.parse(val("a-token")); } catch { bad("a-token", "geçerli JSON değil"); return; }
+  try { JSON.parse(val("a-token")); } catch { bad("a-token", C("geçerli JSON değil")); return; }
   good("a-token");
   const j = await api("/api/remote/add", { method: "POST",
     body: JSON.stringify({ name: val("a-name"), token: val("a-token") }) });
@@ -811,14 +816,14 @@ async function acctPaste(): Promise<void> {
   }
 }
 async function authStart(): Promise<void> {
-  if (!RX.acct.test(val("a-name").trim())) { bad("a-name", "önce geçerli bir hesap adı yaz"); return; }
+  if (!RX.acct.test(val("a-name").trim())) { bad("a-name", C("önce geçerli bir hesap adı yaz")); return; }
   good("a-name");
   const j = await api<AuthStart>("/api/remote/auth/start", { method: "POST" });
   setVal("a-tunnel", j.tunnel || "");
-  if (!j.ok) { flash(j.msg || "başlatılamadı", false); return; }
+  if (!j.ok) { flash(j.msg || C("başlatılamadı"), false); return; }
   el("a-authbox").style.display = "";
   setTxt("a-url", j.url || "");
-  flash("adresi tarayıcında aç", true);
+  flash(C("adresi tarayıcında aç"), true);
   pollAuth();
 }
 function pollAuth(): void {
@@ -828,7 +833,7 @@ function pollAuth(): void {
       const st = await api<AuthStatus>("/api/remote/auth/status");
       if (st.ready) {
         window.clearInterval(authTimer);
-        setTxt("a-wait", "jeton alındı, hesap oluşturuluyor…");
+        setTxt("a-wait", C("jeton alındı, hesap oluşturuluyor…"));
         const j = await api("/api/remote/auth/finish", { method: "POST",
           body: JSON.stringify({ name: val("a-name") }) });
         flash(j.msg || "", j.ok);
@@ -839,7 +844,7 @@ function pollAuth(): void {
         }
       } else if (!st.waiting) {
         window.clearInterval(authTimer);
-        setTxt("a-wait", "yetkilendirme sonlandı");
+        setTxt("a-wait", C("yetkilendirme sonlandı"));
       }
     })();
   }, 2000);
@@ -855,15 +860,15 @@ async function authCancel(): Promise<void> {
 interface SmtpPreset { host: string; port: number; security: string; hint: string }
 const SMTP_PRESETS: Record<string, SmtpPreset> = {
   gmail: { host: "smtp.gmail.com", port: 587, security: "starttls",
-    hint: "Gmail hesap şifresi çalışmaz. Google Hesabı → Güvenlik → 2 Adımlı Doğrulama → Uygulama şifreleri'nden 16 haneli şifre üret." },
+    hint: C("Gmail hesap şifresi çalışmaz. Google Hesabı → Güvenlik → 2 Adımlı Doğrulama → Uygulama şifreleri'nden 16 haneli şifre üret.") },
   outlook: { host: "smtp.office365.com", port: 587, security: "starttls",
-    hint: "Microsoft 365 / Outlook. Kurumsal hesaplarda SMTP AUTH kapalı olabilir, yöneticiden açtırman gerekebilir." },
+    hint: C("Microsoft 365 / Outlook. Kurumsal hesaplarda SMTP AUTH kapalı olabilir, yöneticiden açtırman gerekebilir.") },
   yandex: { host: "smtp.yandex.com", port: 465, security: "ssl",
-    hint: "Yandex'te 'Uygulama şifreleri' bölümünden şifre üret. Kullanıcı adı tam adres olmalı." },
+    hint: C("Yandex'te 'Uygulama şifreleri' bölümünden şifre üret. Kullanıcı adı tam adres olmalı.") },
   yahoo: { host: "smtp.mail.yahoo.com", port: 465, security: "ssl",
-    hint: "Yahoo'da uygulama şifresi zorunlu, normal şifre kabul edilmez." },
+    hint: C("Yahoo'da uygulama şifresi zorunlu, normal şifre kabul edilmez.") },
   custom: { host: "", port: 587, security: "starttls",
-    hint: "Sunucu, port ve güvenlik ayarını sağlayıcından öğren." },
+    hint: C("Sunucu, port ve güvenlik ayarını sağlayıcından öğren.") },
 };
 function smtpPreset(): void {
   const v = SMTP_PRESETS[val("s-preset")];
@@ -878,7 +883,7 @@ function loadSmtpSelect(selId?: string): void {
   setHtml("e-smtp", SMTP.map((x) => '<option value="' + esc(x.id) + '">' + esc(x.name)
     + " (" + esc(x.user || x.host) + ")</option>").join("") || '<option value="">(profil yok)</option>');
   if (selId) setVal("e-smtp", selId);
-  setTxt("e-smtphint", SMTP.length ? "" : "Mail profili yok — '✉ Yönet' ile ekle, yoksa mail gitmez.");
+  setTxt("e-smtphint", SMTP.length ? "" : C("Mail profili yok — '✉ Yönet' ile ekle, yoksa mail gitmez."));
 }
 function renderSmtp(): void {
   SMTP = (S && S.smtp) || [];
@@ -886,9 +891,9 @@ function renderSmtp(): void {
     '<div class="card" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
     + 'gap:8px;align-items:center;flex-wrap:wrap"><b>' + esc(x.name) + "</b>"
     + '<span style="flex:1"></span>'
-    + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + "')\">Düzenle</button>"
+    + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + C("')\">Düzenle</button>")
     + "<button class=\"sm\" onclick=\"smtpTest('" + x.id + "')\">Test maili</button>"
-    + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + "')\">Sil</button></div>"
+    + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + C("')\">Sil</button></div>")
     + '<div class="small" style="margin-top:6px">' + esc(x.user || "-") + " · " + esc(x.host)
     + ":" + x.port + " · " + esc(x.security) + "</div></div>").join("")
     : '<div class="small">Henüz profil yok.</div>');
@@ -905,22 +910,22 @@ function smtpEdit(id: string): void {
   setVal("s-id", x.id); setVal("s-name", x.name); setVal("s-host", x.host);
   setVal("s-port", x.port); setVal("s-sec", x.security); setVal("s-user", x.user);
   setVal("s-pass", ""); setVal("s-from", x.from);
-  setTxt("s-formtitle", "Düzenle: " + x.name);
+  setTxt("s-formtitle", C("Düzenle: ") + x.name);
 }
 async function smtpSave(): Promise<void> {
   let ok = true;
-  ok = vTxt("s-name", "profil adı gerekli") && ok;
-  ok = vRx("s-host", RX.host, "geçerli bir sunucu adı yaz") && ok;
-  ok = vNum("s-port", 1, 65535, "1-65535 arası port") && ok;
+  ok = vTxt("s-name", C("profil adı gerekli")) && ok;
+  ok = vRx("s-host", RX.host, C("geçerli bir sunucu adı yaz")) && ok;
+  ok = vNum("s-port", 1, 65535, C("1-65535 arası port")) && ok;
   ok = vMails("s-user", true) && ok;
   ok = vMails("s-from", true) && ok;
-  if (!ok) { flash("form hatalı", false); return; }
+  if (!ok) { flash(C("form hatalı"), false); return; }
   const b: Record<string, unknown> = {
     id: val("s-id"), name: val("s-name"), host: val("s-host"), port: Number(val("s-port")),
     security: val("s-sec"), user: val("s-user"), from: val("s-from"),
   };
   if (val("s-pass")) b.pass = val("s-pass");
-  if (!val("s-id") && !val("s-pass")) { flash("yeni profil için şifre gerekli", false); return; }
+  if (!val("s-id") && !val("s-pass")) { flash(C("yeni profil için şifre gerekli"), false); return; }
   const j = await api("/api/smtp/save", { method: "POST", body: JSON.stringify(b) });
   flash(j.msg || "", j.ok);
   if (j.ok) { smtpClear(); await refresh(); renderSmtp(); loadSmtpSelect(); }
@@ -932,9 +937,9 @@ async function smtpDel(id: string): Promise<void> {
   await refresh(); renderSmtp(); loadSmtpSelect();
 }
 async function smtpTest(id: string): Promise<void> {
-  const to = prompt("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)", "");
+  const to = prompt(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
   if (to === null) return;
-  flash("gönderiliyor…", true);
+  flash(C("gönderiliyor…"), true);
   const j = await api("/api/smtp/test?id=" + encodeURIComponent(id) + "&to=" + encodeURIComponent(to),
     { method: "POST" });
   flash(j.msg || "", j.ok);
@@ -961,29 +966,29 @@ function openSettings(): void {
   const c = t && t.sertifika;
   setHtml("g-tlsdurum", t && t.aktif
     ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
-      + "</b> · veren: " + esc(c ? c.veren : "-") + " · bitiş: " + esc(c ? c.bitis : "-")
+      + "</b> · veren: " + esc(c ? c.veren : "-") + C(" · bitiş: ") + esc(c ? c.bitis : "-")
     : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
   openM("m-set");
 }
 async function saveSettings(): Promise<void> {
   let ok = true;
-  ok = vRx("g-bind", RX.ip, "IP adresi yaz (0.0.0.0 veya 127.0.0.1)") && ok;
+  ok = vRx("g-bind", RX.ip, C("IP adresi yaz (0.0.0.0 veya 127.0.0.1)")) && ok;
   ok = vNum("g-port", 1, 65535, "1-65535") && ok;
-  ok = vTxt("g-user", "kullanıcı adı gerekli") && ok;
-  ok = vNum("g-refresh", 1, 3600, "1-3600 sn") && ok;
+  ok = vTxt("g-user", C("kullanıcı adı gerekli")) && ok;
+  ok = vNum("g-refresh", 1, 3600, C("1-3600 sn")) && ok;
   ok = vNum("g-hist", 1, 1000, "1-1000") && ok;
   ok = vNum("g-logn", 10, 5000, "10-5000") && ok;
   ok = vNum("g-tail", 1, 1000, "1-1000") && ok;
   ok = vNum("g-rows", 1, 10000, "1-10000") && ok;
   ok = vNum("g-logmb", 0, 1000, "0-1000 MB") && ok;
   ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
-  ok = vNum("g-tmo", 0, 1440, "0-1440 dk") && ok;
-  ok = vTxt("g-re", "kalıp boş olamaz") && ok;
+  ok = vNum("g-tmo", 0, 1440, C("0-1440 dk")) && ok;
+  ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
   const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
   const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
     && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
-  if (kotuNet.length) ok = bad("g-nets", "geçersiz ağ: " + kotuNet[0]) && ok; else good("g-nets");
-  if (!ok) { flash("form hatalı", false); return; }
+  if (kotuNet.length) ok = bad("g-nets", C("geçersiz ağ: ") + kotuNet[0]) && ok; else good("g-nets");
+  if (!ok) { flash(C("form hatalı"), false); return; }
   const b: Record<string, unknown> = {
     ui_bind: val("g-bind"), ui_port: Number(val("g-port")), ui_user: val("g-user"),
     ui_refresh_sec: Number(val("g-refresh")), dump_regex: val("g-re"),
@@ -1006,11 +1011,11 @@ async function saveSettings(): Promise<void> {
 function upDurum(): void {
   const g = S && S.guncelleme;
   const v = (S && S.surum) || "?";
-  let h = "Kurulu sürüm: <b>v" + esc(v) + "</b>";
+  let h = C("Kurulu sürüm: <b>v") + esc(v) + "</b>";
   if (g && g.hata) h += ' · <span style="color:#ff9b9b">kontrol hatası: ' + esc(g.hata) + "</span>";
   else if (g && g.yeni_var) h += ' · <span style="color:#ffd479">yeni sürüm hazır: <b>v'
     + esc(g.uzak || "") + "</b></span>";
-  else if (g && g.uzak) h += " · güncel";
+  else if (g && g.uzak) h += C(" · güncel");
   setHtml("g-guncel", h);
   el("g-upbtn").style.display = g && g.yeni_var ? "" : "none";
 }
@@ -1019,19 +1024,19 @@ async function upKontrol(): Promise<void> {
   const j = await api<{ ok: boolean; surum?: string; uzak?: string; yeni_var?: boolean; hata?: string }>(
     "/api/update/check?force=1");
   await refresh(); upDurum();
-  flash(j.hata ? "hata: " + j.hata
-    : (j.yeni_var ? "yeni sürüm var: v" + j.uzak : "güncel: v" + j.surum), !j.hata);
+  flash(j.hata ? C("hata: ") + j.hata
+    : (j.yeni_var ? C("yeni sürüm var: v") + j.uzak : C("güncel: v") + j.surum), !j.hata);
 }
 async function upKur(): Promise<void> {
-  if (!confirm("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n"
-    + "Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?")) return;
-  flash("indiriliyor ve doğrulanıyor…", true);
+  if (!confirm(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
+    + C("Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?"))) return;
+  flash(C("indiriliyor ve doğrulanıyor…"), true);
   const j = await api("/api/update/apply", { method: "POST" });
   flash(j.msg || "", j.ok);
   if (j.ok) window.setTimeout(() => location.reload(), 6000);
 }
 async function upGeri(): Promise<void> {
-  if (!confirm("Önceki sürüme dönülecek. Devam edilsin mi?")) return;
+  if (!confirm(C("Önceki sürüme dönülecek. Devam edilsin mi?"))) return;
   const j = await api("/api/update/rollback", { method: "POST" });
   flash(j.msg || "", j.ok);
   if (j.ok) window.setTimeout(() => location.reload(), 6000);
@@ -1042,7 +1047,7 @@ Array.prototype.slice.call(document.querySelectorAll(".mask")).forEach((m: HTMLE
   m.addEventListener("click", (e: Event) => {
     if (e.target !== m) return;
     if (m.id === "m-edit" && dirty
-      && !confirm("Kaydedilmemiş değişiklikler var, kapatılsın mı?")) return;
+      && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))) return;
     m.classList.remove("show");
     if (m.id === "m-edit") dirty = false;
   });
@@ -1051,8 +1056,9 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key !== "Escape") return;
   Array.prototype.slice.call(document.querySelectorAll(".mask.show")).forEach((m: HTMLElement) => {
     if (m.id === "m-edit" && dirty
-      && !confirm("Kaydedilmemiş değişiklikler var, kapatılsın mı?")) return;
+      && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))) return;
     m.classList.remove("show");
   });
 });
+dilBaslat();
 void refresh();

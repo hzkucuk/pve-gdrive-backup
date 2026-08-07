@@ -2957,6 +2957,11 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
   <span style="flex:1"></span>
+  <select id="dilsec" onchange="dilDegistir(this.value)" title="Dil / Language"
+          style="width:auto;padding:5px 8px;font-size:12px">
+    <option value="tr">🇹🇷 Türkçe</option>
+    <option value="en">🇬🇧 English</option>
+  </select>
   <button onclick="openSettings()" title="Hesaplar, mail profilleri, güvenlik ve gelişmiş ayarlar">⚙ Ayarlar</button>
   <button class="primary" onclick="openEditor(null)">+ Yeni Plan</button>
 </header>
@@ -3371,6 +3376,447 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 <script>
 "use strict";
 /** Arka ucun /api/status ile dondurdugu veri yapilari. */
+/**
+ * İngilizce sözlük. Anahtar = Türkçe metnin kendisi.
+ * Karşılığı olmayan metin Türkçe görünür (arayüz bozulmaz).
+ */
+const EN = {
+    /* --- başlık ve genel --- */
+    "🗄️ Proxmox → Google Drive Yedek": "🗄️ Proxmox → Google Drive Backup",
+    "⚙ Ayarlar": "⚙ Settings", "+ Yeni Plan": "+ New Plan", "Vazgeç": "Cancel",
+    "Kaydet": "Save", "Kapat": "Close", "Sil": "Delete", "Ekle": "Add", "Test": "Test",
+    "Düzenle": "Edit", "‹ Geri": "‹ Back", "İleri ›": "Next ›", "— seç —": "— select —",
+    "Seçim": "Choice", "Özet": "Summary", "Log": "Log", "Tümü": "All", "Sistem": "System",
+    "plan": "plan", "çalışıyor": "running", "durum: ": "status: ",
+    "mail profili yok": "no mail profile", "Hesap": "Account", "Klasör": "Folder",
+    "Sunucu": "Server", "Port": "Port", "Kullanıcı": "Username", "Şifre": "Password",
+    "Gönderen": "From", "Güvenlik": "Security", "Alıcı": "Recipient", "Saat": "Time",
+    "Günler": "Days", "Gün": "Day", "gün": "days", "saat": "hours", "sn": "s", "dk": "min",
+    "set": "sets", "adet": "count", "her gün": "every day", "hiçbiri": "none",
+    "kapalı": "disabled", "etkin": "enabled", "atlandı": "skipped", "başarılı": "successful",
+    "hata": "error", "yok": "none", "boş": "free", "çöp": "trash", "Çöp": "Trash",
+    "hazır": "ready", "Kurulum": "Setup", "Örnek:": "Example:", "Anahtar": "Key",
+    "Varsayılan": "Default", "Açıklama": "Description", "min": "min",
+    /* --- plan kartı --- */
+    "● ÇALIŞIYOR": "● RUNNING", "KAPALI": "DISABLED", "✔ BAŞARILI": "✔ SUCCESS",
+    "✖ HATA": "✖ FAILED", "⏸ ATLANDI": "⏸ SKIPPED",
+    "Kaynak": "Source", "Hedef": "Target", "Program": "Schedule", "Sonraki": "Next",
+    "Saklama": "Retention", "Son çalışma": "Last run", "Haftalık rapor": "Weekly report",
+    "▶ Yedekle": "▶ Back up", "🧹 Retention": "🧹 Retention", "🗑 Çöpü Boşalt": "🗑 Empty Trash",
+    "📊 Rapor": "📊 Report", "✉ Test": "✉ Test", "✎ Düzenle": "✎ Edit",
+    " dosya)": " files)", " gün": " days", " set": " sets", " · min ": " · min ",
+    " set · çöp ": " sets · trash ", " gün</b></div>": " days</b></div>",
+    /* --- ilerleme --- */
+    "Başlangıç": "Started", "Geçen": "Elapsed", "Aktarılan": "Transferred", "Hız": "Speed",
+    "Kalan süre": "Time left", "Tahmini bitiş": "Est. finish", "Çalışıyor": "Running",
+    "Hazırlanıyor": "Preparing", "Drive'a yükleniyor": "Uploading to Drive",
+    "Drive listeleniyor": "Listing Drive", "Proxmox yedeği bekleniyor": "Waiting for Proxmox backup",
+    "Eski yedekler çöpe taşınıyor": "Moving old backups to trash",
+    "Çöp kutusu temizleniyor": "Emptying trash", "Durum güncelleniyor": "Updating status",
+    "Bu iş sunucuda çalışıyor — sayfayı yenilesen de kapatsan da devam eder.": "This job runs on the server — it continues even if you refresh or close the page.",
+    /* --- detay kartları --- */
+    "Yedek dosyası": "Backup files", "Toplam boyut": "Total size",
+    "Son yedek yaşı": "Newest backup age", "Çöpte bekleyen": "Waiting in trash",
+    "Çöp süresi": "Trash period", "Google Drive kullanımı": "Google Drive usage",
+    "Yedekler (Drive)": "Backups (Drive)", "Tarih": "Date", "Misafir": "Guest",
+    "Boyut": "Size", "Dosya": "File", "Kalan": "Left", "yedek yok": "no backups",
+    "Çalışma geçmişi": "Run history", "Zaman": "Time", "Durum": "Status", "Tetik": "Trigger",
+    "kayıt yok": "no records", "süre dolunca kalıcı silinir": "permanently deleted when time is up",
+    "Google çöp kutusu (": "Google trash (",
+    /* --- sihirbaz --- */
+    "🧭 Yeni plan sihirbazı": "🧭 New plan wizard",
+    "Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın.": "Go step by step. Nothing is saved until you confirm on the last step.",
+    "Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar.": "All settings on one page. Hover a field label for an explanation.",
+    "1. Plan": "1. Plan", "2. Kaynak": "2. Source", "3. Hedef": "3. Target",
+    "4. Saklama": "4. Retention", "5. Zamanlama": "5. Schedule", "6. Aktarım": "6. Transfer",
+    "7. Bildirim": "7. Notify", "8. Özet": "8. Summary",
+    "Bu plana bir ad ver": "Give this plan a name",
+    "Proxmox'ta hangi klasör yedeklenecek": "Which folder on Proxmox to back up",
+    "Hangi Google hesabına, hangi klasöre": "Which Google account and folder",
+    "Yedekler ne kadar süre kalsın": "How long backups are kept",
+    "Ne zaman çalışsın, çakışma nasıl önlensin": "When to run and how to avoid conflicts",
+    "Hız ve kaynak kullanımı": "Speed and resource usage",
+    "Kim, ne zaman haberdar olsun": "Who gets notified and when",
+    "Kaydetmeden önce kontrol et": "Check before saving",
+    /* --- hazır senaryolar --- */
+    "Hazır senaryolar": "Presets", "📅 Günlük — 14 gün": "📅 Daily — 14 days",
+    "🗄️ Haftalık arşiv — 6 ay": "🗄️ Weekly archive — 6 months",
+    "🔒 Kritik — 30 gün": "🔒 Critical — 30 days", "🧪 Test": "🧪 Test",
+    "senaryo yüklendi — kaydetmeden uygulanmaz": "preset loaded — not applied until you save",
+    /* --- form alanları --- */
+    "Genel": "General", "Plan adı": "Plan name", "Etkin": "Enabled",
+    "zamanlayıcı bu planı çalıştırsın": "let the scheduler run this plan",
+    "Kaynak (Proxmox)": "Source (Proxmox)", "Yedek klasörü": "Backup folder",
+    "Hedef (Google hesabı)": "Target (Google account)",
+    "Saklama süreleri": "Retention periods", "Drive'da tut (gün)": "Keep on Drive (days)",
+    "En az set (adet)": "Minimum sets (count)", "Çöpte bekle (gün)": "Wait in trash (days)",
+    "Zamanlama": "Schedule", "Aktarım": "Transfer", "Bildirim": "Notifications",
+    "Hız sınırı": "Speed limit", "Saatlik çizelge": "Hourly schedule",
+    "Sadece yükleme": "Upload only", "Eşzamanlı transfer": "Concurrent transfers",
+    "Checkers": "Checkers", "Drive parça boyutu": "Drive chunk size",
+    "Ek rclone argümanı": "Extra rclone arguments", "Gönderen profili": "Sender profile",
+    "Ne zaman mail": "When to email", "✔ Başarılı olunca": "✔ On success",
+    "✖ Hata olunca": "✖ On failure", "⏸ Atlanınca": "⏸ On skip",
+    "Rapor gönder": "Send report", "Dönem (gün)": "Period (days)",
+    "Uyarı eşiği (gün)": "Warning threshold (days)", "Kota uyarısı (%)": "Quota warning (%)",
+    "Rapor alıcısı": "Report recipient",
+    "haftalık özet raporu gönder": "send a weekly summary report",
+    /* --- çakışma koruması --- */
+    "Proxmox ile çakışma koruması": "Proxmox conflict protection",
+    "vzdump'ı bekle": "Wait for vzdump", "En fazla bekleme (dk)": "Max wait (min)",
+    "Dosya yaşı (dk)": "File age (min)", "Atlanacak desenler": "Skip patterns",
+    "Hatada retention": "Retention on failure",
+    "Proxmox yedeği biterken bekle": "wait for the Proxmox backup to finish",
+    "yükleme başarısız olsa da eskileri sil": "delete old ones even if the upload failed",
+    /* --- otomatik bant genişliği --- */
+    "Otomatik bant genişliği": "Automatic bandwidth", "Otomatik mod": "Automatic mode",
+    "Hat kapasitesi": "Link capacity", "Diğerlerine ayrılan": "Reserved for others",
+    "Alt sınır": "Lower bound", "Üst sınır": "Upper bound", "Ağ arayüzü": "Network interface",
+    "Ölçüm aralığı (sn)": "Measure interval (s)", "Yumuşatma (0-1)": "Smoothing (0-1)",
+    "Değişim eşiği (%)": "Change threshold (%)",
+    "hattaki diğer trafiğe göre kendini ayarla": "adapt to other traffic on the link",
+    "sınır yalnızca yüklemeye uygulansın": "apply the limit to uploads only",
+    "Çizelgesiz": "No schedule", "Mesai dostu": "Office friendly", "Sadece gece": "Night only",
+    /* --- hesaplar --- */
+    "👤 Google hesapları": "👤 Google accounts", "👤 Yönet": "👤 Manage",
+    "＋ Yeni hesap": "＋ New account", "Yeni Google hesabı yetkilendir": "Authorise a new Google account",
+    "Hesap adı": "Account name", "Tarayıcıyla yetkilendir": "Authorise with browser",
+    "Hazır jetonu yapıştır": "Paste an existing token", "Tünel komutu": "Tunnel command",
+    "▶ Başlat": "▶ Start", "Jeton (JSON)": "Token (JSON)", "Henüz hesap yok.": "No accounts yet.",
+    "jeton bekleniyor…": "waiting for token…", "iptal edildi": "cancelled",
+    "kota okunamadı": "quota unreadable", "Yönetmek için tıkla": "Click to manage",
+    /* --- mail profilleri --- */
+    "✉ Mail gönderici profilleri": "✉ Mail sender profiles", "✉ Yönet": "✉ Manage",
+    "Sağlayıcı şablonu": "Provider preset", "Profil adı": "Profile name",
+    "Yeni profil": "New profile", "Test maili": "Test email",
+    "Formu temizle": "Clear form", "Henüz profil yok.": "No profiles yet.",
+    "Özel (elle gir)": "Custom (enter manually)",
+    /* --- ayarlar --- */
+    "Tüm planlar için ortak.": "Shared by all plans.", "Web arayüzü": "Web interface",
+    "Dinlenen adres": "Listen address", "Yeni şifre": "New password",
+    "Tazeleme (sn)": "Refresh (s)", "Gelişmiş": "Advanced", "Gezinme kökleri": "Browse roots",
+    "Dosya adı kalıbı": "Filename pattern", "Geçmiş kaydı": "History entries",
+    "Log satırı": "Log lines", "rclone tampon satırı": "rclone buffer lines",
+    "Durum satır sınırı": "Status row limit", "Log boyutu (MB)": "Log size (MB)",
+    "Saklanan log": "Logs kept", "rclone zaman aşımı (dk)": "rclone timeout (min)",
+    "Hesap geneli cleanup": "Account-wide cleanup", "HTTPS": "HTTPS",
+    "Sertifika": "Certificate", "Güvenli çerez": "Secure cookie",
+    "Erişim kısıtlaması": "Access restriction", "İzinli ağlar": "Allowed networks",
+    "Güncelleme": "Update", "Kontrol et": "Check", "Otomatik kur": "Auto install",
+    "↻ Şimdi kontrol et": "↻ Check now", "⬇ Güncellemeyi kur": "⬇ Install update",
+    "↶ Önceki sürüme dön": "↶ Roll back", "boş = değişmesin": "empty = unchanged",
+    "günlük güncelleme kontrolü": "daily update check",
+    "bulunca kendiliğinden kur": "install automatically when found",
+    "çerezi sadece HTTPS'te gönder": "send the cookie over HTTPS only",
+    "son çare olarak rclone cleanup çalıştır": "run rclone cleanup as a last resort",
+    /* --- klasör gezgini --- */
+    "📁 Yedek klasörünü seç": "📁 Choose the backup folder", "📁 Gözat": "📁 Browse",
+    "Bu klasörü seç": "Use this folder", "⬆ üst klasör": "⬆ parent folder",
+    "alt klasör yok": "no subfolders",
+    /* --- kapasite --- */
+    "📐 Önerilen süreyi uygula": "📐 Apply suggested period",
+    "↻ Yeniden ölç": "↻ Measure again",
+    "Kaynak ve hesap seçilince kapasite hesabı burada çıkar.": "The capacity estimate appears here once a source and account are chosen.",
+    "ölçülüyor…": "measuring…", "ölçüm başarısız": "measurement failed",
+    /* --- mesajlar --- */
+    "çalışıyor…": "working…", "tamam": "done",
+    "gönderiliyor…": "sending…", "kontrol ediliyor…": "checking…",
+    "indiriliyor ve doğrulanıyor…": "downloading and verifying…",
+    "form hatalı — kırmızı alanlara bak": "form has errors — check the red fields",
+    "form hatalı": "form has errors",
+    "bu adımda eksik veya hatalı alan var": "this step has missing or invalid fields",
+    "önce hesap adı yaz": "enter an account name first",
+    "adresi tarayıcında aç": "open the address in your browser",
+    "oturum bitti": "session expired", "sunucu hatası": "server error",
+    "yeni profil için şifre gerekli": "a password is required for a new profile",
+    /* --- doğrulama --- */
+    "plan adı gerekli": "plan name is required",
+    "kaynak klasör gerekli": "source folder is required",
+    "hedef klasör gerekli": "target folder is required",
+    "önce bir Google hesabı ekle": "add a Google account first",
+    "alıcı adresi gerekli": "recipient address is required",
+    "kullanıcı adı gerekli": "username is required",
+    "kalıp boş olamaz": "the pattern cannot be empty",
+    "profil adı gerekli": "profile name is required",
+    "geçerli bir sunucu adı yaz": "enter a valid server name",
+    "geçerli JSON değil": "not valid JSON",
+    "sadece harf, rakam, - ve _": "letters, digits, - and _ only",
+    "ikisi birden 0 olamaz — hiç yedek kalmaz": "both cannot be 0 — you would keep no backups",
+    "alt sınır üst sınırdan büyük olamaz": "the lower bound cannot exceed the upper bound",
+    "geçersiz sayı": "invalid number", "bu alan gerekli": "this field is required",
+    "geçersiz adres: ": "invalid address: ", "geçersiz ağ: ": "invalid network: ",
+    /* --- onay soruları --- */
+    "Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.": "Delete this plan? The backup files on Drive are not touched.",
+    "Profil silinsin mi?": "Delete this profile?",
+    "Kaydedilmemiş değişiklikler var, kapatılsın mı?": "There are unsaved changes. Close anyway?",
+    /* --- ikinci parti --- */
+    "Çar": "Wed", "Plan: ": "Plan: ", "hata: ": "error: ", "uygun.": "is a good fit.",
+    "· Depo": "· Storage", " · çöp ": " · trash ", ". Örnek:": ". Example:",
+    "çalışmaz": "does not run", "  ·  boş ": "  ·  free ", "  ·  çöp ": "  ·  trash ",
+    " boş var.": " free.", " · güncel": " · up to date", "Düzenle: ": "Edit: ",
+    "Her giriş": "Each entry", "güncel: v": "up to date: v", "çizelge: ": "schedule: ",
+    " · bitiş: ": " · expires: ", "= sınırsız": "= unlimited",
+    "giriş yap:": "sign in:", "· 1 Gbit ≈": "· 1 Gbit ≈", "ölçülemedi": "not measured",
+    "seti korur.": "sets.", "yükleniyor…": "loading…", "(VPN ağın) ·": "(your VPN) ·",
+    "Kurulu sürüm": "Installed version", "her yerden ·": "from anywhere ·",
+    "ve uyarılar.": "and warnings.", "Birden fazla:": "Multiple:",
+    "Kapalı bırak.": "Leave it off.", "başlatılamadı": "could not start",
+    "Önerilen: <b>": "Suggested: <b>", " gün uygulandı": " days applied",
+    " günlük dönem)": " day period)", " hesap tanımlı": " accounts configured",
+    "API hızını kıs": "throttle API rate", "Günlük VM + CT": "Daily VM + CT",
+    "Günlük yedekte": "For a daily backup", "Haftalık arşiv": "Weekly archive",
+    "Yok (şifresiz)": "None (unencrypted)", "geçersiz değer": "invalid value",
+    "iyi bir değer.": "is a good value.", "vzdump koruması": "vzdump protection",
+    "Bağlantı şifreli": "Connection encrypted", "Günlük VM yedeği": "Daily VM backup",
+    "bekle, en fazla ": "wait, at most ", "beklemeden çalış": "run without waiting",
+    "yavaş hat için ·": "for a slow link ·", "ör. 30M veya boş": "e.g. 30M or empty",
+    "yeni sürüm var: v": "new version available: v",
+    "✉ Mail profilleri": "✉ Mail profiles", "Kurulu sürüm: <b>v": "Installed version: <b>v",
+    "Proxmox depoları: ": "Proxmox storages: ", "o saatten itibaren": "from that hour on",
+    "uzantısı kullanır.": "extension.", "Ölçüldü: günde <b>": "Measured: <b>",
+    "çalışmaz (güvenli)": "does not run (safe)", "(boş = sabit sınır)": "(empty = fixed limit)",
+    "Bit değil bayt yaz.": "Enter bytes, not bits.",
+    "Drive'daki tüm çöpü": "all trash in the Drive", "SMTP sunucu adresi.": "SMTP server address.",
+    "Sadece harf, rakam,": "Only letters, digits,", "yol argümanı almaz,": "takes no path argument,",
+    "⚠ klasör bulunamadı": "⚠ folder not found", " gün sonra ulaşılır.": " days.",
+    " günlük set, toplam ": " daily sets, total ", "SS:DD biçiminde saat": "time as HH:MM",
+    "ör. 30M, 2M veya off": "e.g. 30M, 2M or off",
+    "Virgülle ayır. Örnek:": "Comma separated. Example:",
+    " gün</b> (boş alanın %": " days</b> (uses %",
+    " gün</b> saklama + <b>": " days</b> retention + <b>",
+    "RAM ≈ parça × transfer": "RAM ≈ chunk × transfers",
+    "hedef Google hesabıyla": "with the target Google account",
+    "senin bilgisayarındaki": "on your own computer",
+    "uygun. Haftalık planda": "is right. For a weekly plan use",
+    "yetkilendirme sonlandı": "authorisation ended",
+    "Ölçüm ve ayar sıklığı.": "How often to measure and adjust.",
+    "Outlook / Microsoft 365": "Outlook / Microsoft 365",
+    "(boş = yukarıdaki alıcı)": "(empty = recipient above)",
+    ", uygulama şifresi üret.": ", create an app password.",
+    " gün sonra kalıcı silinir": " days it is permanently deleted",
+    "Mail gönderici profilleri": "Mail sender profiles",
+    "Yükleme hızın. 100 Mbit ≈": "Your upload speed. 100 Mbit ≈",
+    "düz HTTP ile ayakta kalır": "stays up over plain HTTP",
+    "log dosyalarını yükleme ·": "skip log files ·",
+    "yap, yoksa boşuna uyarır.": "instead, or it warns needlessly.",
+    "= hiç bekleme, hemen atla.": "= do not wait, skip immediately.",
+    "Raporun gönderileceği gün.": "Day the report is sent.",
+    "Sadece veritabanı sunucusu": "Database server only",
+    "kapalı (zamanlayıcı atlar)": "disabled (scheduler skips it)",
+    "yalnızca program dosyasını": "only the program file",
+    " gün</b> çöp → Drive'da <b>": " days</b> trash → <b>",
+    "Bu adresi tarayıcında aç ve": "Open this address in your browser and",
+    "Raporun gönderileceği saat.": "Time the report is sent.",
+    "Sertifikanın özel anahtarı.": "The certificate's private key.",
+    " gün · misafir başına en az ": " days · at least ",
+    "Proxmox'un kendi sertifikası:": "Proxmox's own certificate:",
+    "Sertifika yüklenemezse servis": "If the certificate cannot be loaded the service",
+    "(düzenlemede boş = değişmesin)": "(empty when editing = unchanged)",
+    "Boşlukla ayır. vzdump yazarken": "Space separated. While writing, vzdump uses the",
+    "Tahmini rclone RAM kullanımı: ": "Estimated rclone RAM use: ",
+    "önce geçerli bir hesap adı yaz": "enter a valid account name first",
+    "Google onaydan sonra tarayıcıyı": "After approval Google redirects the browser to",
+    " set var); hedef doluluğa ancak ": " sets in the source); the target level is reached in ",
+    "Her plan farklı klasöre yazmalı.": "Each plan must write to a different folder.",
+    "Proxmox işin 21:00'de başlıyorsa": "If your Proxmox job starts at 21:00 then",
+    "SS:DD biçiminde saat (ör. 03:00)": "time as HH:MM (e.g. 03:00)",
+    "Yeni sürümün indirileceği adres.": "Where the new version is downloaded from.",
+    "misafir bazında son yedek tarihi": "last backup date per guest",
+    "⚠ Bu süre hesaba <b>sığmaz</b>: ": "⚠ This period does <b>not fit</b>: ",
+    "Mesaide hattı boğma, gece hızlan:": "Go easy during work hours, fast at night:",
+    "Plan hedefinde görünecek kısa ad.": "Short name shown in the plan target.",
+    "Rapor kaç günlük dönemi kapsasın.": "How many days the report covers.",
+    "= çöpe uğramadan hemen kalıcı sil.": "= delete permanently without using the trash.",
+    "jeton alındı, hesap oluşturuluyor…": "token received, creating account…",
+    'klasör adında : * ? " < > | olamaz': 'folder name cannot contain : * ? " < > |',
+    "Henüz hesap yok — 'Yönet' ile ekle.": "No accounts yet — add one with 'Manage'.",
+    "Proxmox yedeğin ~1.5 saat sürüyorsa": "If your Proxmox backup takes ~1.5 hours then",
+    "Saklanacak eski log dosyası sayısı.": "How many rotated log files to keep.",
+    "sadece yerel (nginx/SSH tüneli ile)": "local only (via nginx/SSH tunnel)",
+    "Yedeğin hiç ilerlememesini engeller.": "Keeps the backup from stalling completely.",
+    " dolar. Misafirler büyürse yer biter.": " full. If guests grow you will run out.",
+    "'ini kullanır, büyümeye pay bırakır).": "of free space, leaving room to grow).",
+    "Bildirim seçili ama alıcı adresi boş.": "Notifications are on but no recipient is set.",
+    "Boş bırakırsan mevcut şifre değişmez.": "Leave empty to keep the current password.",
+    "IP adresi yaz (0.0.0.0 veya 127.0.0.1)": "enter an IP address (0.0.0.0 or 127.0.0.1)",
+    "ÇALIŞIR — yükleme başarısızsa da siler": "RUNS — deletes even if the upload failed",
+    "Google hesabı seçilmedi — 3. adıma dön.": "No Google account selected — go back to step 3.",
+    "Arayüzde gösterilecek log satırı sayısı.": "How many log lines the UI shows.",
+    "Boş bırakırsan yukarıdaki alıcıya gider.": "Leave empty to use the recipient above.",
+    "Tarayıcısı olan herhangi bir bilgisayarda": "On any computer that has a browser run",
+    "Tıklayınca seçilir, kopyala-yapıştır yap.": "Click to select, then copy and paste.",
+    "Önceki sürüme dönülecek. Devam edilsin mi?": "This rolls back to the previous version. Continue?",
+    "Günde bir kez yeni sürüm var mı diye bakar.": "Checks once a day for a new version.",
+    "Kota bu yüzdeyi aşarsa raporda uyarı çıkar.": "Warn in the report when quota exceeds this percentage.",
+    "Hangi sonuçta mail gelsin. Bağımsız seçilir.": "Which outcomes trigger an email. Chosen independently.",
+    "Trafik şifresiz — yalnızca VPN içinde kullan": "Traffic is unencrypted — use only inside a VPN",
+    "dengeli. Hızın sürekli inip çıkıyorsa düşür.": "is balanced. Lower it if the speed keeps oscillating.",
+    "Plan başına saklanacak çalışma geçmişi kaydı.": "Run history entries kept per plan.",
+    "Boş = her gün. Haftalık arşiv için tek gün seç.": "Empty = every day. Pick one day for a weekly archive.",
+    "Gereksiz ayar yapılmasını ve salınımı engeller.": "Prevents needless adjustments and oscillation.",
+    "Hat çok meşgulken bile bu hızın altına inilmez.": "Never drops below this even when the link is busy.",
+    "SMTP kullanıcı adı, genelde tam e-posta adresi.": "SMTP username, usually the full email address.",
+    "Düzenlerken boş bırakırsan mevcut şifre korunur.": "Leave empty when editing to keep the current password.",
+    "Profilin görünen adı. Plan formunda bu ad çıkar.": "Display name of the profile, shown in the plan form.",
+    "Adres veya port değişirse servisi yeniden başlat:": "If the address or port changes, restart the service:",
+    "' kaldırılsın mı? Drive'daki dosyalara dokunulmaz.": "' be removed? Files on Drive are not touched.",
+    "Dosya adı deseni. Grup 1=set, 2=tip, 3=id, 4=tarih.": "Filename pattern. Group 1=set, 2=type, 3=id, 4=date.",
+    "Klasör seçici yalnızca bu köklerin altını gösterir.": "The folder picker only shows paths under these roots.",
+    "geçerli olur. Boş bırakırsan sabit sınır kullanılır.": "applies. Leave empty to use the fixed limit.",
+    "Google hesaplarını yönet: kota, bağlantı testi, silme": "Manage Google accounts: quota, connection test, removal",
+    "Sunucu, port ve güvenlik ayarını sağlayıcından öğren.": "Get server, port and security settings from your provider.",
+    "Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?": "The UI restarts for a few seconds. Continue?",
+    "Şifreleme yöntemi. Sağlayıcı şablonu bunu da doldurur.": "Encryption method. The provider preset fills this in too.",
+    "Hesaplar, mail profilleri, güvenlik ve gelişmiş ayarlar": "Accounts, mail profiles, security and advanced settings",
+    "Firewall kurmaya gerek yok — kontrol uygulamanın içinde.": "No firewall needed — the check is inside the application.",
+    "Haftada bir, son dönemin özetini ve uyarıları mail atar.": "Emails a weekly summary of the period plus warnings.",
+    "Bu kadar gündür başarılı yedek yoksa raporda uyarı çıkar.": "Warn in the report after this many days without a successful backup.",
+    "Hattın bu yüzdesi her zaman diğer uygulamalara bırakılır.": "This percentage of the link is always left to other applications.",
+    "Kapsamlı silme yetmezse hesap geneli cleanup çalışsın mı.": "Run account-wide cleanup if scoped deletion is not enough.",
+    "Mail profili yok — '✉ Yönet' ile ekle, yoksa mail gitmez.": "No mail profile — add one with '✉ Manage' or no mail is sent.",
+    "Sertifika dosyası. Boş bırakırsan arayüz düz HTTP çalışır.": "Certificate file. Leave empty to run the UI over plain HTTP.",
+    "güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.": "is safe. Overlap is handled anyway, but let us not wait for nothing.",
+    "Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.": "Every day, keep 2 days, half a day in trash. For trying the setup.",
+    "Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin.": "If something is deleted by mistake you can restore it from Drive within this window.",
+    "Açıkken sınır yalnızca yüklemeye uygulanır, indirme etkilenmez.": "When on, the limit applies to uploads only; downloads are unaffected.",
+    "Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir.": "Retention on failure is on: old backups may be deleted before a new one lands.",
+    "Hesabın içindeki hedef klasör. Yoksa ilk çalışmada oluşturulur.": "Target folder inside the account. Created on the first run if missing.",
+    "Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.": "Fixed upload speed limit. The schedule takes precedence if set.",
+    "Ham rclone argümanları. Buradaki her şey komut satırına eklenir.": "Raw rclone arguments. Everything here is appended to the command line.",
+    "Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota,": "The report contains: run counts, uploaded/deleted files, quota,",
+    "Bildirimlerin gideceği adres. Virgülle birden fazla yazabilirsin.": "Where notifications go. Comma separate for multiple addresses.",
+    "Hazır sağlayıcı seçersen sunucu, port ve güvenlik otomatik dolar.": "Picking a provider preset fills in server, port and security.",
+    "Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.": "If none are selected it runs every day; otherwise only on those days.",
+    "Mailde görünecek gönderen adresi. Boşsa kullanıcı adı kullanılır.": "Sender address shown in the mail. Falls back to the username.",
+    "state.json'a yazılacak azami yedek/çöp satırı. Toplamlar tam kalır.": "Maximum backup/trash rows written to state.json. Totals stay exact.",
+    "Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.": "Two plans sharing a folder will treat each other's backups as old and delete them.",
+    "Hesaplanan yeni sınır mevcuttan bu yüzdeden az farklıysa uygulanmaz.": "A new limit is not applied if it differs from the current one by less than this.",
+    "Yeni sürüm bulununca kendiliğinden kurar. Kapalıyken sadece bildirir.": "Installs automatically when a new version is found; otherwise it only notifies.",
+    "Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son": "If a VM has not been backed up for 3 months the day rule would delete everything; this keeps the last",
+    "Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.": "This tool only uploads; turning it off also slows listing and downloads.",
+    "Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.": "How many files upload at once. Memory use: chunk size × this number.",
+    "Her gün 02:00, Drive'da 30 gün, misafir başına en az 7 set, çöpte 3 gün.": "Every day at 02:00, 30 days on Drive, at least 7 sets per guest, 3 days in trash.",
+    "Kapalıyken yükleme başarısızsa hiçbir yedek silinmez. Açmanız önerilmez.": "When off, nothing is deleted if the upload fails. Turning it on is not recommended.",
+    "Regex. Varsayılan vzdump adlarını tanır — değiştirmen normalde gerekmez.": "Regex. Recognises default vzdump names — you normally do not need to change it.",
+    "Bu desenlere uyan dosyalar hiç yüklenmez. vzdump geçici dosyaları burada.": "Files matching these patterns are never uploaded. vzdump temporary files go here.",
+    "Test maili hangi adrese gitsin?\\n(boş bırakırsan gönderen adresine gider)": "Where should the test mail go?\\n(empty = the sender address)",
+    "Arayüze yalnızca bu ağlardan erişilebilir. Boş bırakırsan kısıtlama olmaz.": "Only these networks may reach the UI. Leave empty for no restriction.",
+    "Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.": "Name shown in the list and mail subjects. The plan id is derived from it.",
+    "İnternet bağlantının toplam YÜKLEME kapasitesi. Hesaplamanın temeli budur.": "Your connection's total UPLOAD capacity. This is the basis of the calculation.",
+    "iyi bir değer. Çok düşürürsen yazılmakta olan dosyayı yakalama riski artar.": "is a good value. Lowering it raises the risk of catching a file still being written.",
+    "Her plan bu hesaplardan birine yazar. Başkasının hesabını da ekleyebilirsin.": "Each plan writes to one of these accounts. You can add someone else's account too.",
+    "Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.": "Every Sunday at 05:00, 180 days on Drive, 7 days in trash, low speed. Long-term archive.",
+    "Saate göre değişen hız sınırı. Doluysa yukarıdaki sabit sınırın yerine geçer.": "Speed limit that varies by hour. Overrides the fixed limit above when set.",
+    "%30 iyi bir başlangıç. Yükseltirsen daha nazik, düşürürsen daha hızlı olursun.": "30% is a good start. Raise it to be gentler, lower it to go faster.",
+    "Güvenlik tabanı: misafir başına bu kadar set, gün sınırına bakılmadan korunur.": "Safety floor: this many sets per guest are kept regardless of the day limit.",
+    "Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.": "Every day at 03:00, 14 days on Drive, 1 day in trash. The right start for most setups.",
+    "Proxmox host üzerindeki klasörler. Parantez içi: tanınan vzdump dosyası sayısı.": "Folders on the Proxmox host. In brackets: number of recognised vzdump files.",
+    "Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.": "All day-based values are here. Hover a field label for an explanation.",
+    "Kapalıysa zamanlayıcı bu planı atlar. Elle 'Yedekle' ile yine çalıştırabilirsin.": "When off the scheduler skips this plan. You can still run it manually with 'Back up'.",
+    "Mailin hangi hesaptan gönderileceği. Mail düğmesinden yeni profil ekleyebilirsin.": "Which account sends the mail. Add a new profile from the Mail button.",
+    "Çerezin yalnızca HTTPS üzerinden gönderilmesi. TLS açıkken zaten zorunlu tutulur.": "Send the cookie over HTTPS only. Already enforced when TLS is on.",
+    "Hat boşken bile bu hızın üstüne çıkılmaz. Boşsa yukarıdaki sabit sınır tavan olur.": "Never exceeds this even when the link is idle. Empty means the fixed limit is the ceiling.",
+    "Her plan istediği profilden mail atar. Farklı hesaplar, farklı sunucular olabilir.": "Each plan sends mail from the profile it chooses. Different accounts and servers are fine.",
+    "Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.": "Safety floor is 0: all backups of a guest not backed up for a long time may be deleted.",
+    "Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.": "How long it waits in Google trash. After that it is permanently deleted and quota is freed.",
+    "Proxmox'un vzdump çıktılarını yazdığı klasör. Depo başına ayrı bir dump klasörü olur.": "The folder where Proxmox writes vzdump output. Each storage has its own dump folder.",
+    "Bu süre dolarsa tur atlanır ve sonraki kontrolde yeniden denenir. Hiçbir şey silinmez.": "If this expires the round is skipped and retried at the next check. Nothing is deleted.",
+    "Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.": "The Google account backups are uploaded to. You can add and pick someone else's account.",
+    "Ölçümü yumuşatır. Düşük değer daha sakin, yüksek değer daha çevik ama salınıma yatkın.": "Smooths the measurement. Lower is calmer, higher is more responsive but prone to oscillation.",
+    "Sadece bu kadar dakikadır değişmemiş dosyalar yüklenir. Yazılmakta olan yedek yarım gitmez.": "Only files untouched for this many minutes are uploaded, so a backup being written is not sent half finished.",
+    "Karşılaştırma işçisi sayısı. Yüklemeyi değil, 'bu dosya zaten var mı' kontrolünü hızlandırır.": "Number of comparison workers. Speeds up the 'does this file already exist' check, not the upload.",
+    "Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.": "When the plan starts (24-hour clock). Pick a time after your Proxmox backup job finishes.",
+    "Arayüzün dinleyeceği adres. 127.0.0.1 yaparsan sadece SSH tüneli/ters vekil üzerinden erişilir.": "Address the UI listens on. Use 127.0.0.1 to allow access only via SSH tunnel or reverse proxy.",
+    "Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.": "Choosing a preset fills the form; you can change anything afterwards. Nothing is applied until you save.",
+    "Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.": "Uploading does not start while Proxmox's own backup runs. The lock file, process and files being written are all checked.",
+    "Trafiğin ölçüleceği ağ arayüzü. Proxmox'ta köprü yerine fiziksel/bond arayüzü seçmek VM ve CT trafiğini de kapsar.": "Interface to measure traffic on. On Proxmox, picking the physical/bond interface instead of the bridge also covers VM and CT traffic.",
+    "Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.": "Measures other traffic on the link and adjusts the upload speed live. Backs off when another backup tool uses the line.",
+};
+/**
+ * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
+ *
+ * Neden böyle: HTML'de 388, TypeScript'te 225 görünür metin var. Hepsini anahtara
+ * çevirmek yerine Türkçe metnin kendisi anahtar olarak kullanılır. Böylece işaretleme
+ * hiç değişmez, yeni metin eklerken sözlüğe satır eklemek yeter — unutulursa Türkçesi
+ * görünür, arayüz bozulmaz.
+ */
+let DIL = "tr";
+/** Türkçe metni geçerli dile çevirir. Karşılığı yoksa olduğu gibi döner. */
+function C(s) {
+    if (DIL === "tr")
+        return s;
+    const d = EN[s];
+    if (d !== undefined)
+        return d;
+    // Sonundaki noktalama/boşluk farkını tolere et: "Kaydet…" -> "Kaydet"
+    const kirp = s.trim();
+    if (kirp !== s && EN[kirp] !== undefined)
+        return s.replace(kirp, EN[kirp]);
+    return s;
+}
+function dilAl() { return DIL; }
+function dilKur(d) {
+    DIL = d === "en" ? "en" : "tr";
+    try {
+        localStorage.setItem("pg_dil", DIL);
+    }
+    catch { /* localStorage kapali olabilir */ }
+    document.documentElement.setAttribute("lang", DIL);
+}
+/** Sayfadaki duragan metinleri (metin dugumleri, title, placeholder) cevirir. */
+function sayfayiCevir(kok) {
+    if (DIL === "tr")
+        return;
+    const k = kok || document.body;
+    const yuru = document.createTreeWalker(k, NodeFilter.SHOW_TEXT);
+    const dugumler = [];
+    let n = yuru.nextNode();
+    while (n) {
+        dugumler.push(n);
+        n = yuru.nextNode();
+    }
+    for (const d of dugumler) {
+        const ham = d.nodeValue || "";
+        const kirp = ham.trim();
+        if (!kirp)
+            continue;
+        const ust = d.parentElement;
+        if (ust && (ust.tagName === "SCRIPT" || ust.tagName === "STYLE"))
+            continue;
+        const yeni = C(kirp);
+        if (yeni !== kirp)
+            d.nodeValue = ham.replace(kirp, yeni);
+    }
+    const oznitelikler = [["title", "title"], ["placeholder", "placeholder"]];
+    for (const [sec, oz] of oznitelikler) {
+        Array.prototype.slice.call(k.querySelectorAll("[" + sec + "]")).forEach((e) => {
+            const v = e.getAttribute(oz);
+            if (v) {
+                const y = C(v);
+                if (y !== v)
+                    e.setAttribute(oz, y);
+            }
+        });
+    }
+}
+/** Dil secicisi degisince: kaydet, sayfayi cevir, arayuzu yeniden ciz. */
+function dilDegistir(d) {
+    dilKur(d);
+    location.reload(); // en temizi: tum duragan metinler bastan cevrilir
+}
+/** Acilista kayitli dili uygula. */
+function dilBaslat() {
+    let d = "tr";
+    try {
+        d = localStorage.getItem("pg_dil") || "tr";
+    }
+    catch { /* yok say */ }
+    dilKur(d);
+    const sec = document.getElementById("dilsec");
+    if (sec)
+        sec.value = dilAl();
+    sayfayiCevir();
+}
 /** pve-gdrive-backup web arayuzu. tsc ile derlenip pve_gdrive.py icine gomulur. */
 let S = null;
 let sel = null;
@@ -3383,7 +3829,7 @@ let refTimer = 0;
 let LOGSRC = "all";
 let dirty = false;
 let running = 0;
-const WD = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
+const WD = ["Pzt", "Sal", C("Çar"), "Per", "Cum", "Cmt", "Paz"];
 function el(id) {
     const e = document.getElementById(id);
     if (!e)
@@ -3549,10 +3995,10 @@ async function loadIfaces(secili) {
         const j = await api("/api/ifaces");
         const list = j.ifaces || [];
         setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-            + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+            + list.map((i) => '<option value="' + esc(i.name) + '">C(' + esc(i.name)
                 + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
         setVal("e-bwif", secili);
-        setTxt("e-bwifhint", "Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
+        setTxt("e-bwifhint", "Proxmox')ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
             + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
     }
     catch { /* yok say */ }
@@ -3626,8 +4072,8 @@ function progBox(p) {
         h += '<tr><td class="small">Kalan süre</td><td class="r">' + esc(eta || "—")
             + '</td><td class="small">Tahmini bitiş</td><td class="r">' + bitis + "</td></tr>";
     }
-    h += '</tbody></table><div class="hint">Bu iş sunucuda çalışıyor — sayfayı yenilesen de '
-        + "kapatsan da devam eder.</div></div>";
+    h += '</tbody></table><div class="hintC(">Bu iş sunucuda çalışıyor — sayfayı yenilesen de '
+        + ")kapatsan da devam eder.</div></div>";
     return h;
 }
 function planCard(p) {
@@ -3641,9 +4087,9 @@ function planCard(p) {
         + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
         + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
         + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
-        + '<div class="row"><span>Saklama</span><b>' + p.keep_days + " gün · min " + p.keep_count
+        + '<div class="row"><span>Saklama</span><b>C(' + p.keep_days + " gün · min " + p.keep_count
         + " set · çöp " + p.drive_trash_days + " gün</b></div>"
-        + '<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
+        + ')<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
         + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
         + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
         + '<div class="pbtns" onclick="event.stopPropagation()">'
@@ -3680,9 +4126,9 @@ function detail(p) {
         + '<div class="grid">' + cards.map((c) => '<div class="card"><div class="k">' + c[0]
         + '</div><div class="v">' + c[1] + "</div></div>").join("") + "</div>"
         + '<h2>Google Drive kullanımı</h2><div class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>'
-        + '<div class="small" style="margin-top:8px">' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
+        + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
         + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
-        + '<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
+        + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
         + '<th>Misafir</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
         + (b.slice(0, 40).map((x) => {
             const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
@@ -3712,25 +4158,29 @@ function render() {
     running = ps.filter((p) => p.running).length;
     const tls = S.tls;
     setHtml("tlsrozet", tls && tls.aktif
-        ? '<span class="pill ok" title="Bağlantı şifreli">🔒 HTTPS</span>'
-        : '<span class="pill err" title="Trafik şifresiz — yalnızca VPN içinde kullan">⚠ HTTP</span>');
+        ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
+        : '<span class="pill err" title=C("Trafik şifresiz — yalnızca VPN içinde kullan")>⚠ HTTP</span>');
     const g = S.guncelleme;
     setHtml("uprozet", g && g.yeni_var
-        ? '<span class="pill run" title="Yeni sürüm var: ' + esc(g.uzak || "")
-            + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + " hazır</span>"
-        : '<span class="small" title="Kurulu sürüm">v' + esc(S.surum || "?") + "</span>");
+        ? '<span class="pill run" title=C("Yeni sürüm var: ' + esc(g.uzak || ")")
+            + '" style="cursor:pointer" onclick="openSettings()">⬆ C(' + esc(g.uzak || "") + " hazır</span>"
+        : ')<span class="small" title=C("Kurulu sürüm")>vC(' + esc(S.surum || "?") + "</span>");
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
-        || '<div class="card">Henüz plan yok. Sağ üstten "+ Yeni Plan" ile başla.</div>');
+        || ')<div class="card">Henüz plan yok. Sağ üstten C("+ Yeni Plan") ile başla.</div>');
     hesapSerit();
     setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
+    ceviriUygula();
     const tabs = [["all", "Tümü"], ["system", "Sistem"]]
         .concat(ps.map((p) => [p.id, p.name]));
     setHtml("logtabs", tabs.map((t) => '<button class="' + (LOGSRC === t[0] ? "on" : "")
         + "\" onclick=\"setLog('" + t[0] + "')\">" + esc(t[1]) + "</button>").join(""));
 }
 function setLog(src) { LOGSRC = src; remember(); void loadLog(); }
+/** Dinamik uretilen icerik de cevrilsin (kartlar, tablolar, modallar). */
+function ceviriUygula() { if (dilAl() !== "tr")
+    sayfayiCevir(); }
 /** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
  *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
 function hesapSerit() {
@@ -3744,7 +4194,7 @@ function hesapSerit() {
         if (!q.ok) {
             return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
                 + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '
-                + esc(q.error || "kota okunamadı") + "</div></div>";
+                + esc(q.error || C("kota okunamadı")) + "</div></div>";
         }
         const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
         const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
@@ -3752,7 +4202,7 @@ function hesapSerit() {
             + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
             + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
             + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
-            + (q.trashed ? " · çöp " + hb(q.trashed) : "") + "</div></div>";
+            + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "") + "</div></div>";
     }).join(""));
 }
 async function loadLog() {
@@ -3783,7 +4233,7 @@ async function refresh() {
     refTimer = window.setInterval(() => void refresh(), iv);
 }
 async function act(d, pid) {
-    flash("çalışıyor…", true);
+    flash(C("çalışıyor…"), true);
     try {
         const j = await api("/api/action?do=" + d + "&plan=" + encodeURIComponent(pid), { method: "POST" });
         flash(j.msg || "tamam", j.ok);
@@ -3794,7 +4244,7 @@ async function act(d, pid) {
     window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid) {
-    if (!confirm("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))
+    if (!confirm(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")))
         return;
     const j = await api("/api/plan/delete?plan=" + encodeURIComponent(pid), { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -3802,7 +4252,7 @@ async function delPlan(pid) {
 }
 async function logout() { await api("/logout", { method: "POST" }); location.reload(); }
 /* ---------- plan sihirbazi ---------- */
-const ADIMLAR = ["Plan", "Kaynak", "Hedef", "Saklama", "Zamanlama", "Aktarım", "Bildirim", "Özet"];
+const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI = [
     ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
@@ -3854,7 +4304,7 @@ function wAdimGecerli(adim) {
 }
 function wAdim(yon) {
     if (yon > 0 && !wAdimGecerli(wAktif)) {
-        flash("bu adımda eksik veya hatalı alan var", false);
+        flash(C("bu adımda eksik veya hatalı alan var"), false);
         return;
     }
     wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
@@ -3870,38 +4320,38 @@ function wSatir(baslik, deger, uyari) {
 function wOzet() {
     const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
         .map((c) => WD[Number(c.value) - 1]);
-    const bildirim = [chk("e-nsuc") ? "başarılı" : "", chk("e-nerr") ? "hata" : "",
-        chk("e-nskip") ? "atlandı" : ""].filter(Boolean).join(", ") || "hiçbiri";
+    const bildirim = [chk("e-nsuc") ? C("başarılı") : "", chk("e-nerr") ? "hata" : "",
+        chk("e-nskip") ? C("atlandı") : ""].filter(Boolean).join(", ") || C("hiçbiri");
     const oto = chk("e-bwauto");
     const hiz = oto ? ("otomatik (" + val("e-bwmin") + " – " + (val("e-bwmax") || val("e-bw")) + ")")
-        : (val("e-bwsch") ? "çizelge: " + val("e-bwsch") : val("e-bw"));
+        : (val("e-bwsch") ? C("çizelge: ") + val("e-bwsch") : val("e-bw"));
     let h = '<table class="ozet"><tbody>';
-    h += wSatir("Plan adı", val("e-name"));
-    h += wSatir("Durum", chk("e-enabled") ? "etkin" : "kapalı (zamanlayıcı atlar)", !chk("e-enabled"));
+    h += wSatir(C("Plan adı"), val("e-name"));
+    h += wSatir("Durum", chk("e-enabled") ? "etkin" : C("kapalı (zamanlayıcı atlar)"), !chk("e-enabled"));
     h += wSatir("Kaynak", val("e-src"));
     h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
-    h += wSatir("Saklama", val("e-kd") + " gün · misafir başına en az " + val("e-kc") + " set");
-    h += wSatir("Çöp süresi", val("e-td") + " gün sonra kalıcı silinir");
-    h += wSatir("Program", (wd.length ? wd.join(",") : "her gün") + " saat " + val("e-runat"));
-    h += wSatir("vzdump koruması", chk("e-wv")
-        ? "bekle, en fazla " + val("e-wvm") + " dk" : "beklemeden çalış", !chk("e-wv"));
+    h += wSatir("Saklama", val("e-kd") + C(" gün · misafir başına en az ") + val("e-kc") + C(" set"));
+    h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
+    h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
+    h += wSatir(C("vzdump koruması"), chk("e-wv")
+        ? C("bekle, en fazla ") + val("e-wvm") + C(" dk") : C("beklemeden çalış"), !chk("e-wv"));
     h += wSatir("Hatada retention", chk("e-pof")
-        ? "ÇALIŞIR — yükleme başarısızsa da siler" : "çalışmaz (güvenli)", chk("e-pof"));
-    h += wSatir("Hız", hiz);
+        ? C("ÇALIŞIR — yükleme başarısızsa da siler") : C("çalışmaz (güvenli)"), chk("e-pof"));
+    h += wSatir(C("Hız"), hiz);
     h += wSatir("Mail", (val("e-mail") || "—") + "  ·  " + bildirim);
-    h += wSatir("Haftalık rapor", chk("e-wr")
-        ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + " günlük dönem)"
-        : "kapalı");
+    h += wSatir(C("Haftalık rapor"), chk("e-wr")
+        ? WD[Number(val("e-rday")) - 1] + " " + val("e-rat") + " (" + val("e-rdays") + C(" günlük dönem)")
+        : C("kapalı"));
     h += "</tbody></table>";
     const uyarilar = [];
     if (!val("e-acct"))
-        uyarilar.push("Google hesabı seçilmedi — 3. adıma dön.");
+        uyarilar.push(C("Google hesabı seçilmedi — 3. adıma dön."));
     if (Number(val("e-kc")) === 0)
-        uyarilar.push("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.");
+        uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir."));
     if (chk("e-pof"))
-        uyarilar.push("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir.");
+        uyarilar.push(C("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir."));
     if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
-        uyarilar.push("Bildirim seçili ama alıcı adresi boş.");
+        uyarilar.push(C("Bildirim seçili ama alıcı adresi boş."));
     if (uyarilar.length) {
         h += '<div class="hint" style="margin-top:10px;color:#ffd479">'
             + uyarilar.map((u) => "⚠ " + esc(u)).join("<br>") + "</div>";
@@ -3963,18 +4413,18 @@ function preset(k) {
     good("e-bwsch");
     ramHint();
     markDirty();
-    flash("senaryo yüklendi — kaydetmeden uygulanmaz", true);
+    flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
 }
 function ramHint() {
     const c = String(val("e-chunk") || "").match(/^(\d+(?:\.\d+)?)([KMG])$/i);
     const t = Number(val("e-tr")) || 1;
     if (!c) {
-        setTxt("e-ram", "RAM ≈ parça × transfer");
+        setTxt("e-ram", C("RAM ≈ parça × transfer"));
         return;
     }
     const carp = { K: 1 / 1024, M: 1, G: 1024 };
     const mb = parseFloat(c[1]) * carp[c[2].toUpperCase()];
-    setTxt("e-ram", "Tahmini rclone RAM kullanımı: " + Math.round(mb * t) + " MB ("
+    setTxt("e-ram", C("Tahmini rclone RAM kullanımı: ") + Math.round(mb * t) + " MB ("
         + c[0] + " × " + t + " transfer)");
 }
 function openEditor(pid) {
@@ -3983,12 +4433,12 @@ function openEditor(pid) {
     dirty = false;
     wSihirbaz = !pid; // yeni plan: sihirbaz, mevcut plan: tek sayfa form
     wAktif = 1;
-    setTxt("ed-title", p ? "Plan: " + p.name : "🧭 Yeni plan sihirbazı");
+    setTxt("ed-title", p ? C("Plan: ") + p.name : C("🧭 Yeni plan sihirbazı"));
     setTxt("ed-alt", p
-        ? "Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar."
-        : "Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın.");
+        ? C("Tüm ayarlar tek sayfada. Alan adlarının üstüne gelince açıklama çıkar.")
+        : C("Adım adım ilerle. Hiçbir şey kaydedilmez, son adımda onaylarsın."));
     const d = {
-        name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
+        name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: C("gdrive:proxmox-yedek"),
         keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
         bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
         transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [],
@@ -4001,7 +4451,7 @@ function openEditor(pid) {
     const v = (p || d);
     // Ortak alanlar tablodan doldurulur (bkz. alanlar.ts); asagidakiler ozel durumlar.
     alanlariDoldur(v);
-    const rp = String(v.remote || "gdrive:proxmox-yedek").split(":");
+    const rp = String(v.remote || C("gdrive:proxmox-yedek")).split(":");
     setVal("e-folder", rp.slice(1).join(":"));
     void loadIfaces(v.bw_auto_iface || "");
     bwAutoToggle();
@@ -4009,7 +4459,7 @@ function openEditor(pid) {
     setVal("e-rday", v.report_day || 1);
     setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
         + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
-    setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : "⚠ klasör bulunamadı") : "");
+    setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
     void loadRemotes(rp[0]);
     loadSmtpSelect(v.smtp_profile);
     void loadStorages();
@@ -4021,6 +4471,7 @@ function openEditor(pid) {
     fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
     fld("e-tr").oninput = () => { ramHint(); markDirty(); };
     hesapPaneliTasi("w-hesap-yuvasi", false);
+    ceviriUygula();
     KAP = null;
     kapAnahtar = "";
     wGoster();
@@ -4033,25 +4484,25 @@ function validatePlan() {
     // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
     let ok = alanlariDogrula();
     if (!val("e-acct"))
-        ok = bad("e-acct", "önce bir Google hesabı ekle") && ok;
+        ok = bad("e-acct", C("önce bir Google hesabı ekle")) && ok;
     else
         good("e-acct");
-    ok = vRx("e-folder", RX.folder, 'klasör adında : * ? " < > | olamaz') && ok;
+    ok = vRx("e-folder", RX.folder, C('klasör adında : * ? " < > | olamaz')) && ok;
     if (!val("e-folder").trim())
-        ok = bad("e-folder", "hedef klasör gerekli") && ok;
+        ok = bad("e-folder", C("hedef klasör gerekli")) && ok;
     if (chk("e-bwauto")) {
         const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
         if (ust && alt && alt > ust)
-            ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
+            ok = bad("e-bwmin", C("alt sınır üst sınırdan büyük olamaz")) && ok;
     }
     if (Number(val("e-kc")) === 0 && Number(val("e-kd")) === 0) {
-        ok = bad("e-kc", "ikisi birden 0 olamaz — hiç yedek kalmaz") && ok;
+        ok = bad("e-kc", C("ikisi birden 0 olamaz — hiç yedek kalmaz")) && ok;
     }
     return ok;
 }
 async function savePlan() {
     if (!validatePlan()) {
-        flash("form hatalı — kırmızı alanlara bak", false);
+        flash(C("form hatalı — kırmızı alanlara bak"), false);
         return;
     }
     const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
@@ -4080,7 +4531,7 @@ let kapAnahtar = "";
 async function kapasiteYukle(zorla) {
     const src = val("e-src").trim(), hesap = val("e-acct");
     if (!src || !hesap) {
-        setTxt("kap-durum", "Kaynak ve hesap seçilince kapasite hesabı burada çıkar.");
+        setTxt("kap-durum", C("Kaynak ve hesap seçilince kapasite hesabı burada çıkar."));
         return;
     }
     const anahtar = src + "|" + hesap;
@@ -4088,13 +4539,13 @@ async function kapasiteYukle(zorla) {
         kapasiteCiz();
         return;
     }
-    setTxt("kap-durum", "ölçülüyor…");
+    setTxt("kap-durum", C("ölçülüyor…"));
     try {
         KAP = await api("/api/analiz?src=" + encodeURIComponent(src) + "&hesap=" + encodeURIComponent(hesap));
         kapAnahtar = anahtar;
     }
     catch {
-        setTxt("kap-durum", "ölçüm başarısız");
+        setTxt("kap-durum", C("ölçüm başarısız"));
         return;
     }
     kapasiteCiz();
@@ -4105,7 +4556,7 @@ function kapasiteCiz() {
     const a = KAP.analiz, q = KAP.kota || {};
     const goster = (id, g) => { el(id).style.display = g ? "" : "none"; };
     if (!a.ok) {
-        setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || "ölçülemedi") + "</span>");
+        setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || C("ölçülemedi")) + "</span>");
         ["kap-bar", "kap-alt", "kap-btn"].forEach((i) => goster(i, false));
         setHtml("kap-misafir", "");
         return;
@@ -4117,9 +4568,9 @@ function kapasiteCiz() {
     const sonraPct = toplam ? ((kullanilan + gereken) / toplam) * 100 : 0;
     const mevcutPct = toplam ? (kullanilan / toplam) * 100 : 0;
     const sigar = gereken < bos;
-    setHtml("kap-durum", "Ölçüldü: günde <b>" + hb(gunluk) + "</b> üretiliyor ("
-        + (a.set_sayisi || 0) + " günlük set, toplam " + hb(a.toplam) + ").<br>"
-        + "<b>" + gun + " gün</b> saklama + <b>" + cop + " gün</b> çöp → Drive'da <b>" + hb(gereken)
+    setHtml("kap-durum", C("Ölçüldü: günde <b>") + hb(gunluk) + "</b> üretiliyor ("
+        + (a.set_sayisi || 0) + C(" günlük set, toplam ") + hb(a.toplam) + ").<br>"
+        + "<b>" + gun + C(" gün</b> saklama + <b>") + cop + C(" gün</b> çöp → Drive'da <b>") + hb(gereken)
         + "</b> gerekir.");
     goster("kap-bar", true);
     goster("kap-alt", true);
@@ -4133,17 +4584,17 @@ function kapasiteCiz() {
         + "<span>hesap: " + hb(toplam) + "</span>");
     let uyari = "";
     if (!sigar) {
-        uyari = "⚠ Bu süre hesaba <b>sığmaz</b>: " + hb(gereken) + " gerekiyor, " + hb(bos) + " boş var.";
+        uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
     }
     else if (sonraPct >= 85) {
-        uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + " dolar. Misafirler büyürse yer biter.";
+        uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. Misafirler büyürse yer biter.");
     }
     if (KAP.oneri) {
-        uyari += (uyari ? "<br>" : "") + "Önerilen: <b>" + KAP.oneri + " gün</b> (boş alanın %"
-            + (KAP.oneri_pay_pct || 60) + "'ini kullanır, büyümeye pay bırakır).";
+        uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
+            + (KAP.oneri_pay_pct || 60) + C("'ini kullanır, büyümeye pay bırakır).");
     }
     const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
-        + " set var); hedef doluluğa ancak " + gun + " gün sonra ulaşılır.";
+        + C(" set var); hedef doluluğa ancak ") + gun + C(" gün sonra ulaşılır.");
     setHtml("kap-misafir", (uyari ? '<div class="kap-uyari">' + uyari + ilk + "</div>" : '<div class="kap-uyari">' + ilk.slice(4) + "</div>")
         + "<table><tbody>" + (a.misafirler || []).map((m) => "<tr><td>" + esc(m.ad) + "</td><td>set başına " + hb(m.set_basina)
         + " · %" + m.pay + "</td></tr>").join("") + "</tbody></table>");
@@ -4155,14 +4606,14 @@ function kapasiteOner() {
     good("e-kd");
     markDirty();
     kapasiteCiz();
-    flash(KAP.oneri + " gün uygulandı", true);
+    flash(KAP.oneri + C(" gün uygulandı"), true);
 }
 /* ---------- klasor gezgini ---------- */
 async function loadStorages() {
     try {
         const j = await api("/api/storages");
         const s = j.storages || [];
-        setHtml("e-stor", s.length ? "Proxmox depoları: " + s.map((x) => "<a href=\"#\" onclick=\"setSrc('" + x.path + "');return false\" style=\"color:#58a6ff\">"
+        setHtml("e-stor", s.length ? C("Proxmox depoları: ") + s.map((x) => "<a href=\"#\" onclick=\"setSrc('" + x.path + "');return false\" style=\"color:#58a6ff\">"
             + esc(x.name) + " (" + x.dumps + ")</a>").join(" · ") : "");
     }
     catch { /* yok say */ }
@@ -4175,7 +4626,7 @@ async function goDir(p) {
     setTxt("b-path", j.path + (j.error ? "  ⚠ " + j.error : "  (" + j.dumps + " dosya)"));
     setHtml("b-stor", (j.roots || []).map((r) => "<button class=\"sm\" onclick=\"goDir('" + r + "')\">"
         + esc(r) + "</button>").join(""));
-    let h = j.parent ? "<div onclick=\"goDir('" + j.parent + "')\"><span>⬆ üst klasör</span><span></span></div>" : "";
+    let h = j.parent ? "<div onclick=\"goDir('" + j.parent + C("')\"><span>⬆ üst klasör</span><span></span></div>") : "";
     h += (j.dirs || []).map((d) => "<div onclick=\"goDir('" + d.path + "')\"><span>📁 " + esc(d.name)
         + '</span><span class="small">' + (d.dumps ? d.dumps + " dosya" : "") + "</span></div>").join("");
     setHtml("b-list", h || '<div><span class="small">alt klasör yok</span><span></span></div>');
@@ -4200,7 +4651,7 @@ async function loadRemotes(selName) {
         + "</option>").join("") || '<option value="">(hesap yok)</option>');
     if (selName)
         setVal("e-acct", selName);
-    setTxt("e-accthint", REM.length ? REM.length + " hesap tanımlı" : "Henüz hesap yok — 'Yönet' ile ekle.");
+    setTxt("e-accthint", REM.length ? REM.length + C(" hesap tanımlı") : C("Henüz hesap yok — 'Yönet' ile ekle."));
 }
 function openAccounts() {
     openM("m-acct");
@@ -4226,14 +4677,14 @@ async function renderAccounts() {
     REM = j.remotes || [];
     setHtml("a-list", REM.length ? REM.map((r) => {
         const q = r.quota || {};
-        const line = q.ok ? hb(q.used) + " / " + hb(q.total) + "  ·  çöp " + hb(q.trashed || 0)
-            + "  ·  boş " + hb(q.free || 0) : "⚠ " + esc(q.error || "kota okunamadı");
+        const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
+            + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
         return '<div class="card" style="margin-bottom:8px"><div style="display:flex;'
             + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
             + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
             + '<span style="flex:1"></span>'
             + "<button class=\"sm\" onclick=\"acctTest('" + r.name + "')\">Test</button>"
-            + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + "')\">Sil</button></div>"
+            + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + C("')\">Sil</button></div>")
             + '<div class="small" style="margin-top:6px">' + line + "</div></div>";
     }).join("") : '<div class="small">Henüz hesap yok.</div>');
 }
@@ -4243,7 +4694,7 @@ async function acctTest(n) {
     flash(j.msg || "", j.ok);
 }
 async function acctDel(n) {
-    if (!confirm("'" + n + "' kaldırılsın mı? Drive'daki dosyalara dokunulmaz."))
+    if (!confirm("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz.")))
         return;
     const j = await api("/api/remote/delete?name=" + encodeURIComponent(n), { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -4260,7 +4711,7 @@ async function acctPaste() {
         JSON.parse(val("a-token"));
     }
     catch {
-        bad("a-token", "geçerli JSON değil");
+        bad("a-token", C("geçerli JSON değil"));
         return;
     }
     good("a-token");
@@ -4281,19 +4732,19 @@ async function acctPaste() {
 }
 async function authStart() {
     if (!RX.acct.test(val("a-name").trim())) {
-        bad("a-name", "önce geçerli bir hesap adı yaz");
+        bad("a-name", C("önce geçerli bir hesap adı yaz"));
         return;
     }
     good("a-name");
     const j = await api("/api/remote/auth/start", { method: "POST" });
     setVal("a-tunnel", j.tunnel || "");
     if (!j.ok) {
-        flash(j.msg || "başlatılamadı", false);
+        flash(j.msg || C("başlatılamadı"), false);
         return;
     }
     el("a-authbox").style.display = "";
     setTxt("a-url", j.url || "");
-    flash("adresi tarayıcında aç", true);
+    flash(C("adresi tarayıcında aç"), true);
     pollAuth();
 }
 function pollAuth() {
@@ -4303,7 +4754,7 @@ function pollAuth() {
             const st = await api("/api/remote/auth/status");
             if (st.ready) {
                 window.clearInterval(authTimer);
-                setTxt("a-wait", "jeton alındı, hesap oluşturuluyor…");
+                setTxt("a-wait", C("jeton alındı, hesap oluşturuluyor…"));
                 const j = await api("/api/remote/auth/finish", { method: "POST",
                     body: JSON.stringify({ name: val("a-name") }) });
                 flash(j.msg || "", j.ok);
@@ -4321,7 +4772,7 @@ function pollAuth() {
             }
             else if (!st.waiting) {
                 window.clearInterval(authTimer);
-                setTxt("a-wait", "yetkilendirme sonlandı");
+                setTxt("a-wait", C("yetkilendirme sonlandı"));
             }
         })();
     }, 2000);
@@ -4334,15 +4785,15 @@ async function authCancel() {
 }
 const SMTP_PRESETS = {
     gmail: { host: "smtp.gmail.com", port: 587, security: "starttls",
-        hint: "Gmail hesap şifresi çalışmaz. Google Hesabı → Güvenlik → 2 Adımlı Doğrulama → Uygulama şifreleri'nden 16 haneli şifre üret." },
+        hint: C("Gmail hesap şifresi çalışmaz. Google Hesabı → Güvenlik → 2 Adımlı Doğrulama → Uygulama şifreleri'nden 16 haneli şifre üret.") },
     outlook: { host: "smtp.office365.com", port: 587, security: "starttls",
-        hint: "Microsoft 365 / Outlook. Kurumsal hesaplarda SMTP AUTH kapalı olabilir, yöneticiden açtırman gerekebilir." },
+        hint: C("Microsoft 365 / Outlook. Kurumsal hesaplarda SMTP AUTH kapalı olabilir, yöneticiden açtırman gerekebilir.") },
     yandex: { host: "smtp.yandex.com", port: 465, security: "ssl",
-        hint: "Yandex'te 'Uygulama şifreleri' bölümünden şifre üret. Kullanıcı adı tam adres olmalı." },
+        hint: C("Yandex'te 'Uygulama şifreleri' bölümünden şifre üret. Kullanıcı adı tam adres olmalı.") },
     yahoo: { host: "smtp.mail.yahoo.com", port: 465, security: "ssl",
-        hint: "Yahoo'da uygulama şifresi zorunlu, normal şifre kabul edilmez." },
+        hint: C("Yahoo'da uygulama şifresi zorunlu, normal şifre kabul edilmez.") },
     custom: { host: "", port: 587, security: "starttls",
-        hint: "Sunucu, port ve güvenlik ayarını sağlayıcından öğren." },
+        hint: C("Sunucu, port ve güvenlik ayarını sağlayıcından öğren.") },
 };
 function smtpPreset() {
     const v = SMTP_PRESETS[val("s-preset")];
@@ -4361,16 +4812,16 @@ function loadSmtpSelect(selId) {
         + " (" + esc(x.user || x.host) + ")</option>").join("") || '<option value="">(profil yok)</option>');
     if (selId)
         setVal("e-smtp", selId);
-    setTxt("e-smtphint", SMTP.length ? "" : "Mail profili yok — '✉ Yönet' ile ekle, yoksa mail gitmez.");
+    setTxt("e-smtphint", SMTP.length ? "" : C("Mail profili yok — '✉ Yönet' ile ekle, yoksa mail gitmez."));
 }
 function renderSmtp() {
     SMTP = (S && S.smtp) || [];
     setHtml("s-list", SMTP.length ? SMTP.map((x) => '<div class="card" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
         + 'gap:8px;align-items:center;flex-wrap:wrap"><b>' + esc(x.name) + "</b>"
         + '<span style="flex:1"></span>'
-        + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + "')\">Düzenle</button>"
+        + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + C("')\">Düzenle</button>")
         + "<button class=\"sm\" onclick=\"smtpTest('" + x.id + "')\">Test maili</button>"
-        + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + "')\">Sil</button></div>"
+        + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + C("')\">Sil</button></div>")
         + '<div class="small" style="margin-top:6px">' + esc(x.user || "-") + " · " + esc(x.host)
         + ":" + x.port + " · " + esc(x.security) + "</div></div>").join("")
         : '<div class="small">Henüz profil yok.</div>');
@@ -4400,17 +4851,17 @@ function smtpEdit(id) {
     setVal("s-user", x.user);
     setVal("s-pass", "");
     setVal("s-from", x.from);
-    setTxt("s-formtitle", "Düzenle: " + x.name);
+    setTxt("s-formtitle", C("Düzenle: ") + x.name);
 }
 async function smtpSave() {
     let ok = true;
-    ok = vTxt("s-name", "profil adı gerekli") && ok;
-    ok = vRx("s-host", RX.host, "geçerli bir sunucu adı yaz") && ok;
-    ok = vNum("s-port", 1, 65535, "1-65535 arası port") && ok;
+    ok = vTxt("s-name", C("profil adı gerekli")) && ok;
+    ok = vRx("s-host", RX.host, C("geçerli bir sunucu adı yaz")) && ok;
+    ok = vNum("s-port", 1, 65535, C("1-65535 arası port")) && ok;
     ok = vMails("s-user", true) && ok;
     ok = vMails("s-from", true) && ok;
     if (!ok) {
-        flash("form hatalı", false);
+        flash(C("form hatalı"), false);
         return;
     }
     const b = {
@@ -4420,7 +4871,7 @@ async function smtpSave() {
     if (val("s-pass"))
         b.pass = val("s-pass");
     if (!val("s-id") && !val("s-pass")) {
-        flash("yeni profil için şifre gerekli", false);
+        flash(C("yeni profil için şifre gerekli"), false);
         return;
     }
     const j = await api("/api/smtp/save", { method: "POST", body: JSON.stringify(b) });
@@ -4442,10 +4893,10 @@ async function smtpDel(id) {
     loadSmtpSelect();
 }
 async function smtpTest(id) {
-    const to = prompt("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)", "");
+    const to = prompt(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
     if (to === null)
         return;
-    flash("gönderiliyor…", true);
+    flash(C("gönderiliyor…"), true);
     const j = await api("/api/smtp/test?id=" + encodeURIComponent(id) + "&to=" + encodeURIComponent(to), { method: "POST" });
     flash(j.msg || "", j.ok);
 }
@@ -4481,33 +4932,33 @@ function openSettings() {
     const c = t && t.sertifika;
     setHtml("g-tlsdurum", t && t.aktif
         ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
-            + "</b> · veren: " + esc(c ? c.veren : "-") + " · bitiş: " + esc(c ? c.bitis : "-")
+            + "</b> · veren: " + esc(c ? c.veren : "-") + C(" · bitiş: ") + esc(c ? c.bitis : "-")
         : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
     openM("m-set");
 }
 async function saveSettings() {
     let ok = true;
-    ok = vRx("g-bind", RX.ip, "IP adresi yaz (0.0.0.0 veya 127.0.0.1)") && ok;
+    ok = vRx("g-bind", RX.ip, C("IP adresi yaz (0.0.0.0 veya 127.0.0.1)")) && ok;
     ok = vNum("g-port", 1, 65535, "1-65535") && ok;
-    ok = vTxt("g-user", "kullanıcı adı gerekli") && ok;
-    ok = vNum("g-refresh", 1, 3600, "1-3600 sn") && ok;
+    ok = vTxt("g-user", C("kullanıcı adı gerekli")) && ok;
+    ok = vNum("g-refresh", 1, 3600, C("1-3600 sn")) && ok;
     ok = vNum("g-hist", 1, 1000, "1-1000") && ok;
     ok = vNum("g-logn", 10, 5000, "10-5000") && ok;
     ok = vNum("g-tail", 1, 1000, "1-1000") && ok;
     ok = vNum("g-rows", 1, 10000, "1-10000") && ok;
     ok = vNum("g-logmb", 0, 1000, "0-1000 MB") && ok;
     ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
-    ok = vNum("g-tmo", 0, 1440, "0-1440 dk") && ok;
-    ok = vTxt("g-re", "kalıp boş olamaz") && ok;
+    ok = vNum("g-tmo", 0, 1440, C("0-1440 dk")) && ok;
+    ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
     const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
     const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
         && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
     if (kotuNet.length)
-        ok = bad("g-nets", "geçersiz ağ: " + kotuNet[0]) && ok;
+        ok = bad("g-nets", C("geçersiz ağ: ") + kotuNet[0]) && ok;
     else
         good("g-nets");
     if (!ok) {
-        flash("form hatalı", false);
+        flash(C("form hatalı"), false);
         return;
     }
     const b = {
@@ -4535,14 +4986,14 @@ async function saveSettings() {
 function upDurum() {
     const g = S && S.guncelleme;
     const v = (S && S.surum) || "?";
-    let h = "Kurulu sürüm: <b>v" + esc(v) + "</b>";
+    let h = C("Kurulu sürüm: <b>v") + esc(v) + "</b>";
     if (g && g.hata)
         h += ' · <span style="color:#ff9b9b">kontrol hatası: ' + esc(g.hata) + "</span>";
     else if (g && g.yeni_var)
         h += ' · <span style="color:#ffd479">yeni sürüm hazır: <b>v'
             + esc(g.uzak || "") + "</b></span>";
     else if (g && g.uzak)
-        h += " · güncel";
+        h += C(" · güncel");
     setHtml("g-guncel", h);
     el("g-upbtn").style.display = g && g.yeni_var ? "" : "none";
 }
@@ -4551,21 +5002,21 @@ async function upKontrol() {
     const j = await api("/api/update/check?force=1");
     await refresh();
     upDurum();
-    flash(j.hata ? "hata: " + j.hata
-        : (j.yeni_var ? "yeni sürüm var: v" + j.uzak : "güncel: v" + j.surum), !j.hata);
+    flash(j.hata ? C("hata: ") + j.hata
+        : (j.yeni_var ? C("yeni sürüm var: v") + j.uzak : C("güncel: v") + j.surum), !j.hata);
 }
 async function upKur() {
-    if (!confirm("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n"
-        + "Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?"))
+    if (!confirm(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
+        + C("Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?")))
         return;
-    flash("indiriliyor ve doğrulanıyor…", true);
+    flash(C("indiriliyor ve doğrulanıyor…"), true);
     const j = await api("/api/update/apply", { method: "POST" });
     flash(j.msg || "", j.ok);
     if (j.ok)
         window.setTimeout(() => location.reload(), 6000);
 }
 async function upGeri() {
-    if (!confirm("Önceki sürüme dönülecek. Devam edilsin mi?"))
+    if (!confirm(C("Önceki sürüme dönülecek. Devam edilsin mi?")))
         return;
     const j = await api("/api/update/rollback", { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -4578,7 +5029,7 @@ Array.prototype.slice.call(document.querySelectorAll(".mask")).forEach((m) => {
         if (e.target !== m)
             return;
         if (m.id === "m-edit" && dirty
-            && !confirm("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))
+            && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?")))
             return;
         m.classList.remove("show");
         if (m.id === "m-edit")
@@ -4590,11 +5041,12 @@ document.addEventListener("keydown", (e) => {
         return;
     Array.prototype.slice.call(document.querySelectorAll(".mask.show")).forEach((m) => {
         if (m.id === "m-edit" && dirty
-            && !confirm("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))
+            && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?")))
             return;
         m.classList.remove("show");
     });
 });
+dilBaslat();
 void refresh();
 /**
  * Plan formu alan tablosu.
@@ -4605,27 +5057,27 @@ void refresh();
  */
 const PLAN_ALANLARI = [
     // 1. Plan
-    { id: "e-name", anahtar: "name", tip: "metin", adim: 1, mesaj: "plan adı gerekli" },
+    { id: "e-name", anahtar: "name", tip: "metin", adim: 1, mesaj: C("plan adı gerekli") },
     { id: "e-enabled", anahtar: "enabled", tip: "onay", adim: 0 },
     // 2. Kaynak
-    { id: "e-src", anahtar: "src_dir", tip: "metin", adim: 2, mesaj: "kaynak klasör gerekli" },
+    { id: "e-src", anahtar: "src_dir", tip: "metin", adim: 2, mesaj: C("kaynak klasör gerekli") },
     // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
     // 4. Saklama
-    { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: "0-3650 arası gün" },
-    { id: "e-kc", anahtar: "keep_count", tip: "sayi", adim: 4, min: 0, max: 999, mesaj: "0-999 arası adet" },
-    { id: "e-td", anahtar: "drive_trash_days", tip: "sayi", adim: 4, min: 0, max: 365, mesaj: "0-365 arası gün" },
+    { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },
+    { id: "e-kc", anahtar: "keep_count", tip: "sayi", adim: 4, min: 0, max: 999, mesaj: C("0-999 arası adet") },
+    { id: "e-td", anahtar: "drive_trash_days", tip: "sayi", adim: 4, min: 0, max: 365, mesaj: C("0-365 arası gün") },
     // 5. Zamanlama ve cakisma
-    { id: "e-runat", anahtar: "run_at", tip: "saat", adim: 5, mesaj: "SS:DD biçiminde saat (ör. 03:00)" },
+    { id: "e-runat", anahtar: "run_at", tip: "saat", adim: 5, mesaj: C("SS:DD biçiminde saat (ör. 03:00)") },
     { id: "e-wv", anahtar: "wait_for_vzdump", tip: "onay", adim: 0 },
-    { id: "e-wvm", anahtar: "vzdump_wait_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: "0-1440 dakika" },
-    { id: "e-mage", anahtar: "min_age_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: "0-1440 dakika" },
+    { id: "e-wvm", anahtar: "vzdump_wait_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
+    { id: "e-mage", anahtar: "min_age_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
     { id: "e-skip", anahtar: "skip_patterns", tip: "liste", adim: 0 },
     { id: "e-pof", anahtar: "prune_on_failure", tip: "onay", adim: 0 },
     // 6. Aktarim
-    { id: "e-bw", anahtar: "bwlimit", tip: "metin", adim: 6, rx: RX.bw, ops: true, mesaj: "ör. 30M, 2M veya off" },
-    { id: "e-tr", anahtar: "transfers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: "1-64 arası" },
-    { id: "e-ck", anahtar: "checkers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: "1-64 arası" },
-    { id: "e-chunk", anahtar: "drive_chunk", tip: "metin", adim: 6, rx: RX.chunk, mesaj: "ör. 64M, 128M, 8M" },
+    { id: "e-bw", anahtar: "bwlimit", tip: "metin", adim: 6, rx: RX.bw, ops: true, mesaj: C("ör. 30M, 2M veya off") },
+    { id: "e-tr", anahtar: "transfers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: C("1-64 arası") },
+    { id: "e-ck", anahtar: "checkers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: C("1-64 arası") },
+    { id: "e-chunk", anahtar: "drive_chunk", tip: "metin", adim: 6, rx: RX.chunk, mesaj: C("ör. 64M, 128M, 8M") },
     { id: "e-extra", anahtar: "rclone_extra", tip: "liste", adim: 0 },
     { id: "e-bwup", anahtar: "bwlimit_upload_only", tip: "onay", adim: 0 },
     { id: "e-bwauto", anahtar: "bwlimit_auto", tip: "onay", adim: 0 },
@@ -4643,30 +5095,30 @@ const PLAN_ALANLARI = [
         ozelDogrula: (id) => vMails(id, true) },
     // Haftalik rapor alanlari: yalnizca rapor acikken dogrulanir
     { id: "e-rat", anahtar: "report_at", tip: "saat", adim: 7, vars: "09:00",
-        kosul: () => chk("e-wr"), mesaj: "SS:DD biçiminde saat" },
+        kosul: () => chk("e-wr"), mesaj: C("SS:DD biçiminde saat") },
     { id: "e-rdays", anahtar: "report_days", tip: "sayi", adim: 7, min: 1, max: 365, vars: 7,
-        kosul: () => chk("e-wr"), mesaj: "1-365 gün" },
+        kosul: () => chk("e-wr"), mesaj: C("1-365 gün") },
     { id: "e-rstale", anahtar: "report_stale_days", tip: "sayi", adim: 7, min: 0, max: 365, vars: 2,
-        kosul: () => chk("e-wr"), mesaj: "0-365 gün" },
+        kosul: () => chk("e-wr"), mesaj: C("0-365 gün") },
     { id: "e-rquota", anahtar: "report_quota_warn", tip: "sayi", adim: 7, min: 0, max: 100, vars: 90,
-        kosul: () => chk("e-wr"), mesaj: "0-100 arası yüzde" },
+        kosul: () => chk("e-wr"), mesaj: C("0-100 arası yüzde") },
     // Bant genisligi cizelgesi ve otomatik mod: yalnizca ilgiliyken dogrulanir
     { id: "e-bwsch", anahtar: "bwlimit_schedule", tip: "metin", adim: 6, ops: true, vars: "",
         ozelDogrula: (id) => vBwSched(id) },
     { id: "e-bwlink", anahtar: "bw_auto_link", tip: "metin", adim: 6, rx: RX.bw, vars: "100M",
-        kosul: () => chk("e-bwauto"), mesaj: "ör. 12M, 100M" },
+        kosul: () => chk("e-bwauto"), mesaj: C("ör. 12M, 100M") },
     { id: "e-bwres", anahtar: "bw_auto_reserve_pct", tip: "sayi", adim: 6, min: 0, max: 95, vars: 30,
-        kosul: () => chk("e-bwauto"), mesaj: "0-95 arası yüzde" },
+        kosul: () => chk("e-bwauto"), mesaj: C("0-95 arası yüzde") },
     { id: "e-bwmin", anahtar: "bw_auto_min", tip: "metin", adim: 6, rx: RX.bw, vars: "1M",
-        kosul: () => chk("e-bwauto"), mesaj: "ör. 512K, 1M" },
+        kosul: () => chk("e-bwauto"), mesaj: C("ör. 512K, 1M") },
     { id: "e-bwmax", anahtar: "bw_auto_max", tip: "metin", adim: 6, rx: RX.bw, ops: true, vars: "",
-        kosul: () => chk("e-bwauto"), mesaj: "ör. 30M veya boş" },
+        kosul: () => chk("e-bwauto"), mesaj: C("ör. 30M veya boş") },
     { id: "e-bwint", anahtar: "bw_auto_interval_sec", tip: "sayi", adim: 6, min: 2, max: 3600, vars: 10,
-        kosul: () => chk("e-bwauto"), mesaj: "2-3600 sn" },
+        kosul: () => chk("e-bwauto"), mesaj: C("2-3600 sn") },
     { id: "e-bwsm", anahtar: "bw_auto_smooth", tip: "sayi", adim: 6, min: 0.05, max: 1, vars: 0.4,
-        kosul: () => chk("e-bwauto"), mesaj: "0.05 - 1 arası" },
+        kosul: () => chk("e-bwauto"), mesaj: C("0.05 - 1 arası") },
     { id: "e-bwstep", anahtar: "bw_auto_step_pct", tip: "sayi", adim: 6, min: 1, max: 90, vars: 25,
-        kosul: () => chk("e-bwauto"), mesaj: "1-90 arası yüzde" },
+        kosul: () => chk("e-bwauto"), mesaj: C("1-90 arası yüzde") },
 ];
 /** Formu bir plandan (veya varsayilanlardan) doldurur. */
 function alanlariDoldur(v) {
@@ -4721,11 +5173,11 @@ function alanlariDogrula(adim) {
             continue;
         }
         if (a.tip === "sayi")
-            ok = vNum(a.id, (_a = a.min) !== null && _a !== void 0 ? _a : 0, (_b = a.max) !== null && _b !== void 0 ? _b : null, a.mesaj || "geçersiz sayı") && ok;
+            ok = vNum(a.id, (_a = a.min) !== null && _a !== void 0 ? _a : 0, (_b = a.max) !== null && _b !== void 0 ? _b : null, a.mesaj || C("geçersiz sayı")) && ok;
         else if (a.tip === "saat")
             ok = vRx(a.id, RX.time, a.mesaj || "SS:DD", a.ops) && ok;
         else if (a.rx)
-            ok = vRx(a.id, a.rx, a.mesaj || "geçersiz değer", a.ops) && ok;
+            ok = vRx(a.id, a.rx, a.mesaj || C("geçersiz değer"), a.ops) && ok;
         else if (!a.ops)
             ok = vTxt(a.id, a.mesaj || "bu alan gerekli") && ok;
     }

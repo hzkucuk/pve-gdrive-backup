@@ -53,3 +53,19 @@ function sayfayiCevir(kok?: HTMLElement): void {
     });
   }
 }
+
+/** Dil secicisi degisince: kaydet, sayfayi cevir, arayuzu yeniden ciz. */
+function dilDegistir(d: string): void {
+  dilKur(d);
+  location.reload();     // en temizi: tum duragan metinler bastan cevrilir
+}
+
+/** Acilista kayitli dili uygula. */
+function dilBaslat(): void {
+  let d = "tr";
+  try { d = localStorage.getItem("pg_dil") || "tr"; } catch { /* yok say */ }
+  dilKur(d);
+  const sec = document.getElementById("dilsec") as HTMLSelectElement | null;
+  if (sec) sec.value = dilAl();
+  sayfayiCevir();
+}

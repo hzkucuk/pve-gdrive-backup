@@ -13,5 +13,5 @@
     "removeComments": false,
     "sourceMap": false
   },
-  "files": ["src/types.ts", "src/app.ts", "src/alanlar.ts"]
+  "files": ["src/types.ts", "src/en.ts", "src/dil.ts", "src/app.ts", "src/alanlar.ts"]
 }
