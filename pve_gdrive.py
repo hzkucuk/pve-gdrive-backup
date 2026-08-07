@@ -60,6 +60,8 @@ GLOBAL_DEFAULTS = {
     "rclone_tail_lines": 40,    # rclone ciktisindan bellekte tutulacak son satir sayisi
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
+    "purge_batch": 50,          # cop temizliginde tek rclone cagrisinda silinecek dosya sayisi
+    "purge_timeout_min": 30,    # cop temizligi rclone cagrisi icin zaman asimi (dakika)
     "log_max_mb": 5,            # log dosyasi bu boyutu asinca dondurulur
     "log_keep": 2,              # saklanacak eski log dosyasi sayisi
     "dump_regex": r"^(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}))",
@@ -78,7 +80,17 @@ PLAN_DEFAULTS = {
     "drive_trash_days": 1,    # Google cop kutusunda bekleyecegi gun sayisi
     "run_at": "03:00",        # gunun saati
     "weekdays": [],           # bos = her gun, yoksa 1=Pzt .. 7=Paz
-    "bwlimit": "30M",
+    "bwlimit": "30M",         # sabit sinir; "off" = sinirsiz
+    "bwlimit_schedule": "",   # saat cizelgesi, or. "08:00,2M 19:00,30M 23:00,off"
+    "bwlimit_upload_only": True,  # sinir yalnizca yuklemeye uygulansin
+    # --- otomatik bant genisligi: hattaki diger trafige gore kendini ayarlar ---
+    "bwlimit_auto": False,
+    "bw_auto_link": "100M",       # toplam YUKLEME kapasiten (ISS hizin)
+    "bw_auto_reserve_pct": 30,    # bu yuzde kadari her zaman digerlerine birakilir
+    "bw_auto_min": "1M",          # hat mesgulken inilecek taban
+    "bw_auto_max": "",            # bos = bwlimit degeri tavan olarak kullanilir
+    "bw_auto_iface": "",          # bos = varsayilan rota arayuzu
+    "bw_auto_interval_sec": 10,   # olcum ve ayar sikligi
     "transfers": 2,
     "checkers": 4,
     "drive_chunk": "64M",     # rclone RAM kullanimi ~ drive_chunk x transfers
@@ -175,6 +187,15 @@ def norm_plan(p):
         try: q[k] = max(0, int(q[k]))
         except Exception: q[k] = PLAN_DEFAULTS[k]
     if not isinstance(q.get("rclone_extra"), list): q["rclone_extra"] = []
+    q["bwlimit"] = str(q.get("bwlimit") or "off").strip()
+    q["bwlimit_schedule"] = str(q.get("bwlimit_schedule") or "").strip()
+    q["bwlimit_upload_only"] = bool(q.get("bwlimit_upload_only", True))
+    q["bwlimit_auto"] = bool(q.get("bwlimit_auto", False))
+    for k in ("bw_auto_link", "bw_auto_min", "bw_auto_max", "bw_auto_iface"):
+        q[k] = str(q.get(k) or "").strip()
+    for k, alt, ust in (("bw_auto_reserve_pct", 0, 95), ("bw_auto_interval_sec", 2, 3600)):
+        try: q[k] = min(ust, max(alt, int(q[k])))
+        except Exception: q[k] = PLAN_DEFAULTS[k]
     if not isinstance(q.get("skip_patterns"), list):
         q["skip_patterns"] = list(PLAN_DEFAULTS["skip_patterns"])
     if not re.match(r"^\d{1,2}:\d{2}$", str(q.get("report_at", ""))): q["report_at"] = "09:00"
@@ -697,13 +718,18 @@ def do_copy(p):
     args = ["copy", p["src_dir"], p["remote"],
             "--transfers", str(p["transfers"]), "--checkers", str(p["checkers"]),
             "--drive-chunk-size", str(p["drive_chunk"]),
-            "--bwlimit", str(p["bwlimit"]),
+            "--bwlimit", (p.get("bw_auto_max") or p.get("bwlimit") or "off")
+                         if p.get("bwlimit_auto") else bwlimit_arg(p),
             "--stats-one-line", "--stats", f"{int(cfg().get('stats_interval_sec') or 5)}s", "-v"]
     # Yazilmakta olan dosyalar hic alinmasin
     for pat in (p.get("skip_patterns") or []): args += ["--exclude", pat]
     # Son N dakikadir degismemis dosyalar alinsin: vzdump yazarken yakalamayalim
     if float(p.get("min_age_min") or 0) > 0: args += ["--min-age", f"{int(float(p['min_age_min']))}m"]
     args += list(p.get("rclone_extra") or [])
+    oto = bool(p.get("bwlimit_auto"))
+    port = rc_port(p["id"])
+    if oto:
+        args += ["--rc", "--rc-addr", f"127.0.0.1:{port}", "--rc-no-auth"]
     log(f"rclone copy basladi: {p['src_dir']} -> {p['remote']}", p["id"])
     tmo = float(cfg().get("rclone_timeout_min") or 0) * 60 or None
     t0 = time.time()
@@ -712,11 +738,145 @@ def do_copy(p):
     def on_line(l):
         st = parse_stats(l)
         if st: set_progress(p["id"], st)
-    rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line)
+    dur = threading.Event(); izleyici = None
+    if oto:
+        izleyici = threading.Thread(target=bw_auto_izle, args=(p, port, dur), daemon=True)
+        izleyici.start()
+    try:
+        rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line)
+    finally:
+        dur.set()
+        if izleyici: izleyici.join(timeout=5)
     for l in tail[-4:]:
         if l.strip(): log("  " + l, p["id"])
     log(f"rclone copy bitti rc={rc}", p["id"])
     return rc == 0
+
+RE_BW = re.compile(r"^(off|\d+(?:\.\d+)?[BKMGT]?)$", re.I)
+RE_BW_SCHED = re.compile(r"^\s*([01]?\d|2[0-3]):[0-5]\d\s*,\s*(off|\d+(?:\.\d+)?[BKMGT]?)\s*$", re.I)
+
+def bwlimit_gecerli(txt):
+    """(gecerli_mi, mesaj). Hem sabit deger hem saat cizelgesi kabul edilir."""
+    txt = str(txt or "").strip()
+    if not txt: return True, ""
+    if RE_BW.match(txt): return True, ""
+    parcalar = txt.split()
+    if not parcalar: return False, "bos"
+    for x in parcalar:
+        if not RE_BW_SCHED.match(x):
+            return False, f"'{x}' hatali - 'SS:DD,hiz' olmali (or. 08:00,2M)"
+    return True, ""
+
+def bwlimit_arg(p):
+    """rclone --bwlimit degeri. Cizelge varsa o kullanilir, yoksa sabit sinir.
+    Cizelgede yuklemeye ozel sinir icin 'hiz:hiz' bicimi (yukleme:indirme) desteklenir."""
+    sched = str(p.get("bwlimit_schedule") or "").strip()
+    sabit = str(p.get("bwlimit") or "off").strip() or "off"
+    ham = sched if sched else sabit
+    if not p.get("bwlimit_upload_only", True): return ham
+    # rclone'da "yukleme:indirme" bicimi; indirmeyi sinirsiz birak
+    def ikile(v):
+        v = v.strip()
+        return v if ":" in v or v.lower() == "off" else f"{v}:off"
+    if sched:
+        return " ".join(
+            (lambda a: f"{a[0]},{ikile(a[1])}")(x.split(",", 1)) if "," in x else x
+            for x in ham.split())
+    return ikile(ham)
+
+# ---------- OTOMATIK BANT GENISLIGI ----------
+BW_BIRIM = {"": 1, "B": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+def bw_bytes(txt):
+    """'30M' -> bayt/sn. 'off' veya bos -> 0 (sinirsiz)."""
+    t = str(txt or "").strip()
+    if not t or t.lower() == "off": return 0
+    m = re.match(r"^([\d.]+)\s*([BKMGT]?)$", t, re.I)
+    if not m: return 0
+    try: return int(float(m.group(1)) * BW_BIRIM[m.group(2).upper()])
+    except Exception: return 0
+
+def bw_str(b):
+    """bayt/sn -> rclone'un anladigi kisa gosterim."""
+    b = int(max(0, b))
+    if b <= 0: return "off"
+    for birim, carp in (("G", 1024**3), ("M", 1024**2), ("K", 1024)):
+        if b >= carp: return f"{b/carp:.2f}{birim}"
+    return f"{b}B"
+
+def net_ifaces():
+    """Arayuz adi -> (rx, tx) bayt. Sanal/loopback disarida."""
+    out = {}
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f.readlines()[2:]:
+                ad, _, kalan = line.partition(":")
+                ad = ad.strip()
+                if ad == "lo" or ad.startswith(("veth", "tap", "fwbr", "fwln", "fwpr", "docker")):
+                    continue
+                p = kalan.split()
+                if len(p) >= 9: out[ad] = (int(p[0]), int(p[8]))
+    except Exception: pass
+    return out
+
+def default_iface():
+    """Varsayilan rotanin arayuzu; bulunamazsa en cok trafik goren fiziksel arayuz."""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                p = line.split()
+                if len(p) > 2 and p[1] == "00000000": return p[0]
+    except Exception: pass
+    ifs = net_ifaces()
+    return max(ifs, key=lambda k: ifs[k][1]) if ifs else ""
+
+def tx_bytes(iface):
+    return net_ifaces().get(iface, (0, 0))[1]
+
+def rc_port(pid):
+    """Plan basina sabit ama cakismayan yerel rc portu."""
+    return 15600 + (int(hashlib.sha256(str(pid).encode()).hexdigest()[:4], 16) % 300)
+
+def rc_call(port, yol, *args):
+    rc, out, err = rclone(["rc", "--rc-addr", f"127.0.0.1:{port}", "--rc-no-auth", yol, *args],
+                          timeout=20)
+    return rc == 0, (out or err or "").strip()
+
+def bw_auto_izle(p, port, dur_bayragi):
+    """rclone calisirken hattaki DIGER trafigi olcup sinirimizi canli ayarlar.
+    Boylece UrBackup gibi baska bir yedekleme yazilimi hatti kullandiginda geri cekiliriz."""
+    pid = p["id"]
+    iface = p.get("bw_auto_iface") or default_iface()
+    if not iface:
+        log("otomatik bant genisligi: ag arayuzu bulunamadi, sabit sinir kullanilacak", pid); return
+    aralik = max(2, int(p.get("bw_auto_interval_sec") or 10))
+    link = bw_bytes(p.get("bw_auto_link")) or bw_bytes("100M")
+    taban = bw_bytes(p.get("bw_auto_min")) or bw_bytes("1M")
+    tavan = bw_bytes(p.get("bw_auto_max")) or bw_bytes(p.get("bwlimit")) or link
+    pay = max(0.0, 1.0 - float(p.get("bw_auto_reserve_pct") or 0) / 100.0)
+    log(f"otomatik bant genisligi acik: arayuz={iface} link={bw_str(link)} "
+        f"taban={bw_str(taban)} tavan={bw_str(tavan)} pay=%{int(pay*100)}", pid)
+    onceki = tx_bytes(iface); son_hedef = 0
+    while not dur_bayragi.is_set():
+        dur_bayragi.wait(aralik)
+        if dur_bayragi.is_set(): break
+        simdi = tx_bytes(iface)
+        toplam = max(0, (simdi - onceki)) / aralik
+        onceki = simdi
+        pr = get_progress(pid) or {}
+        bizim = float(pr.get("speed_bps") or 0)
+        diger = max(0.0, toplam - bizim)
+        hedef = int(max(taban, min(tavan, link * pay - diger)))
+        # gereksiz API cagrisi yapma: %15'ten kucuk degisimi yok say
+        if son_hedef and abs(hedef - son_hedef) < son_hedef * 0.15: continue
+        ok, cikti = rc_call(port, "core/bwlimit", f"rate={bw_str(hedef)}")
+        if ok:
+            son_hedef = hedef
+            set_progress(pid, {"bw_auto": bw_str(hedef), "bw_other": int(diger),
+                               "bw_total": int(toplam), "bw_iface": iface})
+            log(f"bant genisligi -> {bw_str(hedef)} (hatta diger trafik: {bw_str(diger)}/sn)", pid)
+        else:
+            log(f"bant genisligi ayarlanamadi: {cikti[:120]}", pid)
 
 def dt_epoch(s):
     try: return int(datetime.strptime(s, DT_FMT).timestamp())
@@ -777,10 +937,16 @@ def do_purge_trash(p):
     entries = pstate(read_state(), p["id"]).get("drive_trash", [])
     due = [e for e in entries if now - int(e.get("trashed_at", 0)) >= days * 86400]
     if not due: return 0
-    for e in due:
-        rc, o, err = rclone(["delete", p["remote"], "--drive-trashed-only",
-                             "--drive-use-trash=false", "--include", e["name"]])
-        if rc != 0: log(f"cop temizleme HATA {e['name']}: {(err or '').strip()}", p["id"])
+    # Dosya basina ayri rclone cagrisi Drive API'sinde ~5-8 sn suruyordu.
+    # Tek cagrida --include tekrarlanarak toplu silinir; cok dosyada parcalara bolunur.
+    boy = max(1, int(cfg().get("purge_batch") or 50))
+    for i in range(0, len(due), boy):
+        parca = due[i:i + boy]
+        args = ["delete", p["remote"], "--drive-trashed-only", "--drive-use-trash=false"]
+        for e in parca: args += ["--include", e["name"]]
+        rc, o, err = rclone(args, timeout=float(cfg().get("purge_timeout_min") or 30) * 60)
+        if rc != 0:
+            log(f"cop temizleme HATA ({len(parca)} dosya): {(err or '').strip()[:200]}", p["id"])
     listed, still = drive_trash_names(p)
     if not listed:
         log("cop listelenemedi, hicbir kayit dusurulmedi (sonraki calismada dogrulanacak)", p["id"])
@@ -1398,7 +1564,7 @@ def public_status():
                           "mail_from", "browse_roots", "allow_account_cleanup", "history_max",
                           "log_tail_lines", "ui_refresh_sec", "rclone_timeout_min", "dump_regex",
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
-                          "stats_interval_sec",
+                          "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
             "smtp_ready": bool(smtp_profiles(C))}
@@ -1538,6 +1704,11 @@ class H(BaseHTTPRequestHandler):
             self._json({"remotes": rs})
         elif p == "/api/remote/auth/status":
             self._json(auth_status())
+        elif p == "/api/ifaces":
+            ifs = net_ifaces(); vars = default_iface()
+            self._json({"default": vars,
+                        "ifaces": [{"name": k, "rx": v[0], "tx": v[1], "default": k == vars}
+                                   for k, v in sorted(ifs.items())]})
         elif p == "/api/storages":
             self._json({"storages": pve_storages()})
         else:
@@ -1614,6 +1785,10 @@ def save_plan(data):
     if not str(data.get("name") or "").strip(): return {"ok": False, "msg": "plan adi bos olamaz"}
     if not str(data.get("remote") or "").strip(): return {"ok": False, "msg": "remote bos olamaz"}
     if ":" not in str(data.get("remote")): return {"ok": False, "msg": "remote 'ad:klasor' biciminde olmali"}
+    for alan, etiket in (("bwlimit", "hiz siniri"), ("bwlimit_schedule", "hiz cizelgesi")):
+        if alan in data:
+            ok, msg = bwlimit_gecerli(data[alan])
+            if not ok: return {"ok": False, "msg": f"{etiket}: {msg}"}
     if pid and any(p["id"] == pid for p in plans):
         plans = [norm_plan({**p, **data, "id": pid}) if p["id"] == pid else p for p in plans]
         msg = "plan guncellendi"
@@ -1682,7 +1857,8 @@ def save_settings(data):
               "log_file", "state_file"):
         if k in data: C[k] = str(data[k])
     for k in ("ui_port", "smtp_port", "history_max", "log_tail_lines", "ui_refresh_sec",
-              "rclone_tail_lines", "snapshot_max_rows", "log_keep", "stats_interval_sec"):
+              "rclone_tail_lines", "snapshot_max_rows", "log_keep", "stats_interval_sec",
+              "purge_batch"):
         if k in data:
             try: C[k] = int(data[k])
             except Exception: pass
@@ -2001,9 +2177,49 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   </fieldset>
 
   <fieldset><legend>Aktarım</legend>
-    <div class="f"><label class="tip" title="Yükleme hız sınırı. Boş bırakırsan sınırsız (hattı doldurabilir).">Hız sınırı</label>
+    <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
         <div class="eg"><code>30M</code> = 30 MB/sn · <code>2M</code> yavaş hat için · <code>off</code> = sınırsız</div></div></div>
+    <div class="f"><label class="tip" title="Saate göre değişen hız sınırı. Doluysa yukarıdaki sabit sınırın yerine geçer.">Saatlik çizelge</label>
+      <div><input id="e-bwsch" placeholder="08:00,2M 19:00,30M 23:00,off"><div class="errmsg" id="err-bwsch"></div>
+        <div class="eg">Mesaide hattı boğma, gece hızlan: <code>08:00,2M 19:00,10M 23:00,off</code><br>
+          Her giriş <b>o saatten itibaren</b> geçerli olur. Boş bırakırsan sabit sınır kullanılır.</div>
+        <div class="btns" style="margin-top:6px">
+          <button class="sm" onclick="bwPreset('')">Çizelgesiz</button>
+          <button class="sm" onclick="bwPreset('08:00,2M 19:00,10M 23:00,off')">Mesai dostu</button>
+          <button class="sm" onclick="bwPreset('00:00,off 07:00,1M 23:00,off')">Sadece gece</button>
+        </div></div></div>
+    <div class="f"><label class="tip" title="Açıkken sınır yalnızca yüklemeye uygulanır, indirme etkilenmez.">Sadece yükleme</label>
+      <div><label class="cb"><input type="checkbox" id="e-bwup"> sınır yalnızca yüklemeye uygulansın</label>
+        <div class="hint">Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Otomatik bant genişliği</legend>
+    <div class="f"><label class="tip" title="Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.">Otomatik mod</label>
+      <div><label class="cb"><input type="checkbox" id="e-bwauto" onchange="bwAutoToggle()"> hattaki diğer trafiğe göre kendini ayarla</label>
+        <div class="hint">Açıkken sabit sınır ve çizelge devre dışı kalır. Ölçüm periyodik yapılır ve
+          rclone'un hız sınırı çalışırken değiştirilir — yükleme kesilmez.</div>
+        <div class="eg">Sunucunda UrBackup gibi başka bir yedekleme varsa bu modu aç:
+          o yüklerken sen yavaşlar, hat boşalınca hızlanırsın.</div></div></div>
+    <div id="bwauto-box" style="display:none">
+      <div class="f"><label class="tip" title="İnternet bağlantının toplam YÜKLEME kapasitesi. Hesaplamanın temeli budur.">Hat kapasitesi</label>
+        <div><input id="e-bwlink" placeholder="100M"><div class="errmsg" id="err-bwlink"></div>
+          <div class="eg">Yükleme hızın. 100 Mbit ≈ <code>12M</code> · 1 Gbit ≈ <code>120M</code> ·
+            simetrik 100/100 fiber ≈ <code>12M</code>. <b>Bit değil bayt yaz.</b></div></div></div>
+      <div class="f"><label class="tip" title="Hattın bu yüzdesi her zaman diğer uygulamalara bırakılır.">Diğerlerine ayrılan</label>
+        <div><input type="number" min="0" max="95" id="e-bwres"><div class="errmsg" id="err-bwres"></div>
+          <div class="eg">%30 iyi bir başlangıç. Yükseltirsen daha nazik, düşürürsen daha hızlı olursun.</div></div></div>
+      <div class="f"><label class="tip" title="Hat çok meşgulken bile bu hızın altına inilmez.">Alt sınır</label>
+        <div><input id="e-bwmin" placeholder="1M"><div class="errmsg" id="err-bwmin"></div>
+          <div class="eg">Yedeğin hiç ilerlememesini engeller.</div></div></div>
+      <div class="f"><label class="tip" title="Hat boşken bile bu hızın üstüne çıkılmaz. Boşsa yukarıdaki sabit sınır tavan olur.">Üst sınır</label>
+        <div><input id="e-bwmax" placeholder="(boş = sabit sınır)"><div class="errmsg" id="err-bwmax"></div></div></div>
+      <div class="f"><label class="tip" title="Trafiğin ölçüleceği ağ arayüzü. Proxmox'ta köprü yerine fiziksel/bond arayüzü seçmek VM ve CT trafiğini de kapsar.">Ağ arayüzü</label>
+        <div><select id="e-bwif"></select>
+          <div class="hint" id="e-bwifhint"></div></div></div>
+      <div class="f"><label class="tip" title="Ölçüm ve ayar sıklığı.">Ölçüm aralığı (sn)</label>
+        <div><input type="number" min="2" max="3600" id="e-bwint"><div class="errmsg" id="err-bwint"></div></div></div>
+    </div>
     <div class="f"><label class="tip" title="Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.">Eşzamanlı transfer</label>
       <div><input type="number" min="1" id="e-tr"><div class="errmsg" id="err-tr"></div></div></div>
     <div class="f"><label class="tip" title="Karşılaştırma işçisi sayısı. Yüklemeyi değil, 'bu dosya zaten var mı' kontrolünü hızlandırır.">Checkers</label>
@@ -2290,6 +2506,7 @@ const RX = {
     folder: /^[^:*?"<>|]*$/,
     acct: /^[A-Za-z0-9_-]+$/,
     bw: /^(off|\d+(\.\d+)?[KMGT]?)$/i,
+    bwsched: /^([01]?\d|2[0-3]):[0-5]\d,(off|\d+(\.\d+)?[KMGT]?)$/i,
     chunk: /^\d+(\.\d+)?[KMG]$/i,
     mail: /^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]{2,}$/,
     host: /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/,
@@ -2329,6 +2546,48 @@ function vNum(id, min, max, msg) {
     if (n < min || (max !== null && n > max))
         return bad(id, msg);
     return good(id);
+}
+/** "08:00,2M 19:00,off" biciminde saatlik hiz cizelgesini dogrular. */
+function vBwSched(id) {
+    const v = val(id).trim();
+    if (!v)
+        return good(id);
+    const kotu = v.split(/\s+/).filter(Boolean).filter((x) => !RX.bwsched.test(x));
+    if (kotu.length)
+        return bad(id, "'" + kotu[0] + "' hatalı — SS:DD,hız olmalı (ör. 08:00,2M)");
+    return good(id);
+}
+function bwPreset(v) { setVal("e-bwsch", v); good("e-bwsch"); markDirty(); }
+/** "30M" -> bayt/sn. Alt/ust sinir karsilastirmasi icin. */
+function bwBytes(t) {
+    const s = String(t || "").trim();
+    if (!s || s.toLowerCase() === "off")
+        return 0;
+    const m = s.match(/^([\d.]+)\s*([BKMGT]?)$/i);
+    if (!m)
+        return 0;
+    const carp = { "": 1, B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
+    return parseFloat(m[1]) * (carp[m[2].toUpperCase()] || 1);
+}
+function bwAutoToggle() {
+    const acik = chk("e-bwauto");
+    el("bwauto-box").style.display = acik ? "" : "none";
+    fld("e-bw").disabled = acik;
+    fld("e-bwsch").disabled = acik;
+    markDirty();
+}
+async function loadIfaces(secili) {
+    try {
+        const j = await api("/api/ifaces");
+        const list = j.ifaces || [];
+        setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
+            + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+                + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
+        setVal("e-bwif", secili);
+        setTxt("e-bwifhint", "Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
+            + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
+    }
+    catch { /* yok say */ }
 }
 function vMails(id, optional) {
     const v = val(id).trim();
@@ -2581,6 +2840,8 @@ function preset(k) {
     Array.prototype.slice.call(el("e-wd").querySelectorAll("input")).forEach((c) => {
         c.checked = v.weekdays.indexOf(Number(c.value)) >= 0;
     });
+    setVal("e-bwsch", "");
+    good("e-bwsch");
     ramHint();
     markDirty();
     flash("senaryo yüklendi — kaydetmeden uygulanmaz", true);
@@ -2605,7 +2866,8 @@ function openEditor(pid) {
     const d = {
         name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
         keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
-        bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [],
+        bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
+        transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [],
         mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
         wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
         skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
@@ -2626,6 +2888,16 @@ function openEditor(pid) {
     setVal("e-tr", v.transfers);
     setVal("e-ck", v.checkers);
     setVal("e-chunk", v.drive_chunk);
+    setVal("e-bwsch", v.bwlimit_schedule || "");
+    setChk("e-bwup", v.bwlimit_upload_only !== false);
+    setChk("e-bwauto", !!v.bwlimit_auto);
+    setVal("e-bwlink", v.bw_auto_link || "100M");
+    setVal("e-bwres", v.bw_auto_reserve_pct === undefined ? 30 : v.bw_auto_reserve_pct);
+    setVal("e-bwmin", v.bw_auto_min || "1M");
+    setVal("e-bwmax", v.bw_auto_max || "");
+    setVal("e-bwint", v.bw_auto_interval_sec || 10);
+    void loadIfaces(v.bw_auto_iface || "");
+    bwAutoToggle();
     setVal("e-extra", (v.rclone_extra || []).join(" "));
     setVal("e-mail", v.mail_to);
     setChk("e-nsuc", v.notify_success !== false);
@@ -2675,6 +2947,17 @@ function validatePlan() {
     ok = vNum("e-wvm", 0, 1440, "0-1440 dakika") && ok;
     ok = vNum("e-mage", 0, 1440, "0-1440 dakika") && ok;
     ok = vRx("e-bw", RX.bw, "ör. 30M, 2M veya off", true) && ok;
+    ok = vBwSched("e-bwsch") && ok;
+    if (chk("e-bwauto")) {
+        ok = vRx("e-bwlink", RX.bw, "ör. 12M, 100M") && ok;
+        ok = vNum("e-bwres", 0, 95, "0-95 arası yüzde") && ok;
+        ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
+        ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
+        ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
+        const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
+        if (ust && alt && alt > ust)
+            ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
+    }
     ok = vNum("e-tr", 1, 64, "1-64 arası") && ok;
     ok = vNum("e-ck", 1, 64, "1-64 arası") && ok;
     ok = vRx("e-chunk", RX.chunk, "ör. 64M, 128M, 8M") && ok;
@@ -2704,7 +2987,12 @@ async function savePlan() {
         remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
         keep_days: Number(val("e-kd")), keep_count: Number(val("e-kc")),
         drive_trash_days: Number(val("e-td")), run_at: val("e-runat"), weekdays: wd,
-        bwlimit: val("e-bw"), transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
+        bwlimit: val("e-bw"), bwlimit_schedule: val("e-bwsch").trim(),
+        bwlimit_upload_only: chk("e-bwup"), bwlimit_auto: chk("e-bwauto"),
+        bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
+        bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
+        bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
+        transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
         drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
         smtp_profile: val("e-smtp"), mail_to: val("e-mail"),
         notify_success: chk("e-nsuc"), notify_failure: chk("e-nerr"), notify_skipped: chk("e-nskip"),

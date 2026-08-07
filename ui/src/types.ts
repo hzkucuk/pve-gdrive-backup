@@ -48,6 +48,15 @@ interface Plan {
   run_at: string;
   weekdays: number[];
   bwlimit: string;
+  bwlimit_schedule: string;
+  bwlimit_upload_only: boolean;
+  bwlimit_auto: boolean;
+  bw_auto_link: string;
+  bw_auto_reserve_pct: number;
+  bw_auto_min: string;
+  bw_auto_max: string;
+  bw_auto_iface: string;
+  bw_auto_interval_sec: number;
   transfers: number;
   checkers: number;
   drive_chunk: string;

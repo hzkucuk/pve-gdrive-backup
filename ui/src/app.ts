@@ -91,6 +91,7 @@ const RX = {
   folder: /^[^:*?"<>|]*$/,
   acct: /^[A-Za-z0-9_-]+$/,
   bw: /^(off|\d+(\.\d+)?[KMGT]?)$/i,
+  bwsched: /^([01]?\d|2[0-3]):[0-5]\d,(off|\d+(\.\d+)?[KMGT]?)$/i,
   chunk: /^\d+(\.\d+)?[KMG]$/i,
   mail: /^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]{2,}$/,
   host: /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/,
@@ -124,6 +125,45 @@ function vNum(id: string, min: number, max: number | null, msg: string): boolean
   if (n < min || (max !== null && n > max)) return bad(id, msg);
   return good(id);
 }
+/** "08:00,2M 19:00,off" biciminde saatlik hiz cizelgesini dogrular. */
+function vBwSched(id: string): boolean {
+  const v = val(id).trim();
+  if (!v) return good(id);
+  const kotu = v.split(/\s+/).filter(Boolean).filter((x) => !RX.bwsched.test(x));
+  if (kotu.length) return bad(id, "'" + kotu[0] + "' hatalı — SS:DD,hız olmalı (ör. 08:00,2M)");
+  return good(id);
+}
+function bwPreset(v: string): void { setVal("e-bwsch", v); good("e-bwsch"); markDirty(); }
+
+/** "30M" -> bayt/sn. Alt/ust sinir karsilastirmasi icin. */
+function bwBytes(t: string): number {
+  const s = String(t || "").trim();
+  if (!s || s.toLowerCase() === "off") return 0;
+  const m = s.match(/^([\d.]+)\s*([BKMGT]?)$/i);
+  if (!m) return 0;
+  const carp: Record<string, number> = { "": 1, B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
+  return parseFloat(m[1]) * (carp[m[2].toUpperCase()] || 1);
+}
+function bwAutoToggle(): void {
+  const acik = chk("e-bwauto");
+  el("bwauto-box").style.display = acik ? "" : "none";
+  fld("e-bw").disabled = acik;
+  fld("e-bwsch").disabled = acik;
+  markDirty();
+}
+async function loadIfaces(secili: string): Promise<void> {
+  try {
+    const j = await api<{ default: string; ifaces: { name: string; tx: number; default: boolean }[] }>("/api/ifaces");
+    const list = j.ifaces || [];
+    setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
+      + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+        + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
+    setVal("e-bwif", secili);
+    setTxt("e-bwifhint", "Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
+      + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
+  } catch { /* yok say */ }
+}
+
 function vMails(id: string, optional?: boolean): boolean {
   const v = val(id).trim();
   if (!v) return optional ? good(id) : bad(id, "alıcı adresi gerekli");
@@ -351,6 +391,7 @@ function preset(k: string): void {
   Array.prototype.slice.call(el("e-wd").querySelectorAll("input")).forEach((c: HTMLInputElement) => {
     c.checked = v.weekdays.indexOf(Number(c.value)) >= 0;
   });
+  setVal("e-bwsch", ""); good("e-bwsch");
   ramHint(); markDirty();
   flash("senaryo yüklendi — kaydetmeden uygulanmaz", true);
 }
@@ -372,7 +413,8 @@ function openEditor(pid: string | null): void {
   const d = {
     name: "", enabled: true, src_dir: "/var/lib/vz/dump", remote: "gdrive:proxmox-yedek",
     keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [] as number[],
-    bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [] as string[],
+    bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
+    transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [] as string[],
     mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
     wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
     skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
@@ -386,6 +428,12 @@ function openEditor(pid: string | null): void {
   setVal("e-kd", v.keep_days); setVal("e-kc", v.keep_count); setVal("e-td", v.drive_trash_days);
   setVal("e-runat", v.run_at); setVal("e-bw", v.bwlimit); setVal("e-tr", v.transfers);
   setVal("e-ck", v.checkers); setVal("e-chunk", v.drive_chunk);
+  setVal("e-bwsch", v.bwlimit_schedule || ""); setChk("e-bwup", v.bwlimit_upload_only !== false);
+  setChk("e-bwauto", !!v.bwlimit_auto); setVal("e-bwlink", v.bw_auto_link || "100M");
+  setVal("e-bwres", v.bw_auto_reserve_pct === undefined ? 30 : v.bw_auto_reserve_pct);
+  setVal("e-bwmin", v.bw_auto_min || "1M"); setVal("e-bwmax", v.bw_auto_max || "");
+  setVal("e-bwint", v.bw_auto_interval_sec || 10);
+  void loadIfaces(v.bw_auto_iface || ""); bwAutoToggle();
   setVal("e-extra", (v.rclone_extra || []).join(" ")); setVal("e-mail", v.mail_to);
   setChk("e-nsuc", v.notify_success !== false); setChk("e-nerr", v.notify_failure !== false);
   setChk("e-nskip", !!v.notify_skipped);
@@ -422,6 +470,16 @@ function validatePlan(): boolean {
   ok = vNum("e-wvm", 0, 1440, "0-1440 dakika") && ok;
   ok = vNum("e-mage", 0, 1440, "0-1440 dakika") && ok;
   ok = vRx("e-bw", RX.bw, "ör. 30M, 2M veya off", true) && ok;
+  ok = vBwSched("e-bwsch") && ok;
+  if (chk("e-bwauto")) {
+    ok = vRx("e-bwlink", RX.bw, "ör. 12M, 100M") && ok;
+    ok = vNum("e-bwres", 0, 95, "0-95 arası yüzde") && ok;
+    ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
+    ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
+    ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
+    const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
+    if (ust && alt && alt > ust) ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
+  }
   ok = vNum("e-tr", 1, 64, "1-64 arası") && ok;
   ok = vNum("e-ck", 1, 64, "1-64 arası") && ok;
   ok = vRx("e-chunk", RX.chunk, "ör. 64M, 128M, 8M") && ok;
@@ -449,7 +507,12 @@ async function savePlan(): Promise<void> {
     remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
     keep_days: Number(val("e-kd")), keep_count: Number(val("e-kc")),
     drive_trash_days: Number(val("e-td")), run_at: val("e-runat"), weekdays: wd,
-    bwlimit: val("e-bw"), transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
+    bwlimit: val("e-bw"), bwlimit_schedule: val("e-bwsch").trim(),
+    bwlimit_upload_only: chk("e-bwup"), bwlimit_auto: chk("e-bwauto"),
+    bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
+    bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
+    bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
+    transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
     drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
     smtp_profile: val("e-smtp"), mail_to: val("e-mail"),
     notify_success: chk("e-nsuc"), notify_failure: chk("e-nerr"), notify_skipped: chk("e-nskip"),

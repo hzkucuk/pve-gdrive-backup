@@ -102,9 +102,49 @@
   </fieldset>
 
   <fieldset><legend>Aktarım</legend>
-    <div class="f"><label class="tip" title="Yükleme hız sınırı. Boş bırakırsan sınırsız (hattı doldurabilir).">Hız sınırı</label>
+    <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
         <div class="eg"><code>30M</code> = 30 MB/sn · <code>2M</code> yavaş hat için · <code>off</code> = sınırsız</div></div></div>
+    <div class="f"><label class="tip" title="Saate göre değişen hız sınırı. Doluysa yukarıdaki sabit sınırın yerine geçer.">Saatlik çizelge</label>
+      <div><input id="e-bwsch" placeholder="08:00,2M 19:00,30M 23:00,off"><div class="errmsg" id="err-bwsch"></div>
+        <div class="eg">Mesaide hattı boğma, gece hızlan: <code>08:00,2M 19:00,10M 23:00,off</code><br>
+          Her giriş <b>o saatten itibaren</b> geçerli olur. Boş bırakırsan sabit sınır kullanılır.</div>
+        <div class="btns" style="margin-top:6px">
+          <button class="sm" onclick="bwPreset('')">Çizelgesiz</button>
+          <button class="sm" onclick="bwPreset('08:00,2M 19:00,10M 23:00,off')">Mesai dostu</button>
+          <button class="sm" onclick="bwPreset('00:00,off 07:00,1M 23:00,off')">Sadece gece</button>
+        </div></div></div>
+    <div class="f"><label class="tip" title="Açıkken sınır yalnızca yüklemeye uygulanır, indirme etkilenmez.">Sadece yükleme</label>
+      <div><label class="cb"><input type="checkbox" id="e-bwup"> sınır yalnızca yüklemeye uygulansın</label>
+        <div class="hint">Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Otomatik bant genişliği</legend>
+    <div class="f"><label class="tip" title="Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.">Otomatik mod</label>
+      <div><label class="cb"><input type="checkbox" id="e-bwauto" onchange="bwAutoToggle()"> hattaki diğer trafiğe göre kendini ayarla</label>
+        <div class="hint">Açıkken sabit sınır ve çizelge devre dışı kalır. Ölçüm periyodik yapılır ve
+          rclone'un hız sınırı çalışırken değiştirilir — yükleme kesilmez.</div>
+        <div class="eg">Sunucunda UrBackup gibi başka bir yedekleme varsa bu modu aç:
+          o yüklerken sen yavaşlar, hat boşalınca hızlanırsın.</div></div></div>
+    <div id="bwauto-box" style="display:none">
+      <div class="f"><label class="tip" title="İnternet bağlantının toplam YÜKLEME kapasitesi. Hesaplamanın temeli budur.">Hat kapasitesi</label>
+        <div><input id="e-bwlink" placeholder="100M"><div class="errmsg" id="err-bwlink"></div>
+          <div class="eg">Yükleme hızın. 100 Mbit ≈ <code>12M</code> · 1 Gbit ≈ <code>120M</code> ·
+            simetrik 100/100 fiber ≈ <code>12M</code>. <b>Bit değil bayt yaz.</b></div></div></div>
+      <div class="f"><label class="tip" title="Hattın bu yüzdesi her zaman diğer uygulamalara bırakılır.">Diğerlerine ayrılan</label>
+        <div><input type="number" min="0" max="95" id="e-bwres"><div class="errmsg" id="err-bwres"></div>
+          <div class="eg">%30 iyi bir başlangıç. Yükseltirsen daha nazik, düşürürsen daha hızlı olursun.</div></div></div>
+      <div class="f"><label class="tip" title="Hat çok meşgulken bile bu hızın altına inilmez.">Alt sınır</label>
+        <div><input id="e-bwmin" placeholder="1M"><div class="errmsg" id="err-bwmin"></div>
+          <div class="eg">Yedeğin hiç ilerlememesini engeller.</div></div></div>
+      <div class="f"><label class="tip" title="Hat boşken bile bu hızın üstüne çıkılmaz. Boşsa yukarıdaki sabit sınır tavan olur.">Üst sınır</label>
+        <div><input id="e-bwmax" placeholder="(boş = sabit sınır)"><div class="errmsg" id="err-bwmax"></div></div></div>
+      <div class="f"><label class="tip" title="Trafiğin ölçüleceği ağ arayüzü. Proxmox'ta köprü yerine fiziksel/bond arayüzü seçmek VM ve CT trafiğini de kapsar.">Ağ arayüzü</label>
+        <div><select id="e-bwif"></select>
+          <div class="hint" id="e-bwifhint"></div></div></div>
+      <div class="f"><label class="tip" title="Ölçüm ve ayar sıklığı.">Ölçüm aralığı (sn)</label>
+        <div><input type="number" min="2" max="3600" id="e-bwint"><div class="errmsg" id="err-bwint"></div></div></div>
+    </div>
     <div class="f"><label class="tip" title="Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.">Eşzamanlı transfer</label>
       <div><input type="number" min="1" id="e-tr"><div class="errmsg" id="err-tr"></div></div></div>
     <div class="f"><label class="tip" title="Karşılaştırma işçisi sayısı. Yüklemeyi değil, 'bu dosya zaten var mı' kontrolünü hızlandırır.">Checkers</label>
