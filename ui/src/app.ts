@@ -714,8 +714,12 @@ function kapasiteCiz(): void {
     uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. VM/CT'ler büyürse yer biter.");
   }
   if (KAP.oneri) {
-    uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
-      + (KAP.oneri_pay_pct || 60) + C("'ini kullanır, büyümeye pay bırakır).");
+    // "Onerilen" demek yaniltiyordu: bu en iyi secim degil, bos alana guvenle
+    // sigabilecek en uzun sure. Kisa sure daha az yer kaplar.
+    uyari += (uyari ? "<br>" : "")
+      + C("Sığabilecek en uzun süre: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
+      + (KAP.oneri_pay_pct || 60) + C("'ini kullanır). Bu bir tavsiye değil, üst sınır.")
+      + "<br>" + C("Kısa süre daha az yer kaplar; uzun süre geç fark edilen bir soruna karşı daha geniş geri dönüş penceresi verir.");
   }
   const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
     + C(" set var); hedef doluluğa ancak ") + gun + C(" gün sonra ulaşılır.");

@@ -380,4 +380,9 @@ const EN: Record<string, string> = {
   "Kota ölçülüyor, birkaç saniye sonra tekrar bak.": "Measuring quota, check again in a few seconds.",
   "Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.":
     "Quota unavailable — usage cannot be projected. The required space is still correct.",
+  "Sığabilecek en uzun süre: <b>": "Longest period that fits: <b>",
+  "'ini kullanır). Bu bir tavsiye değil, üst sınır.": "of free space). This is an upper bound, not a recommendation.",
+  "Kısa süre daha az yer kaplar; uzun süre geç fark edilen bir soruna karşı daha geniş geri dönüş penceresi verir.":
+    "A shorter period uses less space; a longer one gives a wider recovery window for problems noticed late.",
+  "📐 Sığabilecek en uzun süreyi uygula": "📐 Apply longest period that fits",
 };

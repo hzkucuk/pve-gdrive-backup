@@ -3165,7 +3165,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       </div>
       <div class="kap-alt" id="kap-alt" style="display:none"></div>
       <div class="btns" id="kap-btn" style="display:none;margin-top:8px">
-        <button class="sm primary" onclick="kapasiteOner()" id="kap-oner">📐 Önerilen süreyi uygula</button>
+        <button class="sm" onclick="kapasiteOner()" id="kap-oner">📐 Sığabilecek en uzun süreyi uygula</button>
         <button class="sm" onclick="kapasiteYukle(true)">↻ Yeniden ölç</button>
       </div>
       <div id="kap-misafir" class="kap-misafir"></div>
@@ -3860,6 +3860,10 @@ const EN = {
     "Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.": "Measures other traffic on the link and adjusts the upload speed live. Backs off when another backup tool uses the line.",
     "Kota ölçülüyor, birkaç saniye sonra tekrar bak.": "Measuring quota, check again in a few seconds.",
     "Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.": "Quota unavailable — usage cannot be projected. The required space is still correct.",
+    "Sığabilecek en uzun süre: <b>": "Longest period that fits: <b>",
+    "'ini kullanır). Bu bir tavsiye değil, üst sınır.": "of free space). This is an upper bound, not a recommendation.",
+    "Kısa süre daha az yer kaplar; uzun süre geç fark edilen bir soruna karşı daha geniş geri dönüş penceresi verir.": "A shorter period uses less space; a longer one gives a wider recovery window for problems noticed late.",
+    "📐 Sığabilecek en uzun süreyi uygula": "📐 Apply longest period that fits",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -4734,8 +4738,12 @@ function kapasiteCiz() {
         uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. VM/CT'ler büyürse yer biter.");
     }
     if (KAP.oneri) {
-        uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
-            + (KAP.oneri_pay_pct || 60) + C("'ini kullanır, büyümeye pay bırakır).");
+        // "Onerilen" demek yaniltiyordu: bu en iyi secim degil, bos alana guvenle
+        // sigabilecek en uzun sure. Kisa sure daha az yer kaplar.
+        uyari += (uyari ? "<br>" : "")
+            + C("Sığabilecek en uzun süre: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")
+            + (KAP.oneri_pay_pct || 60) + C("'ini kullanır). Bu bir tavsiye değil, üst sınır.")
+            + "<br>" + C("Kısa süre daha az yer kaplar; uzun süre geç fark edilen bir soruna karşı daha geniş geri dönüş penceresi verir.");
     }
     const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
         + C(" set var); hedef doluluğa ancak ") + gun + C(" gün sonra ulaşılır.");
