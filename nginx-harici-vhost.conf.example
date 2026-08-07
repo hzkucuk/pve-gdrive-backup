@@ -1,0 +1,49 @@
+# Mevcut bir nginx sunucusundan (or. 192.168.2.240) Proxmox yedek arayuzune
+# ters vekil ornegi. Hipervizore ikinci bir nginx kurmaya gerek kalmaz.
+#
+# Kurulum:
+#   /etc/nginx/sites-available/pve-yedek.conf olarak kopyala
+#   ln -s ../sites-available/pve-yedek.conf /etc/nginx/sites-enabled/
+#   nginx -t && systemctl reload nginx
+#
+# Sonrasinda /etc/pve-gdrive.conf icinde:
+#   "ui_bind": "0.0.0.0"        (vekil baska makinede oldugu icin 127.0.0.1 olamaz)
+#   "cookie_secure": true       (TLS arkasinda)
+#   "trust_proxy_header": true  (gercek istemci IP'si X-Forwarded-For'dan okunur)
+# ve yedek sunucusunun 8787 portuna yalnizca bu vekilin erisebildiginden emin ol:
+#   iptables -A INPUT -p tcp --dport 8787 -s <vekil-ip> -j ACCEPT
+#   iptables -A INPUT -p tcp --dport 8787 -j DROP
+
+upstream pve_yedek {
+    server 192.168.2.252:8787;
+    keepalive 8;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name yedek.ornek.com;          # kendi alan adinla degistir
+
+    ssl_certificate     /etc/letsencrypt/live/yedek.ornek.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yedek.ornek.com/privkey.pem;
+
+    # Yedek arayuzu buyuk cevap uretmez ama uzun istekler olabilir
+    proxy_read_timeout  300s;
+    client_max_body_size 4m;
+
+    location / {
+        proxy_pass http://pve_yedek;
+        proxy_http_version 1.1;
+        proxy_set_header Connection        "";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name yedek.ornek.com;
+    return 301 https://$host$request_uri;
+}

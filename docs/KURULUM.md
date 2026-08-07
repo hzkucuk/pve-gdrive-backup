@@ -172,6 +172,22 @@ sertifikası kullanılır. Bu kurulumda arayüzü dışarı kapat:
 `trust_proxy_header` açıkken oturum ve kilitleme `X-Forwarded-For` başlığındaki gerçek
 istemci adresini kullanır.
 
+### Zaten bir nginx sunucun varsa
+
+Ağında ayrı bir ters vekil sunucusu varsa hipervizöre ikinci bir nginx kurma —
+`nginx-harici-vhost.conf.example` dosyasını o sunucuya koy. Bu durumda yedek arayüzünde:
+
+```json
+{ "ui_bind": "0.0.0.0", "cookie_secure": true, "trust_proxy_header": true }
+```
+
+ve 8787 portunu yalnızca vekilin IP'sine aç:
+
+```bash
+iptables -A INPUT -p tcp --dport 8787 -s <vekil-ip> -j ACCEPT
+iptables -A INPUT -p tcp --dport 8787 -j DROP
+```
+
 > Proxmox arayüzüne gerçek bir menü sekmesi eklemek `pvemanagerlib.js` yamalamayı gerektirir;
 > her `pve-manager` güncellemesinde yama silinir. Yedekleme aracının sessizce kaybolması
 > riskine değmez, bu yüzden depoda yer almıyor.
