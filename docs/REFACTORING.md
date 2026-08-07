@@ -1,4 +1,4 @@
-# Refactoring Analizi
+# Refactoring Analizi ve Uygulama Raporu
 
 Ölçüm tarihi: 2026-08-08 · Sürüm 1.1.0 · Tüm sayılar koddan ölçüldü, tahmin yok.
 
@@ -125,6 +125,21 @@ yaşanan hataların en sık nedeni buydu.
   döngü başında bir kez okunmalı.
 - `norm_plan` 60 satır ve tamamı doğrulama; madde 6'daki alan tablosu Python tarafında
   da kullanılabilir, böylece doğrulama kuralları tek yerde tanımlanır.
+
+## Uygulananlar — 2026-08-08
+
+Aşağıdaki 5 madde yapıldı. Her adımdan sonra test paketinin tamamı yeniden koşuldu;
+hiçbir adımda kırmızı bırakılmadı. Madde 6 (modül bölme) **yapılmadı**, ertelendi.
+
+| # | İş | Ölçülen sonuç |
+|---|---|---|
+| 1 | Sessiz `except`ler | **56 hata yakalayıcı** isimlendirildi (`yut(nerede, e)`), `debug` ayarıyla loglanır. Kritik olanlar (`write_state`, `save_cfg`) zaten loglanıyormuş |
+| 2 | Rapor üreticileri | 6 ortak bölüm üreticisi (`_bolum_*`). `build_report` 91→**72**, `build_run_mail` 76→**54** satır |
+| 3 | `do_run` aşamalara | 82→**31** satır. Güvenlik kuralı `_retention_calissin_mi()` içine alındı ve **8 kombinasyonu sınayan özel test** yazıldı |
+| 4 | Arayüzde alan tablosu | `ui/src/alanlar.ts` tek kaynak (133 satır). `validatePlan` 43→**16**, `savePlan` 33→**17**, `openEditor` 59→**41**, `setVal/setChk` çağrısı 110→**70** |
+| 5 | Global durum | `GuvenlikDeposu` ve `GuncellemeDurumu` sınıfları. Modül düzeyi değişebilir global 13→**10** (kalanlar sabit tablolar ve küçük önbellekler) |
+
+Test sayısı 30 → **32** (retention güvenlik kuralı ve "beni hatırla" için yeni testler).
 
 ## Önerilen sıra
 

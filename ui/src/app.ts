@@ -510,7 +510,6 @@ function preset(k: string): void {
   const v = PRESETS[k];
   if (!v) return;
   setVal("e-kd", v.keep_days); setVal("e-kc", v.keep_count); setVal("e-td", v.drive_trash_days);
-  setVal("e-runat", v.run_at); setVal("e-bw", v.bwlimit); setVal("e-tr", v.transfers);
   setVal("e-ck", v.checkers); setVal("e-chunk", v.drive_chunk); setVal("e-mage", v.min_age_min);
   setVal("e-wvm", v.vzdump_wait_min); setChk("e-wr", v.weekly_report); setVal("e-rday", v.report_day);
   setVal("e-rat", v.report_at); setVal("e-rdays", v.report_days);
@@ -554,29 +553,11 @@ function openEditor(pid: string | null): void {
     report_quota_warn: 90, report_mail_to: "",
   };
   const v = (p || d) as unknown as Plan;
-  setVal("e-name", v.name); setChk("e-enabled", v.enabled); setVal("e-src", v.src_dir);
+  // Ortak alanlar tablodan doldurulur (bkz. alanlar.ts); asagidakiler ozel durumlar.
+  alanlariDoldur(v as unknown as Record<string, unknown>);
   const rp = String(v.remote || "gdrive:proxmox-yedek").split(":");
   setVal("e-folder", rp.slice(1).join(":"));
-  setVal("e-kd", v.keep_days); setVal("e-kc", v.keep_count); setVal("e-td", v.drive_trash_days);
-  setVal("e-runat", v.run_at); setVal("e-bw", v.bwlimit); setVal("e-tr", v.transfers);
-  setVal("e-ck", v.checkers); setVal("e-chunk", v.drive_chunk);
-  setVal("e-bwsch", v.bwlimit_schedule || ""); setChk("e-bwup", v.bwlimit_upload_only !== false);
-  setChk("e-bwauto", !!v.bwlimit_auto); setVal("e-bwlink", v.bw_auto_link || "100M");
-  setVal("e-bwres", v.bw_auto_reserve_pct === undefined ? 30 : v.bw_auto_reserve_pct);
-  setVal("e-bwmin", v.bw_auto_min || "1M"); setVal("e-bwmax", v.bw_auto_max || "");
-  setVal("e-bwint", v.bw_auto_interval_sec || 10);
-  setVal("e-bwsm", v.bw_auto_smooth === undefined ? 0.4 : v.bw_auto_smooth);
-  setVal("e-bwstep", v.bw_auto_step_pct === undefined ? 25 : v.bw_auto_step_pct);
   void loadIfaces(v.bw_auto_iface || ""); bwAutoToggle();
-  setVal("e-extra", (v.rclone_extra || []).join(" ")); setVal("e-mail", v.mail_to);
-  setChk("e-nsuc", v.notify_success !== false); setChk("e-nerr", v.notify_failure !== false);
-  setChk("e-nskip", !!v.notify_skipped);
-  setChk("e-wv", v.wait_for_vzdump !== false); setVal("e-wvm", v.vzdump_wait_min);
-  setVal("e-mage", v.min_age_min); setVal("e-skip", (v.skip_patterns || []).join(" "));
-  setChk("e-pof", !!v.prune_on_failure);
-  setChk("e-wr", v.weekly_report !== false); setVal("e-rat", v.report_at);
-  setVal("e-rdays", v.report_days); setVal("e-rstale", v.report_stale_days);
-  setVal("e-rquota", v.report_quota_warn); setVal("e-rmail", v.report_mail_to);
   setHtml("e-rday", WD.map((n, i) => '<option value="' + (i + 1) + '">' + n + "</option>").join(""));
   setVal("e-rday", v.report_day || 1);
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
@@ -593,42 +574,15 @@ function openEditor(pid: string | null): void {
 }
 
 function validatePlan(): boolean {
-  let ok = true;
-  ok = vTxt("e-name", "plan adı gerekli") && ok;
-  ok = vTxt("e-src", "kaynak klasör gerekli") && ok;
+  // Alanlarin tamami tablodan dogrulanir (bkz. alanlar.ts).
+  // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
+  let ok = alanlariDogrula();
   if (!val("e-acct")) ok = bad("e-acct", "önce bir Google hesabı ekle") && ok; else good("e-acct");
   ok = vRx("e-folder", RX.folder, 'klasör adında : * ? " < > | olamaz') && ok;
   if (!val("e-folder").trim()) ok = bad("e-folder", "hedef klasör gerekli") && ok;
-  ok = vNum("e-kd", 0, 3650, "0-3650 arası gün") && ok;
-  ok = vNum("e-kc", 0, 999, "0-999 arası adet") && ok;
-  ok = vNum("e-td", 0, 365, "0-365 arası gün") && ok;
-  ok = vRx("e-runat", RX.time, "SS:DD biçiminde saat (ör. 03:00)") && ok;
-  ok = vNum("e-wvm", 0, 1440, "0-1440 dakika") && ok;
-  ok = vNum("e-mage", 0, 1440, "0-1440 dakika") && ok;
-  ok = vRx("e-bw", RX.bw, "ör. 30M, 2M veya off", true) && ok;
-  ok = vBwSched("e-bwsch") && ok;
   if (chk("e-bwauto")) {
-    ok = vRx("e-bwlink", RX.bw, "ör. 12M, 100M") && ok;
-    ok = vNum("e-bwres", 0, 95, "0-95 arası yüzde") && ok;
-    ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
-    ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
-    ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
-    ok = vNum("e-bwsm", 0.05, 1, "0.05 - 1 arası") && ok;
-    ok = vNum("e-bwstep", 1, 90, "1-90 arası yüzde") && ok;
     const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
     if (ust && alt && alt > ust) ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
-  }
-  ok = vNum("e-tr", 1, 64, "1-64 arası") && ok;
-  ok = vNum("e-ck", 1, 64, "1-64 arası") && ok;
-  ok = vRx("e-chunk", RX.chunk, "ör. 64M, 128M, 8M") && ok;
-  const mailIster = chk("e-nsuc") || chk("e-nerr") || chk("e-nskip") || chk("e-wr");
-  ok = vMails("e-mail", !mailIster) && ok;
-  ok = vMails("e-rmail", true) && ok;
-  if (chk("e-wr")) {
-    ok = vRx("e-rat", RX.time, "SS:DD biçiminde saat") && ok;
-    ok = vNum("e-rdays", 1, 365, "1-365 gün") && ok;
-    ok = vNum("e-rstale", 0, 365, "0-365 gün") && ok;
-    ok = vNum("e-rquota", 0, 100, "0-100 arası yüzde") && ok;
   }
   if (Number(val("e-kc")) === 0 && Number(val("e-kd")) === 0) {
     ok = bad("e-kc", "ikisi birden 0 olamaz — hiç yedek kalmaz") && ok;
@@ -640,27 +594,11 @@ async function savePlan(): Promise<void> {
   if (!validatePlan()) { flash("form hatalı — kırmızı alanlara bak", false); return; }
   const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
     .map((c: HTMLInputElement) => Number(c.value));
-  const body = {
-    id: EDIT, name: val("e-name"), enabled: chk("e-enabled"), src_dir: val("e-src"),
+  const body: Record<string, unknown> = {
+    ...alanlariTopla(),                       // tum ortak alanlar (bkz. alanlar.ts)
+    id: EDIT,
     remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
-    keep_days: Number(val("e-kd")), keep_count: Number(val("e-kc")),
-    drive_trash_days: Number(val("e-td")), run_at: val("e-runat"), weekdays: wd,
-    bwlimit: val("e-bw"), bwlimit_schedule: val("e-bwsch").trim(),
-    bwlimit_upload_only: chk("e-bwup"), bwlimit_auto: chk("e-bwauto"),
-    bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
-    bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
-    bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
-    bw_auto_smooth: Number(val("e-bwsm")), bw_auto_step_pct: Number(val("e-bwstep")),
-    transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
-    drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
-    smtp_profile: val("e-smtp"), mail_to: val("e-mail"),
-    notify_success: chk("e-nsuc"), notify_failure: chk("e-nerr"), notify_skipped: chk("e-nskip"),
-    wait_for_vzdump: chk("e-wv"), vzdump_wait_min: Number(val("e-wvm")),
-    min_age_min: Number(val("e-mage")), skip_patterns: val("e-skip").split(/\s+/).filter(Boolean),
-    prune_on_failure: chk("e-pof"), weekly_report: chk("e-wr"),
-    report_day: Number(val("e-rday")), report_at: val("e-rat"), report_days: Number(val("e-rdays")),
-    report_stale_days: Number(val("e-rstale")), report_quota_warn: Number(val("e-rquota")),
-    report_mail_to: val("e-rmail"),
+    weekdays: wd,
   };
   const j = await api("/api/plan/save", { method: "POST", body: JSON.stringify(body) });
   flash(j.msg || "", j.ok);

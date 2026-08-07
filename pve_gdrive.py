@@ -37,6 +37,8 @@ GLOBAL_DEFAULTS = {
     "ui_pass": "degistir-beni",   # ilk acilista pbkdf2 ile hash'lenip uzerine yazilir
     "api_token": "",              # otomasyon icin: Authorization: Bearer <token>
     # --- oturum ve giris guvenligi ---
+    "remember_enabled": True,     # giris ekraninda "beni hatirla" secenegi
+    "remember_days": 30,          # hatirlanan oturumun omru (gun)
     "session_timeout_min": 120,   # hareketsizlik suresi
     "session_absolute_h": 24,     # oturumun azami omru
     "login_max_attempts": 5,      # bu kadar hatali denemeden sonra kilit
@@ -57,6 +59,7 @@ GLOBAL_DEFAULTS = {
     "update_backup_keep": 5,      # saklanacak eski surum sayisi
     # Zamanlayici: systemd timer yerine surecin kendi icinde calissin mi.
     # null = otomatik (konteynerde acik, systemd kurulumunda kapali)
+    "debug": False,               # ayrintili hata izleri loga yazilsin mi
     "internal_scheduler": None,
     "scheduler_interval_sec": 300,
     # Arayuze yalnizca bu aglardan erisilebilir. Bos liste = kisitlama yok.
@@ -197,10 +200,13 @@ def load_cfg():
     return c
 
 def cfg(force=False):
+    """Config onbellekli okunur. Onbellek tazelenince hata ayiklama bayragi da guncellenir."""
     try: mt = os.path.getmtime(CONFIG_PATH)
     except Exception: mt = None
     if force or _CACHE["data"] is None or _CACHE["mtime"] != mt:
         _CACHE["data"] = load_cfg(); _CACHE["mtime"] = mt
+        _HATA_AYIKLA["acik"] = bool(_CACHE["data"].get("debug")
+                                    or os.environ.get("PVE_GDRIVE_DEBUG"))
     return _CACHE["data"]
 
 def save_cfg(c):
@@ -283,6 +289,16 @@ def get_plan(pid, c=None):
     return None
 
 # ---------- LOG / STATE ----------
+_HATA_AYIKLA = {"acik": bool(os.environ.get("PVE_GDRIVE_DEBUG"))}
+
+def yut(nerede, e):
+    """Onemsiz bir hatayi yutar ama izini birakir.
+    Yedekleme aracinda sessizce basarisiz olan islem, hata veren islemden tehlikelidir:
+    kullanici her seyin yolunda oldugunu sanir. debug acikken loga dusr."""
+    if not _HATA_AYIKLA["acik"]: return
+    try: log(f"DEBUG [{nerede}]: {type(e).__name__}: {e}")
+    except Exception: pass
+
 def now_str(): return datetime.now().strftime(TS_FMT)
 
 def rotate_log(lf):
@@ -297,7 +313,7 @@ def rotate_log(lf):
             a, b = f"{lf}.{i}", f"{lf}.{i+1}"
             if os.path.exists(a): os.replace(a, b)
         os.replace(lf, f"{lf}.1")
-    except Exception: pass
+    except Exception as e: yut("rotate_log", e)
 
 _LOG_KILIT = threading.Lock()
 
@@ -310,7 +326,7 @@ def log(msg, plan=None):
           os.makedirs(os.path.dirname(lf), exist_ok=True)
           rotate_log(lf)
           with open(lf, "a") as f: f.write(line + "\n")
-      except Exception: pass
+      except Exception as e: yut("log", e)
       # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
       if not os.environ.get("PVE_GDRIVE_QUIET"): print(line, flush=True)
 
@@ -346,7 +362,9 @@ def read_log(src="all", n=None):
 
 def human(n):
     try: n = float(n)
-    except Exception: return "-"
+    except Exception as e:
+        yut("human", e)
+        return "-"
     for u in ["B", "KB", "MB", "GB", "TB"]:
         if n < 1024: return f"{n:.1f} {u}"
         n /= 1024
@@ -398,16 +416,18 @@ def set_progress(pid, patch, merge=True):
         tmp = pth + ".tmp"
         with open(tmp, "w") as f: json.dump(cur, f)
         os.replace(tmp, pth)
-    except Exception: pass
+    except Exception as e: yut("set_progress", e)
 
 def get_progress(pid):
     try:
         with open(progress_path(pid)) as f: return json.load(f)
-    except Exception: return None
+    except Exception as e:
+        yut("get_progress", e)
+        return None
 
 def clear_progress(pid):
     try: os.remove(progress_path(pid))
-    except Exception: pass
+    except Exception as e: yut("clear_progress", e)
 
 # rclone --stats-one-line ciktisi. DIKKAT: gercek cikti "Transferred:" oneki ICERMEZ:
 #   INFO  :   976.597 KiB / 976.597 KiB, 100%, 88.775 KiB/s, ETA 0s
@@ -422,7 +442,9 @@ def to_bytes(txt):
     m = RE_UNIT.search(str(txt) or "")
     if not m: return 0
     try: v = float(m.group(1))
-    except Exception: return 0
+    except Exception as e:
+        yut("to_bytes", e)
+        return 0
     return int(v * (1024 ** "BKMGTP".index((m.group(2) or "B").upper())))
 
 def parse_stats(line):
@@ -482,12 +504,12 @@ def rclone_stream(args, timeout=None, on_line=None, onek=None):
             buf.append(line)
             if on_line:
                 try: on_line(line)
-                except Exception: pass
+                except Exception as e: yut("rclone_stream", e)
         pr.wait()
     finally:
         if killer: killer.cancel()
         try: pr.stdout.close()
-        except Exception: pass
+        except Exception as e: yut("rclone_stream", e)
     if pr.returncode and pr.returncode < 0: buf.append("zaman asimi: rclone durduruldu")
     return pr.returncode, list(buf)
 
@@ -497,7 +519,9 @@ def lsjson_ok(path, extra=None):
     rc, out, err = rclone(["lsjson", path] + (extra or []))
     if rc != 0: return False, []
     try: return True, json.loads(out)
-    except Exception: return False, []
+    except Exception as e:
+        yut("lsjson_ok", e)
+        return False, []
 
 def lsjson(path, extra=None):
     return lsjson_ok(path, extra)[1]
@@ -511,7 +535,9 @@ def is_running(pid):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(f, fcntl.LOCK_UN); f.close(); return False
     except OSError: return True
-    except Exception: return False
+    except Exception as e:
+        yut("is_running", e)
+        return False
 
 # ---------- PROXMOX YEDEGI ILE CAKISMA ----------
 def vzdump_lock_held():
@@ -526,7 +552,7 @@ def vzdump_lock_held():
             except OSError:
                 f.close(); return True          # kilitli => vzdump calisiyor
             f.close()
-        except Exception: pass
+        except Exception as e: yut("vzdump_lock_held", e)
     return False
 
 def vzdump_proc_running():
@@ -543,7 +569,9 @@ def vzdump_proc_running():
 def inprogress(p):
     """Kaynak klasorde yazilmakta olan (yarim) dosyalar."""
     try: names = os.listdir(p["src_dir"])
-    except Exception: return []
+    except Exception as e:
+        yut("inprogress", e)
+        return []
     pats = p.get("skip_patterns") or []
     return [n for n in names if any(fnmatch.fnmatch(n, pat) for pat in pats)]
 
@@ -555,7 +583,7 @@ def active_writes(p):
     for n in inprogress(p):
         try:
             if now - os.path.getmtime(os.path.join(p["src_dir"], n)) <= win: out.append(n)
-        except Exception: pass
+        except Exception as e: yut("active_writes", e)
     return out
 
 def vzdump_running(p=None):
@@ -586,7 +614,9 @@ def _hhmm(p):
     try:
         hh, mm = str(p.get("run_at", "03:00")).split(":")[:2]
         return int(hh) % 24, int(mm) % 60
-    except Exception: return 3, 0
+    except Exception as e:
+        yut("_hhmm", e)
+        return 3, 0
 
 def next_run(p, ref=None):
     hh, mm = _hhmm(p); wd = p.get("weekdays") or []
@@ -610,7 +640,7 @@ def is_due(p, s, ref=None):
     if lr:
         try:
             if datetime.strptime(lr, TS_FMT) >= sched: return False
-        except Exception: pass
+        except Exception as e: yut("is_due", e)
     return True
 
 # ---------- HAFTALIK RAPOR ----------
@@ -618,7 +648,9 @@ def _at(p, key, dflt):
     try:
         hh, mm = str(p.get(key) or dflt).split(":")[:2]
         return int(hh) % 24, int(mm) % 60
-    except Exception: return 9, 0
+    except Exception as e:
+        yut("_at", e)
+        return 9, 0
 
 def next_report(p, ref=None):
     if not p.get("weekly_report", True): return None
@@ -641,8 +673,58 @@ def report_due(p, s, ref=None):
     if lr:
         try:
             if datetime.strptime(lr, TS_FMT) >= sched: return False
-        except Exception: pass
+        except Exception as e: yut("report_due", e)
     return True
+
+# --- rapor bolumleri: iki rapor da (calisma maili ve haftalik ozet) bunlari kullanir ---
+def _bolum_gunler(p):
+    wd = p.get("weekdays") or []
+    return "her gun" if not wd else ",".join(
+        ["Pzt", "Sal", "Car", "Per", "Cum", "Cmt", "Paz"][d - 1] for d in wd)
+
+def _bolum_kota(snap):
+    """(satirlar, doluluk_yuzdesi)"""
+    q = snap.get("quota", {}) or {}
+    bt = snap.get("totals", {}) or {}
+    tt = snap.get("trash_totals", {}) or {}
+    used = float(q.get("used") or 0); total = float(q.get("total") or 0)
+    pct = (used / total * 100) if total else 0
+    return ([f"  Yedek        : {bt.get('count', 0)} dosya, {human(bt.get('size', 0))}",
+             f"  Copte bekleyen: {tt.get('count', 0)} dosya, {human(tt.get('size', 0))}",
+             f"  Kota         : {human(used)} / {human(total)} (%{pct:.1f}), bos {human(q.get('free'))}"],
+            pct)
+
+def _bolum_saklama(p):
+    return [f"  Saklama      : {p['keep_days']} gun, misafir basina en az {p['keep_count']} set",
+            f"  Cop suresi   : {p['drive_trash_days']} gun"]
+
+def _bolum_misafirler(p, gs, esik_gun=None):
+    """(satirlar, eski_misafirler). gs None ise Drive listelenememis demektir."""
+    if gs is None: return ["  (Drive listelenemedi)"], []
+    esik = int(esik_gun if esik_gun is not None else p["keep_days"])
+    simdi = time.time(); satirlar = []; eski = []
+    for g in gs:
+        yas = (simdi - g["last"]) / 86400 if g["last"] else None
+        iso = datetime.fromtimestamp(g["last"]).strftime("%Y-%m-%d %H:%M") if g["last"] else "-"
+        isaret = ""
+        if yas is not None and yas > esik:
+            isaret = "  <-- SAKLAMA SURESINDEN ESKI"; eski.append(g["guest"])
+        satirlar.append(f"  {g['guest']:10} {iso}  {g['sets']:>2} set  {human(g['size']):>9}"
+                        f"  {('%.1f gun once' % yas) if yas is not None else ''}{isaret}")
+    return satirlar, eski
+
+def _bolum_cop(snap, azami=10):
+    t = snap.get("trash", []) or []
+    if not t: return []
+    tt = snap.get("trash_totals", {}) or {}
+    satirlar = [f"COP KUTUSUNDA BEKLEYEN ({tt.get('count', len(t))})"]
+    for x in t[:azami]:
+        kalan = f"{x['remain_days']} gun" if x.get("tracked") else "izlenmiyor"
+        satirlar.append(f"  {human(x['size']):>9}  {kalan:>12} kaldi  {x['name']}")
+    return satirlar + [""]
+
+def _bolum_uyarilar(uyarilar):
+    return ["UYARILAR"] + ([f"  ! {u}" for u in uyarilar] if uyarilar else ["  Yok."])
 
 def guest_summary(p):
     """Misafir basina son yedek zamani ve set sayisi. Raporun en degerli kismi:
@@ -666,7 +748,9 @@ def guest_summary(p):
 def local_guests(p):
     """Kaynak klasordeki misafirler - Drive'a hic cikmamis olan var mi diye."""
     try: names = os.listdir(p["src_dir"])
-    except Exception: return set()
+    except Exception as e:
+        yut("local_guests", e)
+        return set()
     out = set()
     for n in names:
         m = dump_re().match(n)
@@ -674,16 +758,16 @@ def local_guests(p):
     return out
 
 def build_report(p):
-    """Haftalik ozet metni + uyarilar."""
+    """Haftalik ozet metni + uyari sayisi. Bolumler _bolum_* ureticilerinden gelir."""
     days = int(p.get("report_days") or 7)
-    st = read_state(); s = pstate(st, p["id"])
+    s = pstate(read_state(), p["id"])
     snap = update_snapshot(p)
     cutoff = datetime.now() - timedelta(days=days)
     hist = []
     for h in s.get("history", []):
         try:
             if datetime.strptime(h["time"], TS_FMT) >= cutoff: hist.append(h)
-        except Exception: pass
+        except Exception as e: yut("build_report", e)
     n_ok = sum(1 for h in hist if h.get("status") == "basarili")
     n_err = sum(1 for h in hist if h.get("status") == "HATA")
     n_skip = sum(1 for h in hist if h.get("status") == "atlandi")
@@ -693,58 +777,40 @@ def build_report(p):
             kv = part.strip().split(":")
             if len(kv) == 2 and kv[0] in tot:
                 try: tot[kv[0]] += int(kv[1])
-                except Exception: pass
-    q = snap.get("quota", {}); bt = snap.get("totals", {}); tt = snap.get("trash_totals", {})
-    used = float(q.get("used") or 0); total = float(q.get("total") or 0)
-    pct = (used / total * 100) if total else 0
+                except Exception as e: yut("build_report", e)
     nr = next_run(p); nrep = next_report(p)
-    wd = p.get("weekdays") or []
-    gunler = "her gun" if not wd else ",".join(["Pzt","Sal","Car","Per","Cum","Cmt","Paz"][d-1] for d in wd)
+    kota_satirlari, pct = _bolum_kota(snap)
 
-    L = [f"HAFTALIK YEDEK RAPORU",
+    L = ["HAFTALIK YEDEK RAPORU",
          f"Plan   : {p['name']} ({p['id']})",
          f"Donem  : son {days} gun  ({cutoff.strftime('%Y-%m-%d')} .. {now_str()[:10]})",
          f"Kaynak : {p['src_dir']}",
          f"Hedef  : {p['remote']}", "",
          "CALISMA",
          f"  Toplam       : {len(hist)}  ({n_ok} basarili, {n_err} hata, {n_skip} atlandi)",
-         f"  Son calisma  : {s.get('last_run') or '-'}  ({s.get('status','-')})",
+         f"  Son calisma  : {s.get('last_run') or '-'}  ({s.get('status', '-')})",
          f"  Son ozet     : {s.get('summary') or '-'}",
-         f"  Program      : {gunler} saat {p['run_at']}",
+         f"  Program      : {_bolum_gunler(p)} saat {p['run_at']}",
          f"  Sonraki      : {nr.strftime(TS_FMT) if nr else '-'}",
          f"  Yuklenen     : {tot['yuklenen']} dosya",
          f"  Cope giden   : {tot['copene']} dosya",
          f"  Kalici silinen: {tot['kalici-silinen']} dosya", "",
-         "DRIVE",
-         f"  Yedek        : {bt.get('count',0)} dosya, {human(bt.get('size',0))}",
-         f"  Copte bekleyen: {tt.get('count',0)} dosya, {human(tt.get('size',0))}",
-         f"  Kota         : {human(used)} / {human(total)} (%{pct:.1f}), bos {human(q.get('free'))}",
-         f"  Saklama      : {p['keep_days']} gun, misafir basina en az {p['keep_count']} set",
-         f"  Cop suresi   : {p['drive_trash_days']} gun", ""]
+         "DRIVE"] + kota_satirlari + _bolum_saklama(p) + [""]
 
     uyari = []
-    gs = guest_summary(p)
-    if gs is None:
-        L += ["MISAFIRLER", "  (Drive listelenemedi)", ""]
-    else:
-        L.append("MISAFIR BAZINDA SON YEDEK")
-        now = time.time()
-        for g in gs:
-            yas = (now - g["last"]) / 86400 if g["last"] else None
-            iso = datetime.fromtimestamp(g["last"]).strftime("%Y-%m-%d %H:%M") if g["last"] else "-"
-            isaret = ""
-            if yas is not None and yas > int(p["keep_days"]):
-                isaret = "  <-- SAKLAMA SURESINDEN ESKI"
-                uyari.append(f"{g['guest']} icin en yeni yedek {yas:.1f} gunluk "
-                             f"(saklama {p['keep_days']} gun) - yedegi aliniyor mu?")
-            L.append(f"  {g['guest']:10} {iso}  {g['sets']:>2} set  {human(g['size']):>9}"
-                     f"  {('%.1f gun once' % yas) if yas is not None else ''}{isaret}")
-        yerel = local_guests(p); drivede = {g["guest"] for g in gs}
-        eksik = sorted(yerel - drivede)
+    gs = None
+    try: gs = guest_summary(p)
+    except Exception as e: yut("build_report", e)
+    misafir_satirlari, eski = _bolum_misafirler(p, gs)
+    L += ["MISAFIR BAZINDA SON YEDEK"] + misafir_satirlari
+    for g in eski:
+        uyari.append(f"{g} icin en yeni yedek saklama suresinden eski - yedegi aliniyor mu?")
+    if gs is not None:
+        eksik = sorted(local_guests(p) - {g["guest"] for g in gs})
         if eksik:
             L.append(f"  Kaynakta olup Drive'da olmayan: {', '.join(eksik)}")
             uyari.append("Su misafirler henuz Drive'a cikmadi: " + ", ".join(eksik))
-        L.append("")
+    L.append("")
 
     if s.get("status") == "HATA": uyari.append("Son calisma HATA ile bitti.")
     stale = int(p.get("report_stale_days") or 0)
@@ -753,14 +819,13 @@ def build_report(p):
             gecen = (datetime.now() - datetime.strptime(s["last_run"], TS_FMT)).total_seconds() / 86400
             if gecen > stale and s.get("status") != "basarili":
                 uyari.append(f"{gecen:.1f} gundur basarili yedek yok.")
-        except Exception: pass
+        except Exception as e: yut("build_report", e)
     qw = int(p.get("report_quota_warn") or 0)
-    if qw and pct >= qw: uyari.append(f"Kota %{pct:.1f} doluluğa ulasti (esik %{qw}).")
+    if qw and pct >= qw: uyari.append(f"Kota %{pct:.1f} dolulua ulasti (esik %{qw}).")
     kalan = [t for t in snap.get("trash", []) if t.get("tracked") and t.get("remain_days", 1) <= 0]
     if kalan: uyari.append(f"{len(kalan)} dosya suresi doldugu halde Drive copunde duruyor.")
 
-    L.append("UYARILAR")
-    L += ([f"  ! {u}" for u in uyari] if uyari else ["  Yok - her sey yolunda."])
+    L += _bolum_uyarilar(uyari)
     L += ["", f"Sonraki rapor: {nrep.strftime(TS_FMT) if nrep else '-'}",
           f"Uretim zamani: {now_str()}"]
     return "\n".join(L), len(uyari)
@@ -885,7 +950,9 @@ def bw_bytes(txt):
     m = re.match(r"^([\d.]+)\s*([BKMGT]?)$", t, re.I)
     if not m: return 0
     try: return int(float(m.group(1)) * BW_BIRIM[m.group(2).upper()])
-    except Exception: return 0
+    except Exception as e:
+        yut("bw_bytes", e)
+        return 0
 
 def bw_str(b):
     """bayt/sn -> rclone'un anladigi kisa gosterim."""
@@ -907,7 +974,7 @@ def net_ifaces():
                     continue
                 p = kalan.split()
                 if len(p) >= 9: out[ad] = (int(p[0]), int(p[8]))
-    except Exception: pass
+    except Exception as e: yut("net_ifaces", e)
     return out
 
 def default_iface():
@@ -917,7 +984,7 @@ def default_iface():
             for line in f.readlines()[1:]:
                 p = line.split()
                 if len(p) > 2 and p[1] == "00000000": return p[0]
-    except Exception: pass
+    except Exception as e: yut("default_iface", e)
     ifs = net_ifaces()
     return max(ifs, key=lambda k: ifs[k][1]) if ifs else ""
 
@@ -1015,7 +1082,9 @@ def bw_auto_izle(p, port, dur_bayragi):
 
 def dt_epoch(s):
     try: return int(datetime.strptime(s, DT_FMT).timestamp())
-    except Exception: return 0
+    except Exception as e:
+        yut("dt_epoch", e)
+        return 0
 
 def collect_sets(files):
     """Ayni vzdump setine ait dosyalari (log, notes, .vma.zst) tek kayitta toplar."""
@@ -1114,7 +1183,7 @@ def update_snapshot(p):
     rc, out, err = rclone(["about", p["remote"].split(":")[0] + ":", "--json"])
     if rc == 0:
         try: quota = json.loads(out)
-        except Exception: pass
+        except Exception as e: yut("update_snapshot", e)
     backups = []
     for f in lsjson(p["remote"]):
         if f.get("IsDir"): continue
@@ -1209,22 +1278,18 @@ def maybe_report(p, status, summary, snap, detay=None):
 
 def build_run_mail(p, status, summary, snap, detay):
     """Tek bir calismanin detayli raporu: ne yapildi, ne silindi, ne durumda."""
-    q = snap.get("quota", {}); bt = snap.get("totals", {}); tt = snap.get("trash_totals", {})
-    used = float(q.get("used") or 0); total = float(q.get("total") or 0)
-    pct = (used / total * 100) if total else 0
     nr = next_run(p); nrep = next_report(p)
-    wd = p.get("weekdays") or []
-    gunler = "her gun" if not wd else ",".join(["Pzt","Sal","Car","Per","Cum","Cmt","Paz"][d-1] for d in wd)
+    kota_satirlari, pct = _bolum_kota(snap)
     simge = {"basarili": "[OK]", "HATA": "[HATA]", "atlandi": "[ATLANDI]"}.get(status, "[?]")
-    L = [f"{simge} {p['name']} - {status}",
-         "=" * 58, "",
+    L = [f"{simge} {p['name']} - {status}", "=" * 58, "",
          "OZET",
          f"  Zaman        : {now_str()}",
-         f"  Tetikleyen   : {detay.get('trigger','-')}",
-         f"  Sure         : {detay.get('dur','-')} sn",
-         f"  Yuklenen     : {detay.get('uploaded',0)} dosya",
-         f"  Cope tasinan : {detay.get('moved',0)} dosya  ({p['keep_days']} gunden eski setler)",
-         f"  Kalici silinen: {detay.get('purged',0)} dosya  (copte {p['drive_trash_days']} gun bekleyenler)", ""]
+         f"  Tetikleyen   : {detay.get('trigger', '-')}",
+         f"  Sure         : {detay.get('dur', '-')} sn",
+         f"  Yuklenen     : {detay.get('uploaded', 0)} dosya",
+         f"  Cope tasinan : {detay.get('moved', 0)} dosya  ({p['keep_days']} gunden eski setler)",
+         f"  Kalici silinen: {detay.get('purged', 0)} dosya  "
+         f"(copte {p['drive_trash_days']} gun bekleyenler)", ""]
     if detay.get("skipped"):
         L += ["  ! Yukleme basarisiz oldugu icin RETENTION CALISTIRILMADI.",
               "    Hicbir yedek silinmedi; sorun giderilince kendiliginden devam eder.", ""]
@@ -1233,61 +1298,131 @@ def build_run_mail(p, status, summary, snap, detay):
               + ", ".join(detay["yarim"][:5]), ""]
     L += ["YAPILANDIRMA",
           f"  Kaynak       : {p['src_dir']}",
-          f"  Hedef        : {p['remote']}",
-          f"  Saklama      : {p['keep_days']} gun, misafir basina en az {p['keep_count']} set",
-          f"  Cop suresi   : {p['drive_trash_days']} gun",
-          f"  Program      : {gunler} saat {p['run_at']}",
+          f"  Hedef        : {p['remote']}"] + _bolum_saklama(p) + [
+          f"  Program      : {_bolum_gunler(p)} saat {p['run_at']}",
           f"  Sonraki      : {nr.strftime(TS_FMT) if nr else '-'}",
           f"  Hiz siniri   : {p['bwlimit']} | es zamanli: {p['transfers']}", "",
-          "DRIVE DURUMU",
-          f"  Yedek        : {bt.get('count',0)} dosya, {human(bt.get('size',0))}",
-          f"  Copte bekleyen: {tt.get('count',0)} dosya, {human(tt.get('size',0))}",
-          f"  Kota         : {human(used)} / {human(total)} (%{pct:.1f}), bos {human(q.get('free'))}", ""]
+          "DRIVE DURUMU"] + kota_satirlari + [""]
+
     gs = None
     try: gs = guest_summary(p)
-    except Exception: pass
+    except Exception as e: yut("build_run_mail", e)
+    eski = []
     if gs:
-        L.append("MISAFIR BAZINDA SON YEDEK")
-        now = time.time()
-        for g in gs:
-            yas = (now - g["last"]) / 86400 if g["last"] else None
-            iso = datetime.fromtimestamp(g["last"]).strftime("%Y-%m-%d %H:%M") if g["last"] else "-"
-            isaret = "  <-- ESKI" if (yas is not None and yas > int(p["keep_days"])) else ""
-            L.append(f"  {g['guest']:10} {iso}  {g['sets']:>2} set  {human(g['size']):>9}"
-                     f"  {('%.1f gun once' % yas) if yas is not None else ''}{isaret}")
-        L.append("")
+        misafir_satirlari, eski = _bolum_misafirler(p, gs)
+        L += ["MISAFIR BAZINDA SON YEDEK"] + misafir_satirlari + [""]
     bl = snap.get("backups", [])[:10]
     if bl:
         L.append("EN YENI YEDEKLER")
         for b in bl:
-            L.append(f"  {str(b.get('mod',''))[:19].replace('T',' ')}  {b['guest']:9}"
+            L.append(f"  {str(b.get('mod', ''))[:19].replace('T', ' ')}  {b['guest']:9}"
                      f"  {human(b['size']):>9}  {b['name']}")
         L.append("")
-    t = snap.get("trash", [])
-    if t:
-        L.append(f"COP KUTUSUNDA BEKLEYEN ({tt.get('count', len(t))})")
-        for x in t[:10]:
-            kalan = f"{x['remain_days']} gun" if x.get("tracked") else "izlenmiyor"
-            L.append(f"  {human(x['size']):>9}  {kalan:>12} kaldi  {x['name']}")
-        L.append("")
+    L += _bolum_cop(snap)
+
     uyari = []
     if status == "HATA": uyari.append("Calisma HATA ile bitti - log dosyasina bak.")
     if detay.get("skipped"): uyari.append("Retention atlandi, eski yedekler birikmeye devam ediyor.")
     qw = int(p.get("report_quota_warn") or 0)
     if qw and pct >= qw: uyari.append(f"Kota %{pct:.1f} - esik %{qw} asildi.")
-    if gs:
-        eski = [g["guest"] for g in gs if g["last"] and (time.time()-g["last"])/86400 > int(p["keep_days"])]
-        if eski: uyari.append("Saklama suresinden eski yedegi olanlar: " + ", ".join(eski))
-    L.append("UYARILAR")
-    L += ([f"  ! {u}" for u in uyari] if uyari else ["  Yok."])
+    if eski: uyari.append("Saklama suresinden eski yedegi olanlar: " + ", ".join(eski))
+    L += _bolum_uyarilar(uyari)
     L += ["", f"Haftalik rapor: {nrep.strftime(TS_FMT) if nrep else 'kapali'}",
           f"Log: {cfg().get('log_file')}"]
     return "\n".join(L), len(uyari)
 
 # ---------- CALISTIRMA ----------
+def _gecmise_ekle(pid, kayit):
+    """Calisma gecmisine bir satir ekler ve history_max ile sinirlar."""
+    s = pstate(read_state(), pid)
+    h = s.get("history", [])
+    h.insert(0, kayit)
+    return h[:int(cfg().get("history_max") or 50)]
+
+def _asama_atlandi(p, pid, trigger):
+    """vzdump bitmedi: hicbir sey yapmadan cik. Bu bir hata degil, sonraki turda denenir."""
+    ozet = f"Proxmox yedegi calisiyordu ({p.get('vzdump_wait_min')} dk beklendi)"
+    log("vzdump hala calisiyor, bu tur atlandi (sonraki kontrolde tekrar denenecek)", pid)
+    put_pstate(pid, {"status": "atlandi", "summary": ozet, "last_skip": now_str(),
+                     "last_run": now_str(), "last_trigger": trigger,
+                     "history": _gecmise_ekle(pid, {"time": now_str(), "status": "atlandi",
+                                                    "summary": ozet, "trigger": trigger})})
+    if notify_wanted(p, "atlandi"):
+        try: maybe_report(p, "atlandi", ozet, update_snapshot(p), {"trigger": trigger, "dur": 0})
+        except Exception as e: log(f"atlandi maili gonderilemedi: {e}", pid)
+
+def _asama_kopyala(p, pid):
+    """(basarili_mi, yuklenen_dosya, atlanan_yarim_dosyalar)"""
+    yarim = inprogress(p)
+    if yarim:
+        log(f"yazilmakta olan {len(yarim)} dosya atlanacak: {', '.join(yarim[:3])}"
+            + (" ..." if len(yarim) > 3 else ""), pid)
+    # Kopyalama oncesi "kac dosya vardi" listelemesi yapilmaz: yuklenen sayisi rclone'un
+    # kendi ozetinden gelir, boylece her calismada bir tam uzak listeleme tasarruf edilir.
+    ok, uploaded = do_copy(p)
+    return ok, uploaded, yarim
+
+def _retention_calissin_mi(p, ok, listed, pid):
+    """PROJENIN EN ONEMLI GUVENLIK KURALI.
+
+    Yukleme basarisizsa veya Drive listelenemiyorsa HICBIR SEY SILINMEZ. Aksi halde
+    yeni yedek Drive'a cikmadan eskiler silinir ve hem yerelde hem Drive'da yedeksiz
+    kalinabilir. prune_on_failure yalnizca kullanici bilerek actiysa bunu gevsetir,
+    o durumda bile Drive listelenebiliyor olmasi sarttir.
+    """
+    if ok and listed: return True, ""
+    sebep = "yukleme basarisiz" if not ok else "Drive listelenemedi"
+    if p.get("prune_on_failure") and listed:
+        log(f"{sebep} ama prune_on_failure acik, retention yine de calisiyor", pid)
+        return True, sebep
+    log(f"{sebep} -> retention ATLANDI, hicbir yedek silinmedi", pid)
+    return False, sebep
+
+def _asama_retention(p, pid, ok):
+    """(cope_tasinan, kalici_silinen, retention_atlandi_mi)"""
+    set_progress(pid, {"phase": "listeleme", "phase_label": "Drive listeleniyor"})
+    listed, files = lsjson_ok(p["remote"])
+    calissin, _ = _retention_calissin_mi(p, ok, listed, pid)
+    if not calissin: return 0, 0, True
+    set_progress(pid, {"phase": "retention",
+                       "phase_label": "Eski yedekler çöpe taşınıyor", "pct": 100})
+    moved = do_prune(p, files)
+    set_progress(pid, {"phase": "cop", "phase_label": "Çöp kutusu temizleniyor"})
+    purged = do_purge_trash(p)
+    return moved, purged, False
+
+def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim):
+    set_progress(pid, {"phase": "ozet", "phase_label": "Durum güncelleniyor"})
+    snap = update_snapshot(p)
+    dur = int(time.time() - started)
+    status = "basarili" if ok else "HATA"
+    summary = (f"yuklenen:{uploaded} | copene:{moved} | kalici-silinen:{purged} | sure:{dur}s"
+               + (" | RETENTION ATLANDI" if atlandi else ""))
+    log("OZET: " + status + " | " + summary, pid)
+    patch = {"last_run": now_str(), "status": status, "summary": summary,
+             "last_trigger": trigger, "last_duration": dur,
+             "history": _gecmise_ekle(pid, {"time": now_str(), "status": status,
+                                            "summary": summary, "trigger": trigger})}
+    patch.update(snap)
+    put_pstate(pid, patch)
+    maybe_report(p, status, summary, snap,
+                 {"trigger": trigger, "dur": dur, "uploaded": uploaded, "moved": moved,
+                  "purged": purged, "skipped": atlandi, "yarim": yarim})
+
+def _asama_hata(p, pid, e):
+    log(f"BEKLENMEDIK HATA: {e}", pid)
+    put_pstate(pid, {"last_run": now_str(), "status": "HATA", "summary": str(e)})
+    if p.get("notify_failure", True):
+        send_mail(p.get("mail_to", ""), f"[Proxmox Yedek] {p['name']} - HATA",
+                  f"Plan: {p['name']} ({pid})\nIstisna: {e}\nZaman: {now_str()}",
+                  p.get("smtp_profile"))
+
 def do_run(pid, trigger="zamanlanmis"):
+    """Bir plani bastan sona calistirir. Asamalar _asama_* fonksiyonlarindadir;
+    burada yalnizca sira, kilit ve hata yonetimi durur."""
     p = get_plan(pid)
-    if not p: log(f"plan bulunamadi: {pid}"); return
+    if not p:
+        log(f"plan bulunamadi: {pid}"); return
     if not p.get("enabled", True) and trigger == "zamanlanmis":
         return
     lock = open(lock_path(pid), "a+")
@@ -1296,74 +1431,20 @@ def do_run(pid, trigger="zamanlanmis"):
         log("zaten calisan bir yedek var, cikiliyor", pid); return
     started = time.time()
     put_pstate(pid, {"status": "calisiyor"})
-    set_progress(pid, {"phase": "hazirlik", "phase_label": "Hazırlanıyor",
-                       "started": started, "trigger": trigger, "plan": p["name"], "pct": 0}, merge=False)
+    set_progress(pid, {"phase": "hazirlik", "phase_label": "Hazırlanıyor", "started": started,
+                       "trigger": trigger, "plan": p["name"], "pct": 0}, merge=False)
     try:
         if not os.path.isdir(p["src_dir"]):
             raise RuntimeError(f"kaynak klasor yok: {p['src_dir']}")
-        set_progress(pid, {"phase": "vzdump-bekleme", "phase_label": "Proxmox yedeği bekleniyor"})
+        set_progress(pid, {"phase": "vzdump-bekleme",
+                           "phase_label": "Proxmox yedeği bekleniyor"})
         if not wait_for_vzdump(p):
-            log("vzdump hala calisiyor, bu tur atlandi (sonraki kontrolde tekrar denenecek)", p["id"])
-            ozet = f"Proxmox yedegi calisiyordu ({p.get('vzdump_wait_min')} dk beklendi)"
-            s0 = pstate(read_state(), pid)
-            h0 = s0.get("history", [])
-            h0.insert(0, {"time": now_str(), "status": "atlandi", "summary": ozet, "trigger": trigger})
-            put_pstate(pid, {"status": "atlandi", "summary": ozet, "last_skip": now_str(),
-                             "last_run": now_str(), "last_trigger": trigger,
-                             "history": h0[:int(cfg().get("history_max") or 50)]})
-            if notify_wanted(p, "atlandi"):
-                try: maybe_report(p, "atlandi", ozet, update_snapshot(p), {"trigger": trigger, "dur": 0})
-                except Exception as e: log(f"atlandi maili gonderilemedi: {e}", pid)
-            return
-        yarim = inprogress(p)
-        if yarim:
-            log(f"yazilmakta olan {len(yarim)} dosya atlanacak: {', '.join(yarim[:3])}"
-                + (" ..." if len(yarim) > 3 else ""), p["id"])
-        # Kopyalama oncesi "kac dosya vardi" listelemesi kaldirildi: yuklenen sayisi
-        # rclone'un kendi ozetinden gelir. Boylece her calismada bir tam uzak
-        # listeleme (buyuk klasorlerde onlarca saniye) tasarruf edilir.
-        ok, uploaded = do_copy(p)
-        set_progress(pid, {"phase": "listeleme", "phase_label": "Drive listeleniyor"})
-        listed, files = lsjson_ok(p["remote"])   # yalnizca retention icin
-        # GUVENLIK: yukleme basarisizsa veya Drive listelenemiyorsa hicbir sey silinmez.
-        # Aksi halde yeni yedek Drive'a cikmadan eskiler silinip yedeksiz kalinabilir.
-        if ok and listed:
-            set_progress(pid, {"phase": "retention", "phase_label": "Eski yedekler çöpe taşınıyor", "pct": 100})
-            moved = do_prune(p, files)
-            set_progress(pid, {"phase": "cop", "phase_label": "Çöp kutusu temizleniyor"})
-            purged = do_purge_trash(p)
-        else:
-            moved = purged = 0
-            sebep = "yukleme basarisiz" if not ok else "Drive listelenemedi"
-            if p.get("prune_on_failure") and listed:
-                log(f"{sebep} ama prune_on_failure acik, retention yine de calisiyor", p["id"])
-                moved = do_prune(p, files); purged = do_purge_trash(p)
-            else:
-                log(f"{sebep} -> retention ATLANDI, hicbir yedek silinmedi", p["id"])
-        set_progress(pid, {"phase": "ozet", "phase_label": "Durum güncelleniyor"})
-        snap = update_snapshot(p)
-        dur = int(time.time() - started)
-        status = "basarili" if ok else "HATA"
-        summary = (f"yuklenen:{uploaded} | copene:{moved} | kalici-silinen:{purged} | sure:{dur}s"
-                   + ("" if ok else " | RETENTION ATLANDI"))
-        log("OZET: " + status + " | " + summary, pid)
-        s = pstate(read_state(), pid)
-        h = s.get("history", [])
-        h.insert(0, {"time": now_str(), "status": status, "summary": summary, "trigger": trigger})
-        patch = {"last_run": now_str(), "status": status, "summary": summary,
-                 "last_trigger": trigger, "last_duration": dur, "history": h[:int(cfg().get("history_max") or 50)]}
-        patch.update(snap)
-        put_pstate(pid, patch)
-        maybe_report(p, status, summary, snap,
-                     {"trigger": trigger, "dur": dur, "uploaded": uploaded, "moved": moved,
-                      "purged": purged, "skipped": not (ok and listed), "yarim": yarim})
+            _asama_atlandi(p, pid, trigger); return
+        ok, uploaded, yarim = _asama_kopyala(p, pid)
+        moved, purged, atlandi = _asama_retention(p, pid, ok)
+        _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim)
     except Exception as e:
-        log(f"BEKLENMEDIK HATA: {e}", pid)
-        put_pstate(pid, {"last_run": now_str(), "status": "HATA", "summary": str(e)})
-        if p.get("notify_failure", True):
-            send_mail(p.get("mail_to", ""), f"[Proxmox Yedek] {p['name']} - HATA",
-                      f"Plan: {p['name']} ({pid})\nIstisna: {e}\nZaman: {now_str()}",
-                      p.get("smtp_profile"))
+        _asama_hata(p, pid, e)
     finally:
         clear_progress(pid)
         fcntl.flock(lock, fcntl.LOCK_UN); lock.close()
@@ -1419,7 +1500,9 @@ def remote_quota(name):
     rc, out, err = rclone(["about", f"{name}:", "--json"], timeout=45)
     if rc != 0: return {"ok": False, "error": (err or "").strip()[:200]}
     try: q = json.loads(out); q["ok"] = True; return q
-    except Exception: return {"ok": False, "error": "cozumlenemedi"}
+    except Exception as e:
+        yut("remote_quota", e)
+        return {"ok": False, "error": "cozumlenemedi"}
 
 AUTH_PORT = 53682
 
@@ -1433,7 +1516,7 @@ def port_dolu_mu(port):
         return True
     finally:
         try: sk.close()
-        except Exception: pass
+        except Exception as e: yut("port_dolu_mu", e)
 
 def artik_authorize_temizle():
     """Yarida kalmis rclone yetkilendirme sureclerini kapatir.
@@ -1445,8 +1528,8 @@ def artik_authorize_temizle():
             pid, _, cmd = satir.partition(" ")
             if ("authorize" in cmd or "config create" in cmd) and pid.isdigit():
                 try: os.kill(int(pid), 9); kapatilan += 1
-                except Exception: pass
-    except Exception: pass
+                except Exception as e: yut("artik_authorize_temizle", e)
+    except Exception as e: yut("artik_authorize_temizle", e)
     return kapatilan
 
 def auth_start():
@@ -1455,7 +1538,7 @@ def auth_start():
     bu yuzden SSH tuneli komutu da birlikte dondurulur."""
     auth_stop()
     try: os.remove(AUTH_OUT)
-    except Exception: pass
+    except Exception as e: yut("auth_start", e)
     tunel = f"ssh -N -L {AUTH_PORT}:127.0.0.1:{AUTH_PORT} root@{local_ip() or os.uname().nodename}"
     if port_dolu_mu(AUTH_PORT):
         n = artik_authorize_temizle()
@@ -1493,7 +1576,9 @@ def auth_status():
 
 def auth_token():
     try: txt = open(AUTH_OUT).read()
-    except Exception: return None
+    except Exception as e:
+        yut("auth_token", e)
+        return None
     m = re.search(r'(\{"access_token".*?\})\s*$', txt, re.M | re.S)
     return m.group(1) if m else None
 
@@ -1501,7 +1586,7 @@ def auth_stop():
     pr = _AUTH.get("proc")
     if pr and pr.poll() is None:
         try: pr.kill()
-        except Exception: pass
+        except Exception as e: yut("auth_stop", e)
     _AUTH["proc"] = None
     artik_authorize_temizle()
 
@@ -1510,7 +1595,9 @@ def local_ip():
         import socket
         sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sk.connect(("8.8.8.8", 53))
         ip = sk.getsockname()[0]; sk.close(); return ip
-    except Exception: return ""
+    except Exception as e:
+        yut("local_ip", e)
+        return ""
 
 def remote_create(name, token):
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(name or "")).strip()
@@ -1518,13 +1605,15 @@ def remote_create(name, token):
     if any(r["name"] == name for r in rclone_remotes()):
         return {"ok": False, "msg": f"'{name}' zaten var"}
     try: json.loads(token)
-    except Exception: return {"ok": False, "msg": "jeton gecerli JSON degil"}
+    except Exception as e:
+        yut("remote_create", e)
+        return {"ok": False, "msg": "jeton gecerli JSON degil"}
     # --non-interactive: rclone jetonu dogrulamak icin OAuth sunucusu acip asili kalmasin
     rc, out, err = rclone(["config", "create", name, "drive", "scope=drive.file",
                            f"token={token}", "--non-interactive"], timeout=60)
     if rc != 0: return {"ok": False, "msg": (err or out).strip()[:200]}
     try: os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
-    except Exception: pass
+    except Exception as e: yut("remote_create", e)
     q = remote_quota(name)
     log(f"rclone hesabi eklendi: {name}")
     return {"ok": True, "msg": f"'{name}' eklendi" + (
@@ -1567,7 +1656,9 @@ def pve_storages():
 
 def count_dumps(path):
     try: return len([x for x in os.listdir(path) if dump_re().match(x)])
-    except Exception: return 0
+    except Exception as e:
+        yut("count_dumps", e)
+        return 0
 
 def browse(path):
     """UI dizin gezgini. browse_roots disina cikilamaz."""
@@ -1596,11 +1687,13 @@ def konteyner_mi():
         with open("/proc/1/cgroup") as f:
             ic = f.read()
         if any(x in ic for x in ("docker", "containerd", "kubepods", "lxc")): return True
-    except Exception: pass
+    except Exception as e: yut("konteyner_mi", e)
     try:
         with open("/proc/1/comm") as f:
             return f.read().strip() != "systemd"
-    except Exception: return False
+    except Exception as e:
+        yut("konteyner_mi", e)
+        return False
 
 def ic_zamanlayici_acik():
     v = cfg().get("internal_scheduler")
@@ -1630,11 +1723,21 @@ def zamanlayici_dongusu(dur_bayragi):
 # Guncelleme YALNIZCA program dosyasini degistirir. /etc/pve-gdrive.conf'a ve
 # planlara dokunulmaz; yeni ayarlar norm_plan()/load_cfg() icindeki varsayilanlardan
 # gelir, eski config otomatik gocer. Yine de her guncellemede ikisinin de yedegi alinir.
-GUNCELLEME_DURUMU = {"son_kontrol": 0, "uzak_surum": None, "hata": "", "kuruluyor": False}
+class GuncellemeDurumu(dict):
+    """Guncelleme kontrolunun sureç genelindeki durumu. Sozluk gibi davranir
+    (mevcut cagri yerleri degismesin) ama sorumlulugu adlandirilmis olur."""
+    def __init__(self):
+        super().__init__(son_kontrol=0, uzak_surum=None, hata="", kuruluyor=False)
+    def sifirla(self):
+        self.update(son_kontrol=0, uzak_surum=None, hata="", kuruluyor=False)
+
+GUNCELLEME_DURUMU = GuncellemeDurumu()
 
 def surum_dizi(v):
     try: return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3])
-    except Exception: return (0,)
+    except Exception as e:
+        yut("surum_dizi", e)
+        return (0,)
 
 def surum_yeni_mi(uzak, yerel=None):
     return surum_dizi(uzak) > surum_dizi(yerel or SURUM)
@@ -1714,7 +1817,7 @@ def guncelleme_uygula(zorla=False):
         prog_yedek = os.path.join(yd, f"pve_gdrive-{SURUM}-{damga}.py")
         shutil.copy2(hedef, prog_yedek)
         try: shutil.copy2(CONFIG_PATH, os.path.join(yd, f"config-{damga}.json"))
-        except Exception: pass
+        except Exception as e: yut("guncelleme_uygula", e)
         # 3) Yerine koy (atomik) ve servisi yeniden baslat
         os.replace(gecici, hedef)
         log(f"guncelleme kuruldu: {SURUM} -> {uzak} (yedek: {prog_yedek})")
@@ -1735,8 +1838,8 @@ def yedek_temizle(yd):
             dosyalar = sorted((f for f in os.listdir(yd) if f.startswith(onek)), reverse=True)
             for f in dosyalar[tut:]:
                 try: os.remove(os.path.join(yd, f))
-                except Exception: pass
-    except Exception: pass
+                except Exception as e: yut("yedek_temizle", e)
+    except Exception as e: yut("yedek_temizle", e)
 
 def guncelleme_geri_al():
     """En son yedege doner."""
@@ -1789,10 +1892,30 @@ def cert_bilgisi():
         return {"konu": "-", "veren": "-", "bitis": "-"}
 
 # ---------- KIMLIK DOGRULAMA ----------
-SESSIONS = {}     # token -> {user, ip, created, last, csrf}
-CAPTCHAS = {}     # cid   -> {code, exp}
-FAILS = {}        # ip    -> {"n": int, "until": ts}
-_SEC_LOCK = threading.Lock()
+class GuvenlikDeposu:
+    """Oturumlar, captcha kodlari ve hatali giris sayaclari tek yerde, tek kilit altinda.
+
+    Onceden uc ayri modul duzeyi sozluk vardi; testte sifirlanmalari zordu ve
+    eszamanlilik varsayimlari ortuktu. Davranis ayni, sorumluluk tek noktada."""
+
+    def __init__(self):
+        self.kilit = threading.Lock()
+        self.oturumlar = {}    # token -> {user, ip, created, last, csrf, kalici, bitis}
+        self.captchalar = {}   # cid   -> {code, exp}
+        self.hatalar = {}      # ip    -> {"n": int, "until": ts, "last": ts}
+
+    def sifirla(self):
+        """Yalnizca testler icin: depoyu bosaltir."""
+        with self.kilit:
+            self.oturumlar.clear(); self.captchalar.clear(); self.hatalar.clear()
+
+DEPO = GuvenlikDeposu()
+
+# Geriye donuk isimler: cagri yerleri degismesin diye ayni sozluklere isaret ederler.
+SESSIONS = DEPO.oturumlar
+CAPTCHAS = DEPO.captchalar
+FAILS = DEPO.hatalar
+_SEC_LOCK = DEPO.kilit
 
 def hash_pw(pw, salt=None, iters=None):
     iters = int(iters or 200000)
@@ -1834,7 +1957,9 @@ def ip_izinli(ip):
     aglar = izinli_aglar()
     if not aglar: return True
     try: adres = ipaddress.ip_address(str(ip))
-    except Exception: return False
+    except Exception as e:
+        yut("ip_izinli", e)
+        return False
     return any(adres in a for a in aglar)
 
 def client_ip(h):
@@ -1842,7 +1967,9 @@ def client_ip(h):
         xf = h.headers.get("X-Forwarded-For", "")
         if xf: return xf.split(",")[0].strip()
     try: return h.client_address[0]
-    except Exception: return "?"
+    except Exception as e:
+        yut("client_ip", e)
+        return "?"
 
 def locked_out(ip):
     """Kalan kilit suresi (sn). DIKKAT: sure dolmus olsa bile hatali deneme sayaci
@@ -1879,7 +2006,10 @@ def gc_sessions():
     absmax = float(C.get("session_absolute_h") or 24) * 3600
     with _SEC_LOCK:
         for t in [t for t, v in SESSIONS.items()
-                  if now - v["last"] > idle or now - v["created"] > absmax]:
+                  # hatirlanan oturumda hareketsizlik siniri uygulanmaz, mutlak bitis gecerli
+                  if (now > v.get("bitis", now + absmax))
+                  or (not v.get("kalici") and (now - v["last"] > idle
+                                               or now - v["created"] > absmax))]:
             SESSIONS.pop(t, None)
         for c in [c for c, v in CAPTCHAS.items() if v["exp"] < now]:
             CAPTCHAS.pop(c, None)
@@ -1888,11 +2018,16 @@ def gc_sessions():
                   if v.get("until", 0) < now and now - v.get("last", 0) > 3600]:
             FAILS.pop(i, None)
 
-def new_session(user, ip):
+def new_session(user, ip, kalici=False):
+    """kalici=True ise oturum 'beni hatirla' omrunu alir ve cerez tarayici
+    kapaninca silinmez. Oturum yine de IP'ye baglidir."""
     tok = secrets.token_urlsafe(32); now = time.time()
+    omur = (float(cfg().get("remember_days") or 30) * 86400 if kalici
+            else float(cfg().get("session_absolute_h") or 24) * 3600)
     with _SEC_LOCK:
         SESSIONS[tok] = {"user": user, "ip": ip, "created": now, "last": now,
-                         "csrf": secrets.token_urlsafe(24)}
+                         "csrf": secrets.token_urlsafe(24),
+                         "kalici": bool(kalici), "bitis": now + omur}
     return tok
 
 def get_session(tok, ip):
@@ -1968,7 +2103,8 @@ def public_status():
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks",
-                          "update_check", "update_auto", "update_url", "update_backup_keep",
+                          "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
+                          "remember_enabled", "remember_days", "session_timeout_min",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
             "smtp_ready": bool(smtp_profiles(C)),
@@ -2008,10 +2144,11 @@ class H(BaseHTTPRequestHandler):
         try: self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError): pass
 
-    def _cookie(self, tok, sil=False):
+    def _cookie(self, tok, sil=False, omur_sn=None):
         C = cfg()
         parts = [f"pgs={'' if sil else tok}", "Path=/", "HttpOnly", "SameSite=Strict"]
         if sil: parts.append("Max-Age=0")
+        elif omur_sn: parts.append(f"Max-Age={int(omur_sn)}")   # tarayici kapaninca silinmesin
         if C.get("cookie_secure") or TLS_AKTIF: parts.append("Secure")
         return ("Set-Cookie", "; ".join(parts))
 
@@ -2046,11 +2183,14 @@ class H(BaseHTTPRequestHandler):
               fail_count(client_ip(self)) >= int(C.get("captcha_after_fails") or 0)
         cid = cid or (new_captcha() if cap else "")
         kilit = locked_out(client_ip(self))
+        hatirla_acik = bool(C.get("remember_enabled", True))
         self._send(200, "text/html; charset=utf-8",
                    LOGIN_HTML.replace("{{HATA}}", _html.escape(hata))
                              .replace("{{ERRD}}", "block" if hata else "none")
                              .replace("{{CAPD}}", "block" if cap else "none")
                              .replace("{{DISABLED}}", "disabled" if kilit else "")
+                             .replace("{{HATIRLA}}", "flex" if hatirla_acik else "none")
+                             .replace("{{HATIRLAGUN}}", str(int(C.get("remember_days") or 30)))
                              .replace("{{CID}}", cid or ""))
 
     def _json(self, obj, code=200):
@@ -2061,7 +2201,9 @@ class H(BaseHTTPRequestHandler):
         except Exception: n = 0
         if n <= 0: return {}
         try: return json.loads(self.rfile.read(n).decode() or "{}")
-        except Exception: return {}
+        except Exception as e:
+            yut("_body", e)
+            return {}
 
     def handle_one_request(self):
         try: BaseHTTPRequestHandler.handle_one_request(self)
@@ -2077,21 +2219,21 @@ class H(BaseHTTPRequestHandler):
             self._send(kod, "text/html; charset=utf-8", "")
         except Exception:
             try: self._send(500, "text/plain; charset=utf-8", "")
-            except Exception: pass
+            except Exception as e: yut("do_HEAD", e)
 
     def do_GET(self):
         try: self._get()
         except Exception as e:
             log(f"API hatasi GET {self.path}: {e}")
             try: self._json({"ok": False, "msg": f"sunucu hatasi: {e}"}, 500)
-            except Exception: pass
+            except Exception as e: yut("do_GET", e)
 
     def do_POST(self):
         try: self._post()
         except Exception as e:
             log(f"API hatasi POST {self.path}: {e}")
             try: self._json({"ok": False, "msg": f"sunucu hatasi: {e}"}, 500)
-            except Exception: pass
+            except Exception as e: yut("do_POST", e)
 
     def _ag_kontrol(self):
         ip = client_ip(self)
@@ -2167,12 +2309,12 @@ class H(BaseHTTPRequestHandler):
                 if r.get("ok"):
                     auth_stop()
                     try: os.remove(AUTH_OUT)
-                    except Exception: pass
+                    except Exception as e: yut("_post", e)
                 self._json(r)
         elif path == "/api/remote/auth/cancel":
             auth_stop()
             try: os.remove(AUTH_OUT)
-            except Exception: pass
+            except Exception as e: yut("_post", e)
             self._json({"ok": True, "msg": "iptal edildi"})
         elif path == "/api/remote/add":
             b = self._body(); self._json(remote_create(b.get("name", ""), b.get("token", "")))
@@ -2208,7 +2350,9 @@ def _login_body(handler):
     ctype = (handler.headers.get("Content-Type") or "").lower()
     if "json" in ctype:
         try: return json.loads(raw or "{}")
-        except Exception: return {}
+        except Exception as e:
+            yut("_login_body", e)
+            return {}
     return {k: v[0] for k, v in parse_qs(raw).items()}
 
 def save_plan(data):
@@ -2293,17 +2437,21 @@ def save_settings(data):
               "purge_batch"):
         if k in data:
             try: C[k] = int(data[k])
-            except Exception: pass
+            except Exception as e: yut("save_settings", e)
     for k in ("rclone_timeout_min", "log_max_mb"):
         if k in data:
             try: C[k] = float(data[k])
-            except Exception: pass
+            except Exception as e: yut("save_settings", e)
     if data.get("ui_pass"): C["ui_pass"] = str(data["ui_pass"])
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
-    for k in ("update_check", "update_auto"):
+    for k in ("update_check", "update_auto", "debug", "remember_enabled"):
         if k in data: C[k] = bool(data[k])
+    for k in ("remember_days", "session_timeout_min"):
+        if k in data:
+            try: C[k] = max(1, int(data[k]))
+            except Exception as e: yut("save_settings", e)
     if data.get("update_url"): C["update_url"] = str(data["update_url"])
     if isinstance(data.get("allow_networks"), list):
         temiz, hatali = [], []
@@ -2365,10 +2513,14 @@ def do_login(handler):
         log(f"GUVENLIK: hatali giris denemesi ({ip}, kullanici='{kullanici[:32]}')")
         return handler._login_page("Kullanıcı adı veya şifre hatalı.")
     note_ok(ip)
-    tok = new_session(C.get("ui_user", ""), ip)
-    log(f"giris basarili: {C.get('ui_user')} ({ip})")
+    hatirla = bool(C.get("remember_enabled", True)) and str(b.get("remember", "")).lower() in (
+        "1", "true", "on", "evet", "yes")
+    tok = new_session(C.get("ui_user", ""), ip, kalici=hatirla)
+    omur = float(C.get("remember_days") or 30) * 86400 if hatirla else None
+    log(f"giris basarili: {C.get('ui_user')} ({ip})"
+        + (f" [hatirlaniyor, {int(C.get('remember_days') or 30)} gun]" if hatirla else ""))
     handler._send(302, "text/html; charset=utf-8", "",
-                  [handler._cookie(tok), ("Location", "/")])
+                  [handler._cookie(tok, omur_sn=omur), ("Location", "/")])
 
 def serve():
     global TLS_AKTIF
@@ -2423,6 +2575,8 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
 .cap img{border-radius:8px;border:1px solid #30363d;background:#0d1117}
 .cap button{width:auto;margin:0;padding:8px 10px;background:#21262d;border-color:#30363d;font-size:12px}
 .foot{font-size:11px;color:#6e7c8c;margin-top:16px;text-align:center;line-height:1.6}
+.hatirla{align-items:center;gap:8px;margin-top:14px;font-size:13px;color:#9fb4c9;cursor:pointer}
+.hatirla input{width:auto;margin:0}
 </style></head><body>
 <form class="box" method="POST" action="/login" autocomplete="off">
   <h1>🗄️ Proxmox → Drive Yedek</h1>
@@ -2441,9 +2595,12 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
     <input id="c" name="captcha" style="margin-top:8px" maxlength="5"
            placeholder="resimdeki 5 karakter" autocomplete="off">
   </div>
+  <label class="hatirla" style="display:{{HATIRLA}}">
+    <input type="checkbox" name="remember" value="1"> Beni hatırla ({{HATIRLAGUN}} gün)
+  </label>
   <input type="hidden" name="cid" id="cid" value="{{CID}}">
   <button type="submit" {{DISABLED}}>Giriş yap</button>
-  <div class="foot">Oturum çerezle tutulur ve hareketsiz kalırsan sona erer.<br>
+  <div class="foot">İşaretlemezsen oturum hareketsiz kalınca sona erer.<br>
     Çok fazla hatalı denemede adresin geçici olarak kilitlenir.</div>
 </form>
 <script>
@@ -2952,6 +3109,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 
 <script>
 "use strict";
+/** Arka ucun /api/status ile dondurdugu veri yapilari. */
 /** pve-gdrive-backup web arayuzu. tsc ile derlenip pve_gdrive.py icine gomulur. */
 let S = null;
 let sel = null;
@@ -3500,9 +3658,6 @@ function preset(k) {
     setVal("e-kd", v.keep_days);
     setVal("e-kc", v.keep_count);
     setVal("e-td", v.drive_trash_days);
-    setVal("e-runat", v.run_at);
-    setVal("e-bw", v.bwlimit);
-    setVal("e-tr", v.transfers);
     setVal("e-ck", v.checkers);
     setVal("e-chunk", v.drive_chunk);
     setVal("e-mage", v.min_age_min);
@@ -3556,47 +3711,12 @@ function openEditor(pid) {
         report_quota_warn: 90, report_mail_to: "",
     };
     const v = (p || d);
-    setVal("e-name", v.name);
-    setChk("e-enabled", v.enabled);
-    setVal("e-src", v.src_dir);
+    // Ortak alanlar tablodan doldurulur (bkz. alanlar.ts); asagidakiler ozel durumlar.
+    alanlariDoldur(v);
     const rp = String(v.remote || "gdrive:proxmox-yedek").split(":");
     setVal("e-folder", rp.slice(1).join(":"));
-    setVal("e-kd", v.keep_days);
-    setVal("e-kc", v.keep_count);
-    setVal("e-td", v.drive_trash_days);
-    setVal("e-runat", v.run_at);
-    setVal("e-bw", v.bwlimit);
-    setVal("e-tr", v.transfers);
-    setVal("e-ck", v.checkers);
-    setVal("e-chunk", v.drive_chunk);
-    setVal("e-bwsch", v.bwlimit_schedule || "");
-    setChk("e-bwup", v.bwlimit_upload_only !== false);
-    setChk("e-bwauto", !!v.bwlimit_auto);
-    setVal("e-bwlink", v.bw_auto_link || "100M");
-    setVal("e-bwres", v.bw_auto_reserve_pct === undefined ? 30 : v.bw_auto_reserve_pct);
-    setVal("e-bwmin", v.bw_auto_min || "1M");
-    setVal("e-bwmax", v.bw_auto_max || "");
-    setVal("e-bwint", v.bw_auto_interval_sec || 10);
-    setVal("e-bwsm", v.bw_auto_smooth === undefined ? 0.4 : v.bw_auto_smooth);
-    setVal("e-bwstep", v.bw_auto_step_pct === undefined ? 25 : v.bw_auto_step_pct);
     void loadIfaces(v.bw_auto_iface || "");
     bwAutoToggle();
-    setVal("e-extra", (v.rclone_extra || []).join(" "));
-    setVal("e-mail", v.mail_to);
-    setChk("e-nsuc", v.notify_success !== false);
-    setChk("e-nerr", v.notify_failure !== false);
-    setChk("e-nskip", !!v.notify_skipped);
-    setChk("e-wv", v.wait_for_vzdump !== false);
-    setVal("e-wvm", v.vzdump_wait_min);
-    setVal("e-mage", v.min_age_min);
-    setVal("e-skip", (v.skip_patterns || []).join(" "));
-    setChk("e-pof", !!v.prune_on_failure);
-    setChk("e-wr", v.weekly_report !== false);
-    setVal("e-rat", v.report_at);
-    setVal("e-rdays", v.report_days);
-    setVal("e-rstale", v.report_stale_days);
-    setVal("e-rquota", v.report_quota_warn);
-    setVal("e-rmail", v.report_mail_to);
     setHtml("e-rday", WD.map((n, i) => '<option value="' + (i + 1) + '">' + n + "</option>").join(""));
     setVal("e-rday", v.report_day || 1);
     setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
@@ -3615,9 +3735,9 @@ function openEditor(pid) {
     openM("m-edit");
 }
 function validatePlan() {
-    let ok = true;
-    ok = vTxt("e-name", "plan adı gerekli") && ok;
-    ok = vTxt("e-src", "kaynak klasör gerekli") && ok;
+    // Alanlarin tamami tablodan dogrulanir (bkz. alanlar.ts).
+    // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
+    let ok = alanlariDogrula();
     if (!val("e-acct"))
         ok = bad("e-acct", "önce bir Google hesabı ekle") && ok;
     else
@@ -3625,37 +3745,10 @@ function validatePlan() {
     ok = vRx("e-folder", RX.folder, 'klasör adında : * ? " < > | olamaz') && ok;
     if (!val("e-folder").trim())
         ok = bad("e-folder", "hedef klasör gerekli") && ok;
-    ok = vNum("e-kd", 0, 3650, "0-3650 arası gün") && ok;
-    ok = vNum("e-kc", 0, 999, "0-999 arası adet") && ok;
-    ok = vNum("e-td", 0, 365, "0-365 arası gün") && ok;
-    ok = vRx("e-runat", RX.time, "SS:DD biçiminde saat (ör. 03:00)") && ok;
-    ok = vNum("e-wvm", 0, 1440, "0-1440 dakika") && ok;
-    ok = vNum("e-mage", 0, 1440, "0-1440 dakika") && ok;
-    ok = vRx("e-bw", RX.bw, "ör. 30M, 2M veya off", true) && ok;
-    ok = vBwSched("e-bwsch") && ok;
     if (chk("e-bwauto")) {
-        ok = vRx("e-bwlink", RX.bw, "ör. 12M, 100M") && ok;
-        ok = vNum("e-bwres", 0, 95, "0-95 arası yüzde") && ok;
-        ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
-        ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
-        ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
-        ok = vNum("e-bwsm", 0.05, 1, "0.05 - 1 arası") && ok;
-        ok = vNum("e-bwstep", 1, 90, "1-90 arası yüzde") && ok;
         const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
         if (ust && alt && alt > ust)
             ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
-    }
-    ok = vNum("e-tr", 1, 64, "1-64 arası") && ok;
-    ok = vNum("e-ck", 1, 64, "1-64 arası") && ok;
-    ok = vRx("e-chunk", RX.chunk, "ör. 64M, 128M, 8M") && ok;
-    const mailIster = chk("e-nsuc") || chk("e-nerr") || chk("e-nskip") || chk("e-wr");
-    ok = vMails("e-mail", !mailIster) && ok;
-    ok = vMails("e-rmail", true) && ok;
-    if (chk("e-wr")) {
-        ok = vRx("e-rat", RX.time, "SS:DD biçiminde saat") && ok;
-        ok = vNum("e-rdays", 1, 365, "1-365 gün") && ok;
-        ok = vNum("e-rstale", 0, 365, "0-365 gün") && ok;
-        ok = vNum("e-rquota", 0, 100, "0-100 arası yüzde") && ok;
     }
     if (Number(val("e-kc")) === 0 && Number(val("e-kd")) === 0) {
         ok = bad("e-kc", "ikisi birden 0 olamaz — hiç yedek kalmaz") && ok;
@@ -3670,26 +3763,10 @@ async function savePlan() {
     const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
         .map((c) => Number(c.value));
     const body = {
-        id: EDIT, name: val("e-name"), enabled: chk("e-enabled"), src_dir: val("e-src"),
+        ...alanlariTopla(), // tum ortak alanlar (bkz. alanlar.ts)
+        id: EDIT,
         remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
-        keep_days: Number(val("e-kd")), keep_count: Number(val("e-kc")),
-        drive_trash_days: Number(val("e-td")), run_at: val("e-runat"), weekdays: wd,
-        bwlimit: val("e-bw"), bwlimit_schedule: val("e-bwsch").trim(),
-        bwlimit_upload_only: chk("e-bwup"), bwlimit_auto: chk("e-bwauto"),
-        bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
-        bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
-        bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
-        bw_auto_smooth: Number(val("e-bwsm")), bw_auto_step_pct: Number(val("e-bwstep")),
-        transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
-        drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
-        smtp_profile: val("e-smtp"), mail_to: val("e-mail"),
-        notify_success: chk("e-nsuc"), notify_failure: chk("e-nerr"), notify_skipped: chk("e-nskip"),
-        wait_for_vzdump: chk("e-wv"), vzdump_wait_min: Number(val("e-wvm")),
-        min_age_min: Number(val("e-mage")), skip_patterns: val("e-skip").split(/\s+/).filter(Boolean),
-        prune_on_failure: chk("e-pof"), weekly_report: chk("e-wr"),
-        report_day: Number(val("e-rday")), report_at: val("e-rat"), report_days: Number(val("e-rdays")),
-        report_stale_days: Number(val("e-rstale")), report_quota_warn: Number(val("e-rquota")),
-        report_mail_to: val("e-rmail"),
+        weekdays: wd,
     };
     const j = await api("/api/plan/save", { method: "POST", body: JSON.stringify(body) });
     flash(j.msg || "", j.ok);
@@ -4141,7 +4218,141 @@ document.addEventListener("keydown", (e) => {
     });
 });
 void refresh();
-/** Arka ucun /api/status ile dondurdugu veri yapilari. */
+/**
+ * Plan formu alan tablosu.
+ *
+ * Onceden openEditor / savePlan / validatePlan ayni alan listesini uc kez, uc farkli
+ * bicimde tekrarliyordu; yeni bir alan eklerken uc yeri birden duzenlemek gerekiyordu.
+ * Artik tek kaynak burasi: doldur(), topla() ve dogrula() bu tablodan turer.
+ */
+const PLAN_ALANLARI = [
+    // 1. Plan
+    { id: "e-name", anahtar: "name", tip: "metin", adim: 1, mesaj: "plan adı gerekli" },
+    { id: "e-enabled", anahtar: "enabled", tip: "onay", adim: 0 },
+    // 2. Kaynak
+    { id: "e-src", anahtar: "src_dir", tip: "metin", adim: 2, mesaj: "kaynak klasör gerekli" },
+    // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
+    // 4. Saklama
+    { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: "0-3650 arası gün" },
+    { id: "e-kc", anahtar: "keep_count", tip: "sayi", adim: 4, min: 0, max: 999, mesaj: "0-999 arası adet" },
+    { id: "e-td", anahtar: "drive_trash_days", tip: "sayi", adim: 4, min: 0, max: 365, mesaj: "0-365 arası gün" },
+    // 5. Zamanlama ve cakisma
+    { id: "e-runat", anahtar: "run_at", tip: "saat", adim: 5, mesaj: "SS:DD biçiminde saat (ör. 03:00)" },
+    { id: "e-wv", anahtar: "wait_for_vzdump", tip: "onay", adim: 0 },
+    { id: "e-wvm", anahtar: "vzdump_wait_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: "0-1440 dakika" },
+    { id: "e-mage", anahtar: "min_age_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: "0-1440 dakika" },
+    { id: "e-skip", anahtar: "skip_patterns", tip: "liste", adim: 0 },
+    { id: "e-pof", anahtar: "prune_on_failure", tip: "onay", adim: 0 },
+    // 6. Aktarim
+    { id: "e-bw", anahtar: "bwlimit", tip: "metin", adim: 6, rx: RX.bw, ops: true, mesaj: "ör. 30M, 2M veya off" },
+    { id: "e-tr", anahtar: "transfers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: "1-64 arası" },
+    { id: "e-ck", anahtar: "checkers", tip: "sayi", adim: 6, min: 1, max: 64, mesaj: "1-64 arası" },
+    { id: "e-chunk", anahtar: "drive_chunk", tip: "metin", adim: 6, rx: RX.chunk, mesaj: "ör. 64M, 128M, 8M" },
+    { id: "e-extra", anahtar: "rclone_extra", tip: "liste", adim: 0 },
+    { id: "e-bwup", anahtar: "bwlimit_upload_only", tip: "onay", adim: 0 },
+    { id: "e-bwauto", anahtar: "bwlimit_auto", tip: "onay", adim: 0 },
+    { id: "e-bwif", anahtar: "bw_auto_iface", tip: "metin", adim: 0, ops: true },
+    // 7. Bildirim
+    { id: "e-smtp", anahtar: "smtp_profile", tip: "metin", adim: 0, ops: true },
+    { id: "e-nsuc", anahtar: "notify_success", tip: "onay", adim: 0 },
+    { id: "e-nerr", anahtar: "notify_failure", tip: "onay", adim: 0 },
+    { id: "e-nskip", anahtar: "notify_skipped", tip: "onay", adim: 0 },
+    { id: "e-wr", anahtar: "weekly_report", tip: "onay", adim: 0 },
+    { id: "e-rday", anahtar: "report_day", tip: "sayi", adim: 0, min: 1, max: 7 },
+    { id: "e-mail", anahtar: "mail_to", tip: "metin", adim: 7, ops: true,
+        ozelDogrula: (id) => vMails(id, !(chk("e-nsuc") || chk("e-nerr") || chk("e-nskip") || chk("e-wr"))) },
+    { id: "e-rmail", anahtar: "report_mail_to", tip: "metin", adim: 7, ops: true,
+        ozelDogrula: (id) => vMails(id, true) },
+    // Haftalik rapor alanlari: yalnizca rapor acikken dogrulanir
+    { id: "e-rat", anahtar: "report_at", tip: "saat", adim: 7, vars: "09:00",
+        kosul: () => chk("e-wr"), mesaj: "SS:DD biçiminde saat" },
+    { id: "e-rdays", anahtar: "report_days", tip: "sayi", adim: 7, min: 1, max: 365, vars: 7,
+        kosul: () => chk("e-wr"), mesaj: "1-365 gün" },
+    { id: "e-rstale", anahtar: "report_stale_days", tip: "sayi", adim: 7, min: 0, max: 365, vars: 2,
+        kosul: () => chk("e-wr"), mesaj: "0-365 gün" },
+    { id: "e-rquota", anahtar: "report_quota_warn", tip: "sayi", adim: 7, min: 0, max: 100, vars: 90,
+        kosul: () => chk("e-wr"), mesaj: "0-100 arası yüzde" },
+    // Bant genisligi cizelgesi ve otomatik mod: yalnizca ilgiliyken dogrulanir
+    { id: "e-bwsch", anahtar: "bwlimit_schedule", tip: "metin", adim: 6, ops: true, vars: "",
+        ozelDogrula: (id) => vBwSched(id) },
+    { id: "e-bwlink", anahtar: "bw_auto_link", tip: "metin", adim: 6, rx: RX.bw, vars: "100M",
+        kosul: () => chk("e-bwauto"), mesaj: "ör. 12M, 100M" },
+    { id: "e-bwres", anahtar: "bw_auto_reserve_pct", tip: "sayi", adim: 6, min: 0, max: 95, vars: 30,
+        kosul: () => chk("e-bwauto"), mesaj: "0-95 arası yüzde" },
+    { id: "e-bwmin", anahtar: "bw_auto_min", tip: "metin", adim: 6, rx: RX.bw, vars: "1M",
+        kosul: () => chk("e-bwauto"), mesaj: "ör. 512K, 1M" },
+    { id: "e-bwmax", anahtar: "bw_auto_max", tip: "metin", adim: 6, rx: RX.bw, ops: true, vars: "",
+        kosul: () => chk("e-bwauto"), mesaj: "ör. 30M veya boş" },
+    { id: "e-bwint", anahtar: "bw_auto_interval_sec", tip: "sayi", adim: 6, min: 2, max: 3600, vars: 10,
+        kosul: () => chk("e-bwauto"), mesaj: "2-3600 sn" },
+    { id: "e-bwsm", anahtar: "bw_auto_smooth", tip: "sayi", adim: 6, min: 0.05, max: 1, vars: 0.4,
+        kosul: () => chk("e-bwauto"), mesaj: "0.05 - 1 arası" },
+    { id: "e-bwstep", anahtar: "bw_auto_step_pct", tip: "sayi", adim: 6, min: 1, max: 90, vars: 25,
+        kosul: () => chk("e-bwauto"), mesaj: "1-90 arası yüzde" },
+];
+/** Formu bir plandan (veya varsayilanlardan) doldurur. */
+function alanlariDoldur(v) {
+    var _a;
+    for (const a of PLAN_ALANLARI) {
+        if (!document.getElementById(a.id))
+            continue;
+        const ham = v[a.anahtar];
+        const d = ham === undefined || ham === null || ham === "" ? ((_a = a.vars) !== null && _a !== void 0 ? _a : ham) : ham;
+        if (a.tip === "onay")
+            setChk(a.id, ham !== false && ham !== undefined ? Boolean(ham) : false);
+        else if (a.tip === "liste")
+            setVal(a.id, Array.isArray(d) ? d.join(" ") : "");
+        else
+            setVal(a.id, d === undefined || d === null ? "" : d);
+    }
+}
+/** Form degerlerini plan nesnesine toplar. */
+function alanlariTopla() {
+    const o = {};
+    for (const a of PLAN_ALANLARI) {
+        if (!document.getElementById(a.id))
+            continue;
+        if (a.tip === "onay")
+            o[a.anahtar] = chk(a.id);
+        else if (a.tip === "sayi")
+            o[a.anahtar] = Number(val(a.id));
+        else if (a.tip === "liste")
+            o[a.anahtar] = val(a.id).split(a.ayirac || /\s+/).filter(Boolean);
+        else
+            o[a.anahtar] = val(a.id);
+    }
+    return o;
+}
+/** Tabloya gore dogrular. adim verilirse yalnizca o adimin alanlari kontrol edilir. */
+function alanlariDogrula(adim) {
+    var _a, _b;
+    let ok = true;
+    for (const a of PLAN_ALANLARI) {
+        if (!document.getElementById(a.id))
+            continue;
+        if (adim !== undefined && a.adim !== adim)
+            continue;
+        if (a.adim === 0)
+            continue;
+        if (a.kosul && !a.kosul()) {
+            good(a.id);
+            continue;
+        }
+        if (a.ozelDogrula) {
+            ok = a.ozelDogrula(a.id) && ok;
+            continue;
+        }
+        if (a.tip === "sayi")
+            ok = vNum(a.id, (_a = a.min) !== null && _a !== void 0 ? _a : 0, (_b = a.max) !== null && _b !== void 0 ? _b : null, a.mesaj || "geçersiz sayı") && ok;
+        else if (a.tip === "saat")
+            ok = vRx(a.id, RX.time, a.mesaj || "SS:DD", a.ops) && ok;
+        else if (a.rx)
+            ok = vRx(a.id, a.rx, a.mesaj || "geçersiz değer", a.ops) && ok;
+        else if (!a.ops)
+            ok = vTxt(a.id, a.mesaj || "bu alan gerekli") && ok;
+    }
+    return ok;
+}
 
 </script></body></html>
 '''

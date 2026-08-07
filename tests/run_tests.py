@@ -127,6 +127,30 @@ def t_hatada_silme_yok():
         esit(o.drive(), once, "hatali kosuda Drive icerigi degismemeli")
     finally: o.temizle()
 
+@test("retention izin kurali tum kombinasyonlarda dogru", "guvenlik")
+def t_retention_kurali():
+    """Projenin en onemli guvenlik kurali dogrudan sinaniyor:
+    yukleme basarisiz VEYA Drive listelenemiyorsa hicbir sey silinmez."""
+    o = Ortam()
+    try:
+        o.plan(); G = o.modul(); p = G.get_plan("p1")
+        # (kopyalama_ok, listeleme_ok, prune_on_failure) -> retention calissin mi
+        beklenen = {
+            (True,  True,  False): True,    # normal durum
+            (True,  True,  True):  True,
+            (False, True,  False): False,   # yukleme hatasi -> ASLA silme
+            (False, True,  True):  True,    # kullanici bilerek acmis
+            (True,  False, False): False,   # Drive listelenemedi -> silme
+            (True,  False, True):  False,   # zorlansa bile liste yoksa silme
+            (False, False, False): False,
+            (False, False, True):  False,
+        }
+        for (ok, listed, zorla), bekle in beklenen.items():
+            p["prune_on_failure"] = zorla
+            sonuc, _ = G._retention_calissin_mi(p, ok, listed, "p1")
+            esit(sonuc, bekle, f"kopya={ok} liste={listed} zorla={zorla}")
+    finally: o.temizle()
+
 @test("cop listelenemezse takip kaydi dusurulmez", "guvenlik")
 def t_cop_listeleme_hatasi():
     o = Ortam()
@@ -389,6 +413,27 @@ def t_kilit():
         dogru(G.locked_out(ip) > 0, "3. denemeden sonra kilitlenmeli")
         time.sleep(1.5)
         esit(G.locked_out(ip), 0, "sure dolunca acilmali")
+    finally: o.temizle()
+
+@test("beni hatirla oturum omrunu uzatir", "erisim")
+def t_hatirla():
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["remember_enabled"] = True; c["remember_days"] = 30
+        c["session_absolute_h"] = 24; o.yaz_cfg(c)
+        G = o.modul()
+        t1 = G.new_session("admin", "1.2.3.4", kalici=False)
+        t2 = G.new_session("admin", "1.2.3.4", kalici=True)
+        kisa = G.SESSIONS[t1]["bitis"] - time.time()
+        uzun = G.SESSIONS[t2]["bitis"] - time.time()
+        dogru(23 * 3600 < kisa < 25 * 3600, f"normal oturum ~24 saat olmali, {kisa/3600:.1f}")
+        dogru(29 * 86400 < uzun < 31 * 86400, f"hatirlanan oturum ~30 gun olmali, {uzun/86400:.1f}")
+        # hatirlanan oturum hareketsizlik yuzunden dusmemeli
+        G.SESSIONS[t2]["last"] = time.time() - 10 * 86400
+        G.SESSIONS[t1]["last"] = time.time() - 10 * 86400
+        G.gc_sessions()
+        dogru(t2 in G.SESSIONS, "hatirlanan oturum hareketsizlikten dusmemeli")
+        dogru(t1 not in G.SESSIONS, "normal oturum hareketsizlikten dusmeli")
     finally: o.temizle()
 
 @test("captcha uretilir, tek kullanimliktir", "erisim")
