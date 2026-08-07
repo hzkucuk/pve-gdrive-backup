@@ -1487,6 +1487,16 @@ class H(BaseHTTPRequestHandler):
         try: BaseHTTPRequestHandler.handle_one_request(self)
         except (BrokenPipeError, ConnectionResetError): self.close_connection = True
 
+    def do_HEAD(self):
+        """Saglik kontrolu / ters vekil icin: govde yok, yalnizca basliklar."""
+        try:
+            u = urlparse(self.path)
+            kod = 200 if (u.path == "/" or self._session()) else 401
+            self._send(kod, "text/html; charset=utf-8", "")
+        except Exception:
+            try: self._send(500, "text/plain; charset=utf-8", "")
+            except Exception: pass
+
     def do_GET(self):
         try: self._get()
         except Exception as e:
