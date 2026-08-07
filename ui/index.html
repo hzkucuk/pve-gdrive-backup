@@ -144,6 +144,12 @@
           <div class="hint" id="e-bwifhint"></div></div></div>
       <div class="f"><label class="tip" title="Ölçüm ve ayar sıklığı.">Ölçüm aralığı (sn)</label>
         <div><input type="number" min="2" max="3600" id="e-bwint"><div class="errmsg" id="err-bwint"></div></div></div>
+      <div class="f"><label class="tip" title="Ölçümü yumuşatır. Düşük değer daha sakin, yüksek değer daha çevik ama salınıma yatkın.">Yumuşatma (0-1)</label>
+        <div><input type="number" min="0.05" max="1" step="0.05" id="e-bwsm"><div class="errmsg" id="err-bwsm"></div>
+          <div class="eg"><b>0.4</b> dengeli. Hızın sürekli inip çıkıyorsa düşür.</div></div></div>
+      <div class="f"><label class="tip" title="Hesaplanan yeni sınır mevcuttan bu yüzdeden az farklıysa uygulanmaz.">Değişim eşiği (%)</label>
+        <div><input type="number" min="1" max="90" id="e-bwstep"><div class="errmsg" id="err-bwstep"></div>
+          <div class="eg">Gereksiz ayar yapılmasını ve salınımı engeller. <b>25</b> iyi bir değer.</div></div></div>
     </div>
     <div class="f"><label class="tip" title="Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.">Eşzamanlı transfer</label>
       <div><input type="number" min="1" id="e-tr"><div class="errmsg" id="err-tr"></div></div></div>

@@ -57,6 +57,8 @@ interface Plan {
   bw_auto_max: string;
   bw_auto_iface: string;
   bw_auto_interval_sec: number;
+  bw_auto_smooth: number;
+  bw_auto_step_pct: number;
   transfers: number;
   checkers: number;
   drive_chunk: string;

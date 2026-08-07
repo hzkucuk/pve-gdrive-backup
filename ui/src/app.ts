@@ -433,6 +433,8 @@ function openEditor(pid: string | null): void {
   setVal("e-bwres", v.bw_auto_reserve_pct === undefined ? 30 : v.bw_auto_reserve_pct);
   setVal("e-bwmin", v.bw_auto_min || "1M"); setVal("e-bwmax", v.bw_auto_max || "");
   setVal("e-bwint", v.bw_auto_interval_sec || 10);
+  setVal("e-bwsm", v.bw_auto_smooth === undefined ? 0.4 : v.bw_auto_smooth);
+  setVal("e-bwstep", v.bw_auto_step_pct === undefined ? 25 : v.bw_auto_step_pct);
   void loadIfaces(v.bw_auto_iface || ""); bwAutoToggle();
   setVal("e-extra", (v.rclone_extra || []).join(" ")); setVal("e-mail", v.mail_to);
   setChk("e-nsuc", v.notify_success !== false); setChk("e-nerr", v.notify_failure !== false);
@@ -477,6 +479,8 @@ function validatePlan(): boolean {
     ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
     ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
     ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
+    ok = vNum("e-bwsm", 0.05, 1, "0.05 - 1 arası") && ok;
+    ok = vNum("e-bwstep", 1, 90, "1-90 arası yüzde") && ok;
     const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
     if (ust && alt && alt > ust) ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
   }
@@ -512,6 +516,7 @@ async function savePlan(): Promise<void> {
     bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
     bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
     bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
+    bw_auto_smooth: Number(val("e-bwsm")), bw_auto_step_pct: Number(val("e-bwstep")),
     transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
     drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
     smtp_profile: val("e-smtp"), mail_to: val("e-mail"),

@@ -91,6 +91,8 @@ PLAN_DEFAULTS = {
     "bw_auto_max": "",            # bos = bwlimit degeri tavan olarak kullanilir
     "bw_auto_iface": "",          # bos = varsayilan rota arayuzu
     "bw_auto_interval_sec": 10,   # olcum ve ayar sikligi
+    "bw_auto_smooth": 0.4,        # yumusatma katsayisi (0-1); dusuk = daha sakin
+    "bw_auto_step_pct": 25,       # bu yuzdeden kucuk degisiklikler uygulanmaz
     "transfers": 2,
     "checkers": 4,
     "drive_chunk": "64M",     # rclone RAM kullanimi ~ drive_chunk x transfers
@@ -193,9 +195,12 @@ def norm_plan(p):
     q["bwlimit_auto"] = bool(q.get("bwlimit_auto", False))
     for k in ("bw_auto_link", "bw_auto_min", "bw_auto_max", "bw_auto_iface"):
         q[k] = str(q.get(k) or "").strip()
-    for k, alt, ust in (("bw_auto_reserve_pct", 0, 95), ("bw_auto_interval_sec", 2, 3600)):
+    for k, alt, ust in (("bw_auto_reserve_pct", 0, 95), ("bw_auto_interval_sec", 2, 3600),
+                        ("bw_auto_step_pct", 1, 90)):
         try: q[k] = min(ust, max(alt, int(q[k])))
         except Exception: q[k] = PLAN_DEFAULTS[k]
+    try: q["bw_auto_smooth"] = min(1.0, max(0.05, float(q["bw_auto_smooth"])))
+    except Exception: q["bw_auto_smooth"] = PLAN_DEFAULTS["bw_auto_smooth"]
     if not isinstance(q.get("skip_patterns"), list):
         q["skip_patterns"] = list(PLAN_DEFAULTS["skip_patterns"])
     if not re.match(r"^\d{1,2}:\d{2}$", str(q.get("report_at", ""))): q["report_at"] = "09:00"
@@ -856,25 +861,39 @@ def bw_auto_izle(p, port, dur_bayragi):
     pay = max(0.0, 1.0 - float(p.get("bw_auto_reserve_pct") or 0) / 100.0)
     log(f"otomatik bant genisligi acik: arayuz={iface} link={bw_str(link)} "
         f"taban={bw_str(taban)} tavan={bw_str(tavan)} pay=%{int(pay*100)}", pid)
+    alfa = float(p.get("bw_auto_smooth") or 0.4)
+    adim = float(p.get("bw_auto_step_pct") or 25) / 100.0
     onceki = tx_bytes(iface); son_hedef = 0
+    onceki_done = float((get_progress(pid) or {}).get("done") or 0)
+    diger_ema = None
     while not dur_bayragi.is_set():
         dur_bayragi.wait(aralik)
         if dur_bayragi.is_set(): break
         simdi = tx_bytes(iface)
         toplam = max(0, (simdi - onceki)) / aralik
         onceki = simdi
+        # Kendi hizimizi rclone'un ORTALAMA hizindan degil, aktarilan bayt sayacinin
+        # farkindan hesapla. Ortalama geriden geldigi icin kendi trafigimizi
+        # "baskasinin" sanip salinim yapiyorduk.
         pr = get_progress(pid) or {}
-        bizim = float(pr.get("speed_bps") or 0)
-        diger = max(0.0, toplam - bizim)
+        done = float(pr.get("done") or 0)
+        bizim = max(0.0, (done - onceki_done) / aralik) if done >= onceki_done else 0.0
+        onceki_done = done
+        if bizim <= 0: bizim = float(pr.get("speed_bps") or 0)   # sayac yoksa ortalamaya dus
+        diger_ham = max(0.0, toplam - bizim)
+        diger_ema = diger_ham if diger_ema is None else (alfa * diger_ham + (1 - alfa) * diger_ema)
+        diger = diger_ema
         hedef = int(max(taban, min(tavan, link * pay - diger)))
-        # gereksiz API cagrisi yapma: %15'ten kucuk degisimi yok say
-        if son_hedef and abs(hedef - son_hedef) < son_hedef * 0.15: continue
+        # gereksiz API cagrisi ve salinim olmasin: kucuk degisimleri yok say
+        if son_hedef and abs(hedef - son_hedef) < son_hedef * adim: continue
         ok, cikti = rc_call(port, "core/bwlimit", f"rate={bw_str(hedef)}")
         if ok:
             son_hedef = hedef
             set_progress(pid, {"bw_auto": bw_str(hedef), "bw_other": int(diger),
-                               "bw_total": int(toplam), "bw_iface": iface})
-            log(f"bant genisligi -> {bw_str(hedef)} (hatta diger trafik: {bw_str(diger)}/sn)", pid)
+                               "bw_total": int(toplam), "bw_mine": int(bizim), "bw_iface": iface})
+            log(f"bant genisligi -> {bw_str(hedef)} "
+                f"(hat: {bw_str(toplam)}/sn, bizim: {bw_str(bizim)}/sn, "
+                f"diger: {bw_str(diger)}/sn)", pid)
         else:
             log(f"bant genisligi ayarlanamadi: {cikti[:120]}", pid)
 
@@ -2219,6 +2238,12 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
           <div class="hint" id="e-bwifhint"></div></div></div>
       <div class="f"><label class="tip" title="Ölçüm ve ayar sıklığı.">Ölçüm aralığı (sn)</label>
         <div><input type="number" min="2" max="3600" id="e-bwint"><div class="errmsg" id="err-bwint"></div></div></div>
+      <div class="f"><label class="tip" title="Ölçümü yumuşatır. Düşük değer daha sakin, yüksek değer daha çevik ama salınıma yatkın.">Yumuşatma (0-1)</label>
+        <div><input type="number" min="0.05" max="1" step="0.05" id="e-bwsm"><div class="errmsg" id="err-bwsm"></div>
+          <div class="eg"><b>0.4</b> dengeli. Hızın sürekli inip çıkıyorsa düşür.</div></div></div>
+      <div class="f"><label class="tip" title="Hesaplanan yeni sınır mevcuttan bu yüzdeden az farklıysa uygulanmaz.">Değişim eşiği (%)</label>
+        <div><input type="number" min="1" max="90" id="e-bwstep"><div class="errmsg" id="err-bwstep"></div>
+          <div class="eg">Gereksiz ayar yapılmasını ve salınımı engeller. <b>25</b> iyi bir değer.</div></div></div>
     </div>
     <div class="f"><label class="tip" title="Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.">Eşzamanlı transfer</label>
       <div><input type="number" min="1" id="e-tr"><div class="errmsg" id="err-tr"></div></div></div>
@@ -2896,6 +2921,8 @@ function openEditor(pid) {
     setVal("e-bwmin", v.bw_auto_min || "1M");
     setVal("e-bwmax", v.bw_auto_max || "");
     setVal("e-bwint", v.bw_auto_interval_sec || 10);
+    setVal("e-bwsm", v.bw_auto_smooth === undefined ? 0.4 : v.bw_auto_smooth);
+    setVal("e-bwstep", v.bw_auto_step_pct === undefined ? 25 : v.bw_auto_step_pct);
     void loadIfaces(v.bw_auto_iface || "");
     bwAutoToggle();
     setVal("e-extra", (v.rclone_extra || []).join(" "));
@@ -2954,6 +2981,8 @@ function validatePlan() {
         ok = vRx("e-bwmin", RX.bw, "ör. 512K, 1M") && ok;
         ok = vRx("e-bwmax", RX.bw, "ör. 30M veya boş", true) && ok;
         ok = vNum("e-bwint", 2, 3600, "2-3600 sn") && ok;
+        ok = vNum("e-bwsm", 0.05, 1, "0.05 - 1 arası") && ok;
+        ok = vNum("e-bwstep", 1, 90, "1-90 arası yüzde") && ok;
         const alt = bwBytes(val("e-bwmin")), ust = bwBytes(val("e-bwmax"));
         if (ust && alt && alt > ust)
             ok = bad("e-bwmin", "alt sınır üst sınırdan büyük olamaz") && ok;
@@ -2992,6 +3021,7 @@ async function savePlan() {
         bw_auto_link: val("e-bwlink"), bw_auto_reserve_pct: Number(val("e-bwres")),
         bw_auto_min: val("e-bwmin"), bw_auto_max: val("e-bwmax"),
         bw_auto_iface: val("e-bwif"), bw_auto_interval_sec: Number(val("e-bwint")),
+        bw_auto_smooth: Number(val("e-bwsm")), bw_auto_step_pct: Number(val("e-bwstep")),
         transfers: Number(val("e-tr")), checkers: Number(val("e-ck")),
         drive_chunk: val("e-chunk"), rclone_extra: val("e-extra").split(/\s+/).filter(Boolean),
         smtp_profile: val("e-smtp"), mail_to: val("e-mail"),
