@@ -34,6 +34,7 @@ LOCK_DIR    = "/tmp"
 GLOBAL_DEFAULTS = {
     "log_file": "/var/log/pve-gdrive.log",
     "state_file": "/var/lib/pve-gdrive/state.json",
+    "dil": "tr",                  # arayuz ve mail dili: tr | en
     "ui_bind": "0.0.0.0",
     "ui_port": 8787,
     "ui_user": "admin",
@@ -106,7 +107,7 @@ PLAN_DEFAULTS = {
     "src_dir": "/var/lib/vz/dump",
     "remote": "gdrive:proxmox-yedek",
     "keep_days": 14,          # Drive'da normal duracagi gun sayisi
-    "keep_count": 3,          # misafir basina her kosulda korunacak en yeni set (gun sinirindan bagimsiz)
+    "keep_count": 3,          # VM/CT basina her kosulda korunacak en yeni set (gun sinirindan bagimsiz)
     "drive_trash_days": 1,    # Google cop kutusunda bekleyecegi gun sayisi
     "run_at": "03:00",        # gunun saati
     "weekdays": [],           # bos = her gun, yoksa 1=Pzt .. 7=Paz
@@ -306,6 +307,98 @@ def yut(nerede, e):
     if not _HATA_AYIKLA["acik"]: return
     try: log(f"DEBUG [{nerede}]: {type(e).__name__}: {e}")
     except Exception: pass
+
+# --- dil: sunucu tarafi metinler (login sayfasi ve mailler) ---
+EN_METIN = {
+    "Giriş yap": "Sign in", "Kullanıcı": "Username", "Şifre": "Password",
+    "Doğrulama kodu": "Verification code", "resimdeki 5 karakter": "the 5 characters shown",
+    "Beni hatırla": "Remember me", "Yeni kod": "New code",
+    "Devam etmek için giriş yap": "Sign in to continue",
+    "Kullanıcı adı veya şifre hatalı.": "Incorrect username or password.",
+    "Doğrulama kodu hatalı.": "Verification code is incorrect.",
+    "İşaretlemezsen oturum hareketsiz kalınca sona erer.":
+        "If unchecked, the session ends after a period of inactivity.",
+    "Çok fazla hatalı denemede adresin geçici olarak kilitlenir.":
+        "Too many failed attempts temporarily locks your address.",
+    "OZET": "SUMMARY", "YAPILANDIRMA": "CONFIGURATION", "DRIVE DURUMU": "DRIVE STATUS",
+    "EN YENI YEDEKLER": "NEWEST BACKUPS", "COP KUTUSUNDA BEKLEYEN": "WAITING IN TRASH",
+    "VM/CT BAZINDA SON YEDEK": "LAST BACKUP PER VM/CT", "UYARILAR": "WARNINGS",
+    "HAFTALIK YEDEK RAPORU": "WEEKLY BACKUP REPORT", "CALISMA": "RUNS", "DRIVE": "DRIVE",
+    "Zaman": "Time", "Tetikleyen": "Triggered by", "Sure": "Duration",
+    "Yuklenen": "Uploaded", "Cope tasinan": "Moved to trash",
+    "Kalici silinen": "Permanently deleted", "Cope giden": "Moved to trash",
+    "Toplam": "Total", "Son calisma": "Last run", "Son ozet": "Last summary",
+    "Program": "Schedule", "Sonraki": "Next", "Saklama": "Retention",
+    "Cop suresi": "Trash period", "Hiz siniri": "Speed limit", "Yedek": "Backups",
+    "Copte bekleyen": "Waiting in trash", "Kota": "Quota", "Kaynak": "Source",
+    "Hedef": "Target", "Plan": "Plan", "Donem": "Period", "Log": "Log",
+    "Sonraki rapor": "Next report", "Uretim zamani": "Generated at",
+    "Yok.": "None.", "basarili": "successful", "hata": "failed", "atlandi": "skipped",
+    "her gun": "every day", "gun": "days", "dosya": "files", "set": "sets",
+    "es zamanli": "concurrent", "gun once": "days ago", "kaldi": "left",
+    "izlenmiyor": "not tracked", "kapali": "disabled",
+    "VM/CT basina en az": "at least", "gunden eski setler": "sets older than",
+    "copte": "in trash", "bekleyenler": "waiting",
+    "Haftalik rapor": "Weekly report", "SAKLAMA SURESINDEN ESKI": "OLDER THAN RETENTION",
+    "(Drive listelenemedi)": "(could not list Drive)",
+    "Kaynakta olup Drive'da olmayan": "In source but not on Drive",
+    "Su VM/CT'ler henuz Drive'a cikmadi": "These VM/CTs have not reached Drive yet",
+    "Yukleme basarisiz oldugu icin RETENTION CALISTIRILMADI.":
+        "RETENTION WAS NOT RUN because the upload failed.",
+    "Hicbir yedek silinmedi; sorun giderilince kendiliginden devam eder.":
+        "No backups were deleted; it resumes automatically once fixed.",
+    "Calisma HATA ile bitti - log dosyasina bak.": "The run FAILED - check the log file.",
+    "Retention atlandi, eski yedekler birikmeye devam ediyor.":
+        "Retention was skipped; old backups keep accumulating.",
+    "Son calisma HATA ile bitti.": "The last run FAILED.",
+    "Saklama suresinden eski yedegi olanlar":
+        "VM/CTs whose newest backup is older than the retention period",
+    "zamanlanmis": "scheduled", "manuel": "manual", "sn": "s", "saat": "at",
+    "bos": "free", "dk": "min", "hazir": "ready", "yok": "none",
+    "gunden eski setler": "days old or older", "copte": "in trash",
+    "bekleyenler": "waiting", "uyari": "warning",
+    "TEST": "TEST", "Bu bir test mailidir.": "This is a test mail.",
+    "Profil": "Profile", "Sunucu": "Server", "Gonderen": "Sender",
+}
+
+def dil_tr(): return str(cfg().get("dil") or "tr").lower() != "en"
+
+_EN_SIRALI = None
+
+def metni_cevir(metin):
+    """Uretilmis bir metin blogunu (mail govdesi, login sayfasi) Ingilizceye cevirir.
+
+    50 cagri noktasini tek tek sarmak yerine tek gecis yapilir: anahtarlar uzundan
+    kisaya uygulanir, tek sozcukluk anahtarlar sozcuk siniriyla eslesir ki
+    'gun' -> 'days' donusumu 'gunluk' icinde patlamasin."""
+    global _EN_SIRALI
+    if dil_tr() or not metin: return metin
+    if _EN_SIRALI is None:
+        _EN_SIRALI = sorted(EN_METIN.items(), key=lambda kv: -len(kv[0]))
+    for tr, en in _EN_SIRALI:
+        if " " in tr or not tr.isalpha():
+            metin = metin.replace(tr, en)
+        else:
+            metin = re.sub(r"(?<![0-9A-Za-zğüşıöçĞÜŞİÖÇ])" + re.escape(tr)
+                           + r"(?![0-9A-Za-zğüşıöçĞÜŞİÖÇ])", en, metin)
+    # Turkce "%12.3" -> Ingilizce "12.3%"
+    metin = re.sub(r"%(\d+(?:\.\d+)?)", r"\1%", metin)
+    return hizala(metin)
+
+RE_ETIKET = re.compile(r"^(  )([A-Za-z][A-Za-z /]{0,24}?)\s*: (.*)$")
+
+def hizala(metin, genislik=19):
+    """Ceviri sonrasi 'Etiket : deger' satirlarinin iki noktasini hizalar.
+    Ingilizce etiketler farkli uzunlukta oldugu icin hizalama kayiyordu."""
+    cikti = []
+    for satir in metin.split("\n"):
+        m = RE_ETIKET.match(satir)
+        cikti.append(f"  {m.group(2).strip():<{genislik}}: {m.group(3)}" if m else satir)
+    return "\n".join(cikti)
+
+def M(s):
+    """Sunucu tarafi metni gecerli dile cevirir; karsiligi yoksa Turkce kalir."""
+    return s if dil_tr() else EN_METIN.get(s, s)
 
 def now_str(): return datetime.now().strftime(TS_FMT)
 
@@ -703,7 +796,7 @@ def _bolum_kota(snap):
             pct)
 
 def _bolum_saklama(p):
-    return [f"  Saklama      : {p['keep_days']} gun, misafir basina en az {p['keep_count']} set",
+    return [f"  Saklama      : {p['keep_days']} gun, VM/CT basina en az {p['keep_count']} set",
             f"  Cop suresi   : {p['drive_trash_days']} gun"]
 
 def _bolum_misafirler(p, gs, esik_gun=None):
@@ -712,7 +805,9 @@ def _bolum_misafirler(p, gs, esik_gun=None):
     esik = int(esik_gun if esik_gun is not None else p["keep_days"])
     simdi = time.time(); satirlar = []; eski = []
     for g in gs:
-        yas = (simdi - g["last"]) / 86400 if g["last"] else None
+        # Negatif yas olmasin: dosya adindaki tarih ileri olabilir (saat farki,
+        # elle kopyalanmis dosya). "-0.8 gun once" anlamsiz bir cikti olurdu.
+        yas = max(0.0, (simdi - g["last"]) / 86400) if g["last"] else None
         iso = datetime.fromtimestamp(g["last"]).strftime("%Y-%m-%d %H:%M") if g["last"] else "-"
         isaret = ""
         if yas is not None and yas > esik:
@@ -735,7 +830,7 @@ def _bolum_uyarilar(uyarilar):
     return ["UYARILAR"] + ([f"  ! {u}" for u in uyarilar] if uyarilar else ["  Yok."])
 
 def guest_summary(p):
-    """Misafir basina son yedek zamani ve set sayisi. Raporun en degerli kismi:
+    """VM/CT basina son yedek zamani ve set sayisi. Raporun en degerli kismi:
     aylardir yedeklenmeyen bir VM'i burada gorursun."""
     ok, files = lsjson_ok(p["remote"])
     if not ok: return None
@@ -815,7 +910,7 @@ def saklama_oneri(analiz, kota, drive_trash_days=1, pay_pct=None):
     return max(1, min(365, gun))
 
 def local_guests(p):
-    """Kaynak klasordeki misafirler - Drive'a hic cikmamis olan var mi diye."""
+    """Kaynak klasordeki VM/CT'ler - Drive'a hic cikmamis olan var mi diye."""
     try: names = os.listdir(p["src_dir"])
     except Exception as e:
         yut("local_guests", e)
@@ -878,7 +973,7 @@ def build_report(p):
         eksik = sorted(local_guests(p) - {g["guest"] for g in gs})
         if eksik:
             L.append(f"  Kaynakta olup Drive'da olmayan: {', '.join(eksik)}")
-            uyari.append("Su misafirler henuz Drive'a cikmadi: " + ", ".join(eksik))
+            uyari.append("Su VM/CT'ler henuz Drive'a cikmadi: " + ", ".join(eksik))
     L.append("")
 
     if s.get("status") == "HATA": uyari.append("Son calisma HATA ile bitti.")
@@ -913,8 +1008,10 @@ def send_report(p, trigger="zamanlanmis"):
                 f"Durum: {s.get('status')}\nOzet: {s.get('summary')}\n"
                 f"Loga bak: {cfg().get('log_file')}")
         n = 1
-    konu = f"[Proxmox Yedek] Haftalik rapor - {p['name']}" + (f" ({n} uyari)" if n else "")
-    ok = send_mail(to, konu, body, p.get("smtp_profile"))
+    konu = (f"[Proxmox Backup] Weekly report - {p['name']}" if not dil_tr()
+            else f"[Proxmox Yedek] Haftalik rapor - {p['name']}")
+    konu += (f" ({n} " + ("warning" if not dil_tr() else "uyari") + ")") if n else ""
+    ok = send_mail(to, konu, metni_cevir(body), p.get("smtp_profile"))
     if ok:
         put_pstate(p["id"], {"last_report": now_str(), "last_report_warn": n})
         log(f"haftalik rapor gonderildi ({n} uyari) -> {to}", p["id"])
@@ -1342,8 +1439,10 @@ def maybe_report(p, status, summary, snap, detay=None):
     except Exception as e:
         log(f"mail govdesi uretilemedi: {e}", p["id"])
         body = f"Durum: {status}\nOzet: {summary}\nZaman: {now_str()}"; uyari = 0
-    konu = f"[Proxmox Yedek] {p['name']} - {status}" + (f" ({uyari} uyari)" if uyari else "")
-    send_mail(p.get("mail_to", ""), konu, body, p.get("smtp_profile"))
+    konu = f"[Proxmox Backup] {p['name']} - {M(status)}" if not dil_tr() else \
+           f"[Proxmox Yedek] {p['name']} - {status}"
+    konu += (f" ({uyari} " + ("warning" if not dil_tr() else "uyari") + ")") if uyari else ""
+    send_mail(p.get("mail_to", ""), konu, metni_cevir(body), p.get("smtp_profile"))
 
 def build_run_mail(p, status, summary, snap, detay):
     """Tek bir calismanin detayli raporu: ne yapildi, ne silindi, ne durumda."""
@@ -2223,7 +2322,7 @@ def public_status():
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
-                          "quota_cache_min",
+                          "quota_cache_min", "dil",
                           "remember_enabled", "remember_days", "session_timeout_min",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
@@ -2306,7 +2405,7 @@ class H(BaseHTTPRequestHandler):
         kilit = locked_out(client_ip(self))
         hatirla_acik = bool(C.get("remember_enabled", True))
         self._send(200, "text/html; charset=utf-8",
-                   LOGIN_HTML.replace("{{HATA}}", _html.escape(hata))
+                   metni_cevir(LOGIN_HTML).replace("{{HATA}}", _html.escape(M(hata)))
                              .replace("{{ERRD}}", "block" if hata else "none")
                              .replace("{{CAPD}}", "block" if cap else "none")
                              .replace("{{DISABLED}}", "disabled" if kilit else "")
@@ -2574,6 +2673,7 @@ def save_settings(data):
         if k in data:
             try: C[k] = float(data[k])
             except Exception as e: yut("save_settings", e)
+    if data.get("dil") in ("tr", "en"): C["dil"] = data["dil"]
     if data.get("ui_pass"): C["ui_pass"] = str(data["ui_pass"])
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
@@ -2986,7 +3086,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="btns">
       <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
       <button class="sm" onclick="preset('haftalik')" title="Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.">🗄️ Haftalık arşiv — 6 ay</button>
-      <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, misafir başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
+      <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, VM/CT başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
       <button class="sm" onclick="preset('test')" title="Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.">🧪 Test</button>
     </div>
     <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
@@ -3046,7 +3146,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
         <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
-    <div class="f"><label class="tip" title="Güvenlik tabanı: misafir başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
+    <div class="f"><label class="tip" title="Güvenlik tabanı: VM/CT başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
       <div><input type="number" min="0" id="e-kc"><div class="errmsg" id="err-kc"></div>
         <div class="eg">Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son <b>N</b> seti korur. <b>0 yazma.</b></div></div></div>
     <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
@@ -3164,7 +3264,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <fieldset><legend>Haftalık rapor</legend>
     <div class="f"><label class="tip" title="Haftada bir, son dönemin özetini ve uyarıları mail atar.">Rapor gönder</label>
       <div><label class="cb"><input type="checkbox" id="e-wr"> haftalık özet raporu gönder</label>
-        <div class="hint">Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota, <b>misafir bazında son yedek tarihi</b> ve uyarılar.</div></div></div>
+        <div class="hint">Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota, <b>VM/CT bazında son yedek tarihi</b> ve uyarılar.</div></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği gün.">Gün</label>
       <div><select id="e-rday"></select></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği saat.">Saat</label>
@@ -3418,7 +3518,7 @@ const EN = {
     "Yedek dosyası": "Backup files", "Toplam boyut": "Total size",
     "Son yedek yaşı": "Newest backup age", "Çöpte bekleyen": "Waiting in trash",
     "Çöp süresi": "Trash period", "Google Drive kullanımı": "Google Drive usage",
-    "Yedekler (Drive)": "Backups (Drive)", "Tarih": "Date", "Misafir": "Guest",
+    "Yedekler (Drive)": "Backups (Drive)", "Tarih": "Date", "VM/CT": "VM/CT",
     "Boyut": "Size", "Dosya": "File", "Kalan": "Left", "yedek yok": "no backups",
     "Çalışma geçmişi": "Run history", "Zaman": "Time", "Durum": "Status", "Tetik": "Trigger",
     "kayıt yok": "no records", "süre dolunca kalıcı silinir": "permanently deleted when time is up",
@@ -3608,7 +3708,7 @@ const EN = {
     "Bu adresi tarayıcında aç ve": "Open this address in your browser and",
     "Raporun gönderileceği saat.": "Time the report is sent.",
     "Sertifikanın özel anahtarı.": "The certificate's private key.",
-    " gün · misafir başına en az ": " days · at least ",
+    " gün · VM/CT başına en az ": " days · at least ",
     "Proxmox'un kendi sertifikası:": "Proxmox's own certificate:",
     "Sertifika yüklenemezse servis": "If the certificate cannot be loaded the service",
     "(düzenlemede boş = değişmesin)": "(empty when editing = unchanged)",
@@ -3621,7 +3721,7 @@ const EN = {
     "Proxmox işin 21:00'de başlıyorsa": "If your Proxmox job starts at 21:00 then",
     "SS:DD biçiminde saat (ör. 03:00)": "time as HH:MM (e.g. 03:00)",
     "Yeni sürümün indirileceği adres.": "Where the new version is downloaded from.",
-    "misafir bazında son yedek tarihi": "last backup date per guest",
+    "VM/CT bazında son yedek tarihi": "last backup date per guest",
     "⚠ Bu süre hesaba <b>sığmaz</b>: ": "⚠ This period does <b>not fit</b>: ",
     "Mesaide hattı boğma, gece hızlan:": "Go easy during work hours, fast at night:",
     "Plan hedefinde görünecek kısa ad.": "Short name shown in the plan target.",
@@ -3634,7 +3734,7 @@ const EN = {
     "Saklanacak eski log dosyası sayısı.": "How many rotated log files to keep.",
     "sadece yerel (nginx/SSH tüneli ile)": "local only (via nginx/SSH tunnel)",
     "Yedeğin hiç ilerlememesini engeller.": "Keeps the backup from stalling completely.",
-    " dolar. Misafirler büyürse yer biter.": " full. If guests grow you will run out.",
+    " dolar. VM/CT'ler büyürse yer biter.": " full. If guests grow you will run out.",
     "'ini kullanır, büyümeye pay bırakır).": "of free space, leaving room to grow).",
     "Bildirim seçili ama alıcı adresi boş.": "Notifications are on but no recipient is set.",
     "Boş bırakırsan mevcut şifre değişmez.": "Leave empty to keep the current password.",
@@ -3695,7 +3795,7 @@ const EN = {
     "Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son": "If a VM has not been backed up for 3 months the day rule would delete everything; this keeps the last",
     "Bu araç zaten yükleme yapar; kapatırsan listeleme/indirme de yavaşlar.": "This tool only uploads; turning it off also slows listing and downloads.",
     "Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.": "How many files upload at once. Memory use: chunk size × this number.",
-    "Her gün 02:00, Drive'da 30 gün, misafir başına en az 7 set, çöpte 3 gün.": "Every day at 02:00, 30 days on Drive, at least 7 sets per guest, 3 days in trash.",
+    "Her gün 02:00, Drive'da 30 gün, VM/CT başına en az 7 set, çöpte 3 gün.": "Every day at 02:00, 30 days on Drive, at least 7 sets per guest, 3 days in trash.",
     "Kapalıyken yükleme başarısızsa hiçbir yedek silinmez. Açmanız önerilmez.": "When off, nothing is deleted if the upload fails. Turning it on is not recommended.",
     "Regex. Varsayılan vzdump adlarını tanır — değiştirmen normalde gerekmez.": "Regex. Recognises default vzdump names — you normally do not need to change it.",
     "Bu desenlere uyan dosyalar hiç yüklenmez. vzdump geçici dosyaları burada.": "Files matching these patterns are never uploaded. vzdump temporary files go here.",
@@ -3708,7 +3808,7 @@ const EN = {
     "Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.": "Every Sunday at 05:00, 180 days on Drive, 7 days in trash, low speed. Long-term archive.",
     "Saate göre değişen hız sınırı. Doluysa yukarıdaki sabit sınırın yerine geçer.": "Speed limit that varies by hour. Overrides the fixed limit above when set.",
     "%30 iyi bir başlangıç. Yükseltirsen daha nazik, düşürürsen daha hızlı olursun.": "30% is a good start. Raise it to be gentler, lower it to go faster.",
-    "Güvenlik tabanı: misafir başına bu kadar set, gün sınırına bakılmadan korunur.": "Safety floor: this many sets per guest are kept regardless of the day limit.",
+    "Güvenlik tabanı: VM/CT başına bu kadar set, gün sınırına bakılmadan korunur.": "Safety floor: this many sets per guest are kept regardless of the day limit.",
     "Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.": "Every day at 03:00, 14 days on Drive, 1 day in trash. The right start for most setups.",
     "Proxmox host üzerindeki klasörler. Parantez içi: tanınan vzdump dosyası sayısı.": "Folders on the Proxmox host. In brackets: number of recognised vzdump files.",
     "Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.": "All day-based values are here. Hover a field label for an explanation.",
@@ -3717,7 +3817,7 @@ const EN = {
     "Çerezin yalnızca HTTPS üzerinden gönderilmesi. TLS açıkken zaten zorunlu tutulur.": "Send the cookie over HTTPS only. Already enforced when TLS is on.",
     "Hat boşken bile bu hızın üstüne çıkılmaz. Boşsa yukarıdaki sabit sınır tavan olur.": "Never exceeds this even when the link is idle. Empty means the fixed limit is the ceiling.",
     "Her plan istediği profilden mail atar. Farklı hesaplar, farklı sunucular olabilir.": "Each plan sends mail from the profile it chooses. Different accounts and servers are fine.",
-    "Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir.": "Safety floor is 0: all backups of a guest not backed up for a long time may be deleted.",
+    "Güvenlik tabanı 0: uzun süre yedeklenmeyen bir VM/CT'nin tüm yedekleri silinebilir.": "Safety floor is 0: all backups of a guest not backed up for a long time may be deleted.",
     "Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.": "How long it waits in Google trash. After that it is permanently deleted and quota is freed.",
     "Proxmox'un vzdump çıktılarını yazdığı klasör. Depo başına ayrı bir dump klasörü olur.": "The folder where Proxmox writes vzdump output. Each storage has its own dump folder.",
     "Bu süre dolarsa tur atlanır ve sonraki kontrolde yeniden denenir. Hiçbir şey silinmez.": "If this expires the round is skipped and retried at the next check. Nothing is deleted.",
@@ -3802,7 +3902,12 @@ function sayfayiCevir(kok) {
 /** Dil secicisi degisince: kaydet, sayfayi cevir, arayuzu yeniden ciz. */
 function dilDegistir(d) {
     dilKur(d);
-    location.reload(); // en temizi: tum duragan metinler bastan cevrilir
+    // Sunucuya da bildir: mailler ve login sayfasi ayni dilde olsun.
+    void fetch("/api/settings/save", {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrf(), "Content-Type": "application/json" },
+        body: JSON.stringify({ dil: d }),
+    }).finally(() => location.reload());
 }
 /** Acilista kayitli dili uygula. */
 function dilBaslat() {
@@ -4129,7 +4234,7 @@ function detail(p) {
         + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
         + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
         + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
-        + '<th>Misafir</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
+        + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
         + (b.slice(0, 40).map((x) => {
             const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
             return "<tr><td>" + esc((x.mod || "").slice(0, 19).replace("T", " ")) + '</td><td><span class="'
@@ -4156,6 +4261,10 @@ function render() {
     if (!sel || !ps.some((p) => p.id === sel))
         sel = ps.length ? ps[0].id : null;
     running = ps.filter((p) => p.running).length;
+    const sunucuDil = (S.settings && S.settings.dil);
+    const sec = document.getElementById("dilsec");
+    if (sec && sunucuDil && sec.value !== dilAl())
+        sec.value = dilAl();
     const tls = S.tls;
     setHtml("tlsrozet", tls && tls.aktif
         ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
@@ -4330,7 +4439,7 @@ function wOzet() {
     h += wSatir("Durum", chk("e-enabled") ? "etkin" : C("kapalı (zamanlayıcı atlar)"), !chk("e-enabled"));
     h += wSatir("Kaynak", val("e-src"));
     h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
-    h += wSatir("Saklama", val("e-kd") + C(" gün · misafir başına en az ") + val("e-kc") + C(" set"));
+    h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
     h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
     h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
     h += wSatir(C("vzdump koruması"), chk("e-wv")
@@ -4347,7 +4456,7 @@ function wOzet() {
     if (!val("e-acct"))
         uyarilar.push(C("Google hesabı seçilmedi — 3. adıma dön."));
     if (Number(val("e-kc")) === 0)
-        uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir."));
+        uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir VM/CT'nin tüm yedekleri silinebilir."));
     if (chk("e-pof"))
         uyarilar.push(C("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir."));
     if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
@@ -4587,7 +4696,7 @@ function kapasiteCiz() {
         uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
     }
     else if (sonraPct >= 85) {
-        uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. Misafirler büyürse yer biter.");
+        uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. VM/CT'ler büyürse yer biter.");
     }
     if (KAP.oneri) {
         uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")

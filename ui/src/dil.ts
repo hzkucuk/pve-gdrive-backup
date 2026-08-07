@@ -57,7 +57,12 @@ function sayfayiCevir(kok?: HTMLElement): void {
 /** Dil secicisi degisince: kaydet, sayfayi cevir, arayuzu yeniden ciz. */
 function dilDegistir(d: string): void {
   dilKur(d);
-  location.reload();     // en temizi: tum duragan metinler bastan cevrilir
+  // Sunucuya da bildir: mailler ve login sayfasi ayni dilde olsun.
+  void fetch("/api/settings/save", {
+    method: "POST",
+    headers: { "X-CSRF-Token": csrf(), "Content-Type": "application/json" },
+    body: JSON.stringify({ dil: d }),
+  }).finally(() => location.reload());
 }
 
 /** Acilista kayitli dili uygula. */

@@ -556,6 +556,20 @@ def t_rapor():
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
     finally: o.temizle()
 
+@test("ileri tarihli yedek negatif yas gostermez", "rapor")
+def t_negatif_yas():
+    o = Ortam()
+    try:
+        o.plan(keep_days=99, keep_count=9)
+        G = o.modul()
+        ileri = time.time() + 3600            # bir saat sonrasi
+        gs = [{"guest": "qemu-100", "last": int(ileri), "sets": 1, "size": 100}]
+        satirlar, eski = G._bolum_misafirler(G.get_plan("p1"), gs)
+        dogru(not any(re.search(r"-[\d.]+ gun once", l) for l in satirlar),
+              "negatif yas basilmamali: " + str(satirlar))
+        dogru("0.0 gun once" in satirlar[0], "sifira kirpilmali: " + satirlar[0])
+    finally: o.temizle()
+
 @test("calisma maili detaylari icerir", "rapor")
 def t_calisma_maili():
     o = Ortam()
@@ -584,6 +598,48 @@ def t_bildirim():
         dogru(G.notify_wanted(p, "basarili"), "basarili acik")
         dogru(not G.notify_wanted(p, "HATA"), "hata kapali")
         dogru(G.notify_wanted(p, "atlandi"), "atlandi acik")
+    finally: o.temizle()
+
+# ============================ DIL ============================
+@test("mail ve login Ingilizceye cevrilir", "dil")
+def t_mail_ceviri():
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["dil"] = "en"; o.yaz_cfg(c)
+        o.vzdump_seti("qemu-100", 1)
+        o.plan(); G = o.modul()
+        G.do_copy(G.get_plan("p1"))
+        snap = G.update_snapshot(G.get_plan("p1"))
+        govde, _ = G.build_run_mail(G.get_plan("p1"), "basarili", "x", snap,
+                                    {"trigger": "zamanlanmis", "dur": 5, "uploaded": 1})
+        cev = G.metni_cevir(govde)
+        for beklenen in ("SUMMARY", "CONFIGURATION", "DRIVE STATUS", "WARNINGS",
+                         "scheduled", "days", "files"):
+            dogru(beklenen in cev, f"'{beklenen}' cevrilmis metinde olmali")
+        dogru("OZET" not in cev and "zamanlanmis" not in cev, "Turkce kalinti olmamali")
+        for x in ("Sign in", "Username", "Password", "Remember me"):
+            dogru(x in G.metni_cevir(G.LOGIN_HTML), f"login: {x}")
+    finally: o.temizle()
+
+@test("Turkce kipte metin degismeden kalir", "dil")
+def t_turkce_kalir():
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["dil"] = "tr"; o.yaz_cfg(c)
+        o.plan(); G = o.modul()
+        metin = "OZET\n  Zaman : 1\n  Yuklenen : 2 dosya"
+        esit(G.metni_cevir(metin), metin, "Turkce kipte hicbir sey degismemeli")
+    finally: o.temizle()
+
+@test("hizalama ceviri sonrasi bozulmaz", "dil")
+def t_hizalama():
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["dil"] = "en"; o.yaz_cfg(c)
+        o.plan(); G = o.modul()
+        cikti = G.metni_cevir("  Zaman        : a\n  Kalici silinen: b")
+        iki_nokta = [l.index(":") for l in cikti.split("\n") if ":" in l]
+        esit(len(set(iki_nokta)), 1, f"iki noktalar ayni sutunda olmali: {cikti!r}")
     finally: o.temizle()
 
 # ============================ LOG AYRIMI ============================

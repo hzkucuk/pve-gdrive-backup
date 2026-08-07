@@ -27,7 +27,7 @@ Her plan bağımsızdır: kendi kaynağı, hedef Google hesabı, süreleri, saat
 | Anahtar | Varsayılan | Açıklama |
 |---|---|---|
 | `keep_days` | `14` | Drive'da normal duracağı gün. Eskiler çöpe gider |
-| `keep_count` | `3` | Misafir başına gün sınırından muaf en yeni set sayısı |
+| `keep_count` | `3` | VM/CT başına gün sınırından muaf en yeni set sayısı |
 | `drive_trash_days` | `1` | Google çöp kutusunda bekleme. `0` = hemen kalıcı sil |
 
 `keep_days` ve `keep_count` birlikte çalışır: bir set **ya** gün sınırı içindeyse **ya da**
@@ -111,7 +111,7 @@ saymak için fiziksel veya bond arayüzünü seç.
 | `notify_skipped` | `false` | vzdump çakışması yüzünden atlanınca mail |
 
 Çalışma maili şunları içerir: özet sayıları, yapılandırma, Drive durumu ve kota,
-misafir bazında son yedek tarihi, en yeni yedekler, çöpte bekleyenler ve uyarılar.
+VM/CT bazında son yedek tarihi, en yeni yedekler, çöpte bekleyenler ve uyarılar.
 
 ### Haftalık rapor
 
@@ -126,8 +126,8 @@ misafir bazında son yedek tarihi, en yeni yedekler, çöpte bekleyenler ve uyar
 | `report_mail_to` | `""` | Boş = `mail_to` |
 
 Rapor içeriği: dönem içi çalışma sayıları (başarılı/hata/atlandı), yüklenen ve silinen dosya
-toplamları, Drive kotası, **misafir bazında son yedek tarihi ve yaşı**, kaynakta olup Drive'a
-çıkmamış misafirler, ve uyarı listesi. Rapor planlar kapalıyken de gider — "hiç çalışmıyor"
+toplamları, Drive kotası, **VM/CT bazında son yedek tarihi ve yaşı**, kaynakta olup Drive'a
+çıkmamış VM/CT'ler, ve uyarı listesi. Rapor planlar kapalıyken de gider — "hiç çalışmıyor"
 uyarısının ulaşması için.
 
 ## Ortak ayarlar

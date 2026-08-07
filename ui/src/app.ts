@@ -282,7 +282,7 @@ function detail(p: Plan | undefined): string {
     + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
     + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
     + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
-    + '<th>Misafir</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
+    + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
     + (b.slice(0, 40).map((x) => {
         const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
         return "<tr><td>" + esc((x.mod || "").slice(0, 19).replace("T", " ")) + '</td><td><span class="'
@@ -308,6 +308,9 @@ function render(): void {
   const ps = S.plans || [];
   if (!sel || !ps.some((p) => p.id === sel)) sel = ps.length ? ps[0].id : null;
   running = ps.filter((p) => p.running).length;
+  const sunucuDil = (S.settings && (S.settings as unknown as Record<string, unknown>).dil) as string | undefined;
+  const sec = document.getElementById("dilsec") as HTMLSelectElement | null;
+  if (sec && sunucuDil && sec.value !== dilAl()) sec.value = dilAl();
   const tls = S.tls;
   setHtml("tlsrozet", tls && tls.aktif
     ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
@@ -470,7 +473,7 @@ function wOzet(): void {
   h += wSatir("Durum", chk("e-enabled") ? "etkin" : C("kapalı (zamanlayıcı atlar)"), !chk("e-enabled"));
   h += wSatir("Kaynak", val("e-src"));
   h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
-  h += wSatir("Saklama", val("e-kd") + C(" gün · misafir başına en az ") + val("e-kc") + C(" set"));
+  h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
   h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
   h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
   h += wSatir(C("vzdump koruması"), chk("e-wv")
@@ -485,7 +488,7 @@ function wOzet(): void {
   h += "</tbody></table>";
   const uyarilar: string[] = [];
   if (!val("e-acct")) uyarilar.push(C("Google hesabı seçilmedi — 3. adıma dön."));
-  if (Number(val("e-kc")) === 0) uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir misafirin tüm yedekleri silinebilir."));
+  if (Number(val("e-kc")) === 0) uyarilar.push(C("Güvenlik tabanı 0: uzun süre yedeklenmeyen bir VM/CT'nin tüm yedekleri silinebilir."));
   if (chk("e-pof")) uyarilar.push(C("Hatada retention açık: yeni yedek çıkmadan eskiler silinebilir."));
   if (!val("e-mail") && (chk("e-nsuc") || chk("e-nerr") || chk("e-wr")))
     uyarilar.push(C("Bildirim seçili ama alıcı adresi boş."));
@@ -704,7 +707,7 @@ function kapasiteCiz(): void {
   if (!sigar) {
     uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
   } else if (sonraPct >= 85) {
-    uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. Misafirler büyürse yer biter.");
+    uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. VM/CT'ler büyürse yer biter.");
   }
   if (KAP.oneri) {
     uyari += (uyari ? "<br>" : "") + C("Önerilen: <b>") + KAP.oneri + C(" gün</b> (boş alanın %")

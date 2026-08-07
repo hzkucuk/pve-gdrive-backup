@@ -45,7 +45,7 @@ Ayrıntı için [kurulum kılavuzuna](docs/KURULUM.md) bak.
 Proxmox'un kendi zamanlayıcısı üretir, bu araç yaşam döngüsünü yönetir.
 
 **Saklama.** `keep_days` günden eski setler Google çöp kutusuna gönderilir, `drive_trash_days`
-sonra kalıcı silinir. `keep_count` bir güvenlik tabanıdır: misafir başına en yeni N set,
+sonra kalıcı silinir. `keep_count` bir güvenlik tabanıdır: VM/CT başına en yeni N set,
 gün sınırına bakılmadan korunur — uzun süre yedeklenmeyen bir VM'in tüm yedekleri kaybolmaz.
 
 **Çakışmama.** `vzdump` çalışırken yükleme başlamaz; yazılmakta olan dosyalar `--min-age` ve
@@ -56,7 +56,7 @@ desen dışlamalarıyla atlanır; yükleme başarısızsa retention hiç çalı�
 o yüklerken geri çekilir, hat boşalınca hızlanır.
 
 **Bildirim.** Çok profilli SMTP, plan başına gönderici seçimi, başarılı/hata/atlandı için ayrı
-tercihler ve haftalık özet raporu (misafir bazında son yedek tarihi + uyarılar).
+tercihler ve haftalık özet raporu (VM/CT bazında son yedek tarihi + uyarılar).
 
 **Arayüz.** Canlı ilerleme (yüzde, hız, başlangıç, tahmini bitiş), klasör gezgini,
 form doğrulama, ipuçları, hazır senaryolar, sistem/plan ayrı logları, F5 koruması.

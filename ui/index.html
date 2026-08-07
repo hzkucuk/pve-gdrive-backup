@@ -34,7 +34,7 @@
     <div class="btns">
       <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
       <button class="sm" onclick="preset('haftalik')" title="Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.">🗄️ Haftalık arşiv — 6 ay</button>
-      <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, misafir başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
+      <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, VM/CT başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
       <button class="sm" onclick="preset('test')" title="Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.">🧪 Test</button>
     </div>
     <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
@@ -94,7 +94,7 @@
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
         <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
-    <div class="f"><label class="tip" title="Güvenlik tabanı: misafir başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
+    <div class="f"><label class="tip" title="Güvenlik tabanı: VM/CT başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
       <div><input type="number" min="0" id="e-kc"><div class="errmsg" id="err-kc"></div>
         <div class="eg">Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son <b>N</b> seti korur. <b>0 yazma.</b></div></div></div>
     <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
@@ -212,7 +212,7 @@
   <fieldset><legend>Haftalık rapor</legend>
     <div class="f"><label class="tip" title="Haftada bir, son dönemin özetini ve uyarıları mail atar.">Rapor gönder</label>
       <div><label class="cb"><input type="checkbox" id="e-wr"> haftalık özet raporu gönder</label>
-        <div class="hint">Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota, <b>misafir bazında son yedek tarihi</b> ve uyarılar.</div></div></div>
+        <div class="hint">Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota, <b>VM/CT bazında son yedek tarihi</b> ve uyarılar.</div></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği gün.">Gün</label>
       <div><select id="e-rday"></select></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği saat.">Saat</label>

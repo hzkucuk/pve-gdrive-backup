@@ -53,7 +53,7 @@ M = {
   "olcum_sonuc": "Ölçüm: günde {0} üretiliyor ({1} günlük set, toplam {2})",
   "s_gun": "Drive'da kaç gün saklansın?",
   "s_cop": "Google çöp kutusunda kaç gün beklesin?",
-  "s_taban": "Misafir başına en az kaç set korunsun? (gün sınırından muaf)",
+  "s_taban": "VM/CT başına en az kaç set korunsun? (gün sınırından muaf)",
   "yer": "{0} gün + {1} gün çöp → yaklaşık {2} yer gerekir",
   "yer_bilinmez": "Kota bilinmediği için doluluk hesaplanamadı (hesabı sonra ekleyeceksin).",
   "b_zaman": "Zamanlama",
