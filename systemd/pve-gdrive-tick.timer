@@ -1,0 +1,11 @@
+[Unit]
+Description=Yedek planlarini 5 dakikada bir kontrol et
+
+[Timer]
+# Saat/gun ayari planin kendisinde (UI'dan). Bu timer sadece "vakti geldi mi" diye bakar.
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

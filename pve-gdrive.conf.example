@@ -1,0 +1,89 @@
+{
+  "log_file": "/var/log/pve-gdrive.log",
+  "state_file": "/var/lib/pve-gdrive/state.json",
+  "ui_bind": "0.0.0.0",
+  "ui_port": 8787,
+  "ui_user": "admin",
+  "ui_pass": "degistir-beni",
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "smtp_user": "adresin@gmail.com",
+  "smtp_pass": "gmail-uygulama-sifresi",
+  "mail_from": "adresin@gmail.com",
+  "browse_roots": [
+    "/var/lib/vz",
+    "/mnt/pve",
+    "/mnt",
+    "/srv"
+  ],
+  "allow_account_cleanup": false,
+  "history_max": 50,
+  "log_tail_lines": 250,
+  "ui_refresh_sec": 5,
+  "rclone_timeout_min": 0,
+  "rclone_tail_lines": 40,
+  "snapshot_max_rows": 200,
+  "log_max_mb": 5,
+  "log_keep": 2,
+  "dump_regex": "^(vzdump-(qemu|lxc)-(\\d+)-(\\d{4}_\\d{2}_\\d{2}-\\d{2}_\\d{2}_\\d{2}))",
+  "plans": [
+    {
+      "id": "gunluk",
+      "name": "Gunluk yedek",
+      "enabled": true,
+      "src_dir": "/var/lib/vz/dump",
+      "remote": "gdrive:proxmox-yedek",
+      "keep_days": 14,
+      "keep_count": 3,
+      "drive_trash_days": 1.0,
+      "run_at": "03:00",
+      "weekdays": [],
+      "bwlimit": "30M",
+      "transfers": 2,
+      "checkers": 4,
+      "drive_chunk": "64M",
+      "rclone_extra": [],
+      "wait_for_vzdump": true,
+      "vzdump_wait_min": 60.0,
+      "min_age_min": 10.0,
+      "skip_patterns": [
+        "*.dat",
+        "*.tmp",
+        "*.part"
+      ],
+      "prune_on_failure": false,
+      "mail_to": "hedef@gmail.com",
+      "notify_on": "always"
+    },
+    {
+      "id": "haftalik-arsiv",
+      "name": "Haftalik arsiv",
+      "enabled": true,
+      "src_dir": "/mnt/pve/yedek/dump",
+      "remote": "gdrive:proxmox-arsiv",
+      "keep_days": 180,
+      "keep_count": 4,
+      "drive_trash_days": 7.0,
+      "run_at": "05:00",
+      "weekdays": [
+        7
+      ],
+      "bwlimit": "10M",
+      "transfers": 2,
+      "checkers": 4,
+      "drive_chunk": "64M",
+      "rclone_extra": [],
+      "wait_for_vzdump": true,
+      "vzdump_wait_min": 60.0,
+      "min_age_min": 10.0,
+      "skip_patterns": [
+        "*.dat",
+        "*.tmp",
+        "*.part"
+      ],
+      "prune_on_failure": false,
+      "mail_to": "hedef@gmail.com",
+      "notify_on": "failure"
+    }
+  ]
+}

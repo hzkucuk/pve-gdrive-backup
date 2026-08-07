@@ -1,0 +1,289 @@
+<div class="wrap">
+<header>
+  <h1>🗄️ Proxmox → Google Drive Yedek</h1>
+  <span class="muted" id="hinfo"></span>
+  <span style="flex:1"></span>
+  <button onclick="openAccounts()" title="Google hesaplarını yönet. Her plan farklı hesaba yedekleyebilir.">👤 Hesaplar</button>
+  <button onclick="openSmtp()" title="Mail gönderici profilleri. Farklı planlar farklı adreslerden mail atabilir.">✉ Mail</button>
+  <button onclick="openSettings()" title="Arayüz, bellek ve gelişmiş ayarlar">⚙ Ayarlar</button>
+  <button class="primary" onclick="openEditor(null)">+ Yeni Plan</button>
+</header>
+
+<div class="plans" id="plans"></div>
+<div id="detail"></div>
+
+<div class="panel"><h2>Log
+  <span class="tabs" id="logtabs"></span></h2>
+  <pre id="log">yükleniyor…</pre>
+</div>
+</div>
+
+<div class="mask" id="m-edit"><div class="modal">
+  <h2 id="ed-title">Plan</h2>
+  <div class="small">Gün cinsinden tüm değerler burada. Alan adlarının üstüne gelince açıklama çıkar.</div>
+
+  <fieldset><legend>Hazır senaryolar</legend>
+    <div class="btns">
+      <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
+      <button class="sm" onclick="preset('haftalik')" title="Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.">🗄️ Haftalık arşiv — 6 ay</button>
+      <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, misafir başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
+      <button class="sm" onclick="preset('test')" title="Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.">🧪 Test</button>
+    </div>
+    <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
+  </fieldset>
+
+  <fieldset><legend>Genel</legend>
+    <div class="f"><label class="tip" title="Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.">Plan adı</label>
+      <div><input id="e-name" placeholder="Günlük VM yedeği">
+        <div class="errmsg" id="err-name"></div>
+        <div class="eg">Örnek: <b>Günlük VM + CT</b>, <b>Haftalık arşiv</b>, <b>Sadece veritabanı sunucusu</b></div></div></div>
+    <div class="f"><label class="tip" title="Kapalıysa zamanlayıcı bu planı atlar. Elle 'Yedekle' ile yine çalıştırabilirsin.">Etkin</label>
+      <div><label class="cb"><input type="checkbox" id="e-enabled"> zamanlayıcı bu planı çalıştırsın</label></div></div>
+  </fieldset>
+
+  <fieldset><legend>Kaynak (Proxmox)</legend>
+    <div class="f"><label class="tip" title="Proxmox'un vzdump çıktılarını yazdığı klasör. Depo başına ayrı bir dump klasörü olur.">Yedek klasörü</label>
+      <div><div class="inline"><input id="e-src" placeholder="/var/lib/vz/dump">
+        <button class="sm" onclick="openBrowser()">📁 Gözat</button></div>
+        <div class="errmsg" id="err-src"></div>
+        <div class="hint" id="e-srchint"></div><div id="e-stor" class="hint"></div>
+        <div class="eg">Depo <code>local</code> → <code>/var/lib/vz/dump</code> · Depo <code>Usb1Tb</code> → <code>/mnt/pve/Usb1Tb/dump</code></div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Hedef (Google hesabı)</legend>
+    <div class="f"><label class="tip" title="Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.">Hesap</label>
+      <div><div class="inline"><select id="e-acct" style="flex:1"></select>
+        <button class="sm" onclick="openAccounts()">👤 Yönet</button></div>
+        <div class="errmsg" id="err-acct"></div>
+        <div class="hint" id="e-accthint"></div></div></div>
+    <div class="f"><label class="tip" title="Hesabın içindeki hedef klasör. Yoksa ilk çalışmada oluşturulur.">Klasör</label>
+      <div><input id="e-folder" placeholder="proxmox-yedek">
+        <div class="errmsg" id="err-folder"></div>
+        <div class="hint"><b>Her plan farklı klasöre yazmalı.</b> Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.</div>
+        <div class="eg">Örnek: <code>proxmox-yedek</code> · <code>arsiv/2026</code> · <code>pve/usb1tb</code></div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Saklama süreleri</legend>
+    <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
+      <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
+        <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
+    <div class="f"><label class="tip" title="Güvenlik tabanı: misafir başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
+      <div><input type="number" min="0" id="e-kc"><div class="errmsg" id="err-kc"></div>
+        <div class="eg">Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son <b>N</b> seti korur. <b>0 yazma.</b></div></div></div>
+    <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
+      <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
+        <div class="eg">Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin. <b>0</b> = çöpe uğramadan hemen kalıcı sil.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Zamanlama</legend>
+    <div class="f"><label class="tip" title="Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.">Saat</label>
+      <div><input id="e-runat" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
+        <div class="eg">Proxmox işin 21:00'de başlıyorsa <b>03:00</b> güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.</div></div></div>
+    <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
+      <div><div class="wd" id="e-wd"></div>
+        <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Proxmox ile çakışma koruması</legend>
+    <div class="f"><label class="tip" title="Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.">vzdump'ı bekle</label>
+      <div><label class="cb"><input type="checkbox" id="e-wv"> Proxmox yedeği biterken bekle</label></div></div>
+    <div class="f"><label class="tip" title="Bu süre dolarsa tur atlanır ve sonraki kontrolde yeniden denenir. Hiçbir şey silinmez.">En fazla bekleme (dk)</label>
+      <div><input type="number" min="0" id="e-wvm"><div class="errmsg" id="err-wvm"></div>
+        <div class="eg">Proxmox yedeğin ~1.5 saat sürüyorsa <b>120</b> uygun. <b>0</b> = hiç bekleme, hemen atla.</div></div></div>
+    <div class="f"><label class="tip" title="Sadece bu kadar dakikadır değişmemiş dosyalar yüklenir. Yazılmakta olan yedek yarım gitmez.">Dosya yaşı (dk)</label>
+      <div><input type="number" min="0" id="e-mage"><div class="errmsg" id="err-mage"></div>
+        <div class="eg"><b>10</b> iyi bir değer. Çok düşürürsen yazılmakta olan dosyayı yakalama riski artar.</div></div></div>
+    <div class="f"><label class="tip" title="Bu desenlere uyan dosyalar hiç yüklenmez. vzdump geçici dosyaları burada.">Atlanacak desenler</label>
+      <div><input id="e-skip" placeholder="*.dat *.tmp *.part"><div class="errmsg" id="err-skip"></div>
+        <div class="eg">Boşlukla ayır. vzdump yazarken <code>.dat</code> uzantısı kullanır.</div></div></div>
+    <div class="f"><label class="tip" title="Kapalıyken yükleme başarısızsa hiçbir yedek silinmez. Açmanız önerilmez.">Hatada retention</label>
+      <div><label class="cb"><input type="checkbox" id="e-pof"> yükleme başarısız olsa da eskileri sil</label>
+        <div class="hint">⚠ <b>Kapalı bırak.</b> Açarsan yeni yedek Drive'a çıkmadan eskiler silinebilir — hem yerelde hem Drive'da yedeksiz kalma riski.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Aktarım</legend>
+    <div class="f"><label class="tip" title="Yükleme hız sınırı. Boş bırakırsan sınırsız (hattı doldurabilir).">Hız sınırı</label>
+      <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
+        <div class="eg"><code>30M</code> = 30 MB/sn · <code>2M</code> yavaş hat için · <code>off</code> = sınırsız</div></div></div>
+    <div class="f"><label class="tip" title="Aynı anda kaç dosya yüklensin. Bellek kullanımı: parça boyutu × bu sayı.">Eşzamanlı transfer</label>
+      <div><input type="number" min="1" id="e-tr"><div class="errmsg" id="err-tr"></div></div></div>
+    <div class="f"><label class="tip" title="Karşılaştırma işçisi sayısı. Yüklemeyi değil, 'bu dosya zaten var mı' kontrolünü hızlandırır.">Checkers</label>
+      <div><input type="number" min="1" id="e-ck"><div class="errmsg" id="err-ck"></div></div></div>
+    <div class="f"><label class="tip" title="rclone'un Drive'a yüklerken kullandığı parça boyutu. Doğrudan RAM kullanır.">Drive parça boyutu</label>
+      <div><input id="e-chunk" placeholder="64M"><div class="errmsg" id="err-chunk"></div>
+        <div class="eg" id="e-ram">RAM ≈ parça × transfer</div></div></div>
+    <div class="f"><label class="tip" title="Ham rclone argümanları. Buradaki her şey komut satırına eklenir.">Ek rclone argümanı</label>
+      <div><input id="e-extra" placeholder="--tpslimit 5">
+        <div class="eg">Örnek: <code>--exclude *.log</code> log dosyalarını yükleme · <code>--tpslimit 5</code> API hızını kıs</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Bildirim</legend>
+    <div class="f"><label class="tip" title="Mailin hangi hesaptan gönderileceği. Mail düğmesinden yeni profil ekleyebilirsin.">Gönderen profili</label>
+      <div><div class="inline"><select id="e-smtp" style="flex:1"></select>
+        <button class="sm" onclick="openSmtp()">✉ Yönet</button></div>
+        <div class="hint" id="e-smtphint"></div></div></div>
+    <div class="f"><label class="tip" title="Bildirimlerin gideceği adres. Virgülle birden fazla yazabilirsin.">Alıcı</label>
+      <div><input id="e-mail" placeholder="sen@gmail.com"><div class="errmsg" id="err-mail"></div>
+        <div class="eg">Birden fazla: <code>sen@gmail.com, ekip@firma.com</code></div></div></div>
+    <div class="f"><label class="tip" title="Hangi sonuçta mail gelsin. Bağımsız seçilir.">Ne zaman mail</label>
+      <div><div class="cbrow">
+        <label class="cb"><input type="checkbox" id="e-nsuc"> ✔ Başarılı olunca</label>
+        <label class="cb"><input type="checkbox" id="e-nerr"> ✖ Hata olunca</label>
+        <label class="cb"><input type="checkbox" id="e-nskip"> ⏸ Atlanınca</label></div>
+        <div class="hint">Her gün mail istemiyorsan sadece "Hata" ve "Atlandı" bırak; haftalık rapor genel durumu zaten özetler.</div></div></div>
+  </fieldset>
+
+  <fieldset><legend>Haftalık rapor</legend>
+    <div class="f"><label class="tip" title="Haftada bir, son dönemin özetini ve uyarıları mail atar.">Rapor gönder</label>
+      <div><label class="cb"><input type="checkbox" id="e-wr"> haftalık özet raporu gönder</label>
+        <div class="hint">Rapor içinde: çalışma sayıları, yüklenen/silinen dosyalar, kota, <b>misafir bazında son yedek tarihi</b> ve uyarılar.</div></div></div>
+    <div class="f"><label class="tip" title="Raporun gönderileceği gün.">Gün</label>
+      <div><select id="e-rday"></select></div></div>
+    <div class="f"><label class="tip" title="Raporun gönderileceği saat.">Saat</label>
+      <div><input id="e-rat" placeholder="09:00"><div class="errmsg" id="err-rat"></div></div></div>
+    <div class="f"><label class="tip" title="Rapor kaç günlük dönemi kapsasın.">Dönem (gün)</label>
+      <div><input type="number" min="1" id="e-rdays"><div class="errmsg" id="err-rdays"></div></div></div>
+    <div class="f"><label class="tip" title="Bu kadar gündür başarılı yedek yoksa raporda uyarı çıkar.">Uyarı eşiği (gün)</label>
+      <div><input type="number" min="0" id="e-rstale"><div class="errmsg" id="err-rstale"></div>
+        <div class="eg">Günlük yedekte <b>2</b> uygun. Haftalık planda <b>8</b> yap, yoksa boşuna uyarır.</div></div></div>
+    <div class="f"><label class="tip" title="Kota bu yüzdeyi aşarsa raporda uyarı çıkar.">Kota uyarısı (%)</label>
+      <div><input type="number" min="0" max="100" id="e-rquota"><div class="errmsg" id="err-rquota"></div></div></div>
+    <div class="f"><label class="tip" title="Boş bırakırsan yukarıdaki alıcıya gider.">Rapor alıcısı</label>
+      <div><input id="e-rmail" placeholder="(boş = yukarıdaki alıcı)"><div class="errmsg" id="err-rmail"></div></div></div>
+  </fieldset>
+
+  <div class="mbtns"><button onclick="closeM('m-edit')">Vazgeç</button>
+    <button class="primary" onclick="savePlan()">Kaydet</button></div>
+</div></div>
+
+<div class="mask" id="m-browse"><div class="modal" style="max-width:620px">
+  <h2>📁 Yedek klasörünü seç</h2>
+  <div class="small">Proxmox host üzerindeki klasörler. Parantez içi: tanınan vzdump dosyası sayısı.</div>
+  <div id="b-stor" class="btns" style="margin-top:10px"></div>
+  <div class="crumb" id="b-path" style="margin-top:10px"></div>
+  <div class="dirlist" id="b-list"></div>
+  <div class="mbtns"><button onclick="closeM('m-browse')">Vazgeç</button>
+    <button class="primary" onclick="pickHere()">Bu klasörü seç</button></div>
+</div></div>
+
+<div class="mask" id="m-acct"><div class="modal">
+  <h2>👤 Google hesapları</h2>
+  <div class="small">Her plan bu hesaplardan birine yazar. Başkasının hesabını da ekleyebilirsin.</div>
+  <div id="a-list" style="margin-top:12px"></div>
+  <fieldset><legend>Yeni hesap ekle</legend>
+    <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
+      <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
+        <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
+    <div class="tabs" style="margin:4px 0 10px">
+      <button id="a-tab1" class="on" onclick="acctTab(1)">Tarayıcıyla yetkilendir</button>
+      <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
+    </div>
+    <div id="a-m1">
+      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
+        Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
+      <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
+        <div><input id="a-tunnel" readonly onclick="this.select()">
+          <div class="hint">Tıklayınca seçilir, kopyala-yapıştır yap.</div></div></div>
+      <div class="btns"><button class="primary" onclick="authStart()">▶ Başlat</button>
+        <button onclick="authCancel()">Vazgeç</button></div>
+      <div id="a-authbox" style="display:none;margin-top:10px">
+        <div class="hint">Bu adresi tarayıcında aç ve <b>hedef Google hesabıyla</b> giriş yap:</div>
+        <div class="crumb" id="a-url" style="margin:6px 0"></div>
+        <div class="small" id="a-wait">jeton bekleniyor…</div>
+      </div>
+    </div>
+    <div id="a-m2" style="display:none">
+      <div class="hint">Tarayıcısı olan herhangi bir bilgisayarda
+        <code>rclone authorize "drive" --drive-scope drive.file</code> çalıştır, çıkan JSON'u yapıştır.
+        Hesap sahibi bu adımı kendi bilgisayarında yapıp sana gönderebilir — şifresini paylaşması gerekmez.</div>
+      <div class="f" style="margin-top:8px"><label>Jeton (JSON)</label>
+        <div><textarea id="a-token" rows="4" placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'></textarea>
+          <div class="errmsg" id="err-atoken"></div></div></div>
+      <div class="btns"><button class="primary" onclick="acctPaste()">Ekle</button></div>
+    </div>
+  </fieldset>
+  <div class="mbtns"><button onclick="closeM('m-acct')">Kapat</button></div>
+</div></div>
+
+<div class="mask" id="m-smtp"><div class="modal">
+  <h2>✉ Mail gönderici profilleri</h2>
+  <div class="small">Her plan istediği profilden mail atar. Farklı hesaplar, farklı sunucular olabilir.</div>
+  <div id="s-list" style="margin-top:12px"></div>
+  <fieldset><legend id="s-formtitle">Yeni profil</legend>
+    <input type="hidden" id="s-id">
+    <div class="f"><label class="tip" title="Hazır sağlayıcı seçersen sunucu, port ve güvenlik otomatik dolar.">Sağlayıcı şablonu</label>
+      <div><select id="s-preset" onchange="smtpPreset()">
+        <option value="">— seç —</option>
+        <option value="gmail">Gmail</option>
+        <option value="outlook">Outlook / Microsoft 365</option>
+        <option value="yandex">Yandex</option>
+        <option value="yahoo">Yahoo</option>
+        <option value="custom">Özel (elle gir)</option>
+      </select><div class="hint" id="s-presethint"></div></div></div>
+    <div class="f"><label class="tip" title="Profilin görünen adı. Plan formunda bu ad çıkar.">Profil adı</label>
+      <div><input id="s-name" placeholder="Gmail (kişisel)"><div class="errmsg" id="err-sname"></div></div></div>
+    <div class="f"><label class="tip" title="SMTP sunucu adresi.">Sunucu</label>
+      <div><input id="s-host" placeholder="smtp.gmail.com"><div class="errmsg" id="err-shost"></div></div></div>
+    <div class="f"><label class="tip" title="STARTTLS genelde 587, SSL genelde 465.">Port</label>
+      <div><input type="number" id="s-port" min="1" max="65535"><div class="errmsg" id="err-sport"></div></div></div>
+    <div class="f"><label class="tip" title="Şifreleme yöntemi. Sağlayıcı şablonu bunu da doldurur.">Güvenlik</label>
+      <div><select id="s-sec">
+        <option value="starttls">STARTTLS (587)</option>
+        <option value="ssl">SSL/TLS (465)</option>
+        <option value="none">Yok (şifresiz)</option></select></div></div>
+    <div class="f"><label class="tip" title="SMTP kullanıcı adı, genelde tam e-posta adresi.">Kullanıcı</label>
+      <div><input id="s-user" placeholder="adresin@gmail.com"><div class="errmsg" id="err-suser"></div></div></div>
+    <div class="f"><label class="tip" title="Düzenlerken boş bırakırsan mevcut şifre korunur.">Şifre</label>
+      <div><input type="password" id="s-pass" placeholder="(düzenlemede boş = değişmesin)">
+        <div class="hint" id="s-passhint">Gmail ve Yahoo için hesap şifresi <b>çalışmaz</b>, uygulama şifresi üret.</div></div></div>
+    <div class="f"><label class="tip" title="Mailde görünecek gönderen adresi. Boşsa kullanıcı adı kullanılır.">Gönderen</label>
+      <div><input id="s-from" placeholder="adresin@gmail.com"><div class="errmsg" id="err-sfrom"></div></div></div>
+    <div class="btns"><button class="primary" onclick="smtpSave()">Kaydet</button>
+      <button onclick="smtpClear()">Formu temizle</button></div>
+  </fieldset>
+  <div class="mbtns"><button onclick="closeM('m-smtp')">Kapat</button></div>
+</div></div>
+
+<div class="mask" id="m-set"><div class="modal">
+  <h2>⚙ Ayarlar</h2><div class="small">Tüm planlar için ortak.</div>
+  <fieldset><legend>Web arayüzü</legend>
+    <div class="f"><label class="tip" title="Arayüzün dinleyeceği adres. 127.0.0.1 yaparsan sadece SSH tüneli/ters vekil üzerinden erişilir.">Dinlenen adres</label>
+      <div><input id="g-bind"><div class="errmsg" id="err-gbind"></div>
+        <div class="eg"><code>0.0.0.0</code> her yerden · <code>127.0.0.1</code> sadece yerel (nginx/SSH tüneli ile)</div></div></div>
+    <div class="f"><label>Port</label><div><input type="number" id="g-port" min="1" max="65535"><div class="errmsg" id="err-gport"></div></div></div>
+    <div class="f"><label>Kullanıcı</label><div><input id="g-user"><div class="errmsg" id="err-guser"></div></div></div>
+    <div class="f"><label class="tip" title="Boş bırakırsan mevcut şifre değişmez.">Yeni şifre</label>
+      <div><input type="password" id="g-pass" placeholder="boş = değişmesin"></div></div>
+    <div class="f"><label>Tazeleme (sn)</label><div><input type="number" min="1" id="g-refresh"><div class="errmsg" id="err-grefresh"></div></div></div>
+    <div class="hint">Adres veya port değişirse servisi yeniden başlat: <code>systemctl restart pve-gdrive-ui</code></div>
+  </fieldset>
+  <fieldset><legend>Gelişmiş</legend>
+    <div class="f"><label class="tip" title="Klasör seçici yalnızca bu köklerin altını gösterir.">Gezinme kökleri</label>
+      <div><input id="g-roots"><div class="hint">Virgülle ayır. Örnek: <code>/var/lib/vz, /mnt/pve, /mnt</code></div></div></div>
+    <div class="f"><label class="tip" title="Dosya adı deseni. Grup 1=set, 2=tip, 3=id, 4=tarih.">Dosya adı kalıbı</label>
+      <div><input id="g-re"><div class="errmsg" id="err-gre"></div>
+        <div class="hint">Regex. Varsayılan vzdump adlarını tanır — değiştirmen normalde gerekmez.</div></div></div>
+    <div class="f"><label class="tip" title="Plan başına saklanacak çalışma geçmişi kaydı.">Geçmiş kaydı</label>
+      <div><input type="number" min="1" id="g-hist"><div class="errmsg" id="err-ghist"></div></div></div>
+    <div class="f"><label class="tip" title="Arayüzde gösterilecek log satırı sayısı.">Log satırı</label>
+      <div><input type="number" min="10" id="g-logn"><div class="errmsg" id="err-glogn"></div></div></div>
+    <div class="f"><label class="tip" title="rclone çıktısından bellekte tutulan son satır sayısı.">rclone tampon satırı</label>
+      <div><input type="number" min="1" id="g-tail"><div class="errmsg" id="err-gtail"></div></div></div>
+    <div class="f"><label class="tip" title="state.json'a yazılacak azami yedek/çöp satırı. Toplamlar tam kalır.">Durum satır sınırı</label>
+      <div><input type="number" min="1" id="g-rows"><div class="errmsg" id="err-grows"></div></div></div>
+    <div class="f"><label class="tip" title="Log dosyası bu boyutu aşınca döndürülür.">Log boyutu (MB)</label>
+      <div><input type="number" min="0" step="0.5" id="g-logmb"><div class="errmsg" id="err-glogmb"></div></div></div>
+    <div class="f"><label class="tip" title="Saklanacak eski log dosyası sayısı.">Saklanan log</label>
+      <div><input type="number" min="1" id="g-logkeep"><div class="errmsg" id="err-glogkeep"></div></div></div>
+    <div class="f"><label class="tip" title="0 = sınırsız. Uzun yüklemelerde 0 bırak.">rclone zaman aşımı (dk)</label>
+      <div><input type="number" min="0" id="g-tmo"><div class="errmsg" id="err-gtmo"></div></div></div>
+    <div class="f"><label class="tip" title="Kapsamlı silme yetmezse hesap geneli cleanup çalışsın mı.">Hesap geneli cleanup</label>
+      <div><label class="cb"><input type="checkbox" id="g-cleanup"> son çare olarak rclone cleanup çalıştır</label>
+        <div class="hint">⚠ <code>rclone cleanup</code> yol argümanı almaz, <b>Drive'daki tüm çöpü</b> siler.
+          Hesap izni "sadece kendi dosyaları" ise etkisi bu araca ait dosyalarla sınırlı kalır.</div></div></div>
+  </fieldset>
+  <div class="mbtns"><button onclick="closeM('m-set')">Vazgeç</button>
+    <button class="primary" onclick="saveSettings()">Kaydet</button></div>
+</div></div>
+
+<div class="flash" id="flash"></div>

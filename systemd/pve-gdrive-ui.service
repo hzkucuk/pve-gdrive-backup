@@ -1,0 +1,13 @@
+[Unit]
+Description=Proxmox -> Google Drive yedek web arayuzu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

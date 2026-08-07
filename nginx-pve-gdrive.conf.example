@@ -1,0 +1,45 @@
+# Yedek UI'sini Proxmox ile ayni origin ve TLS altina almak icin ornek nginx yapilandirmasi.
+# Kurulum:  apt install -y nginx  &&  bu dosyayi /etc/nginx/sites-available/pve.conf olarak kopyala
+#           ln -s /etc/nginx/sites-available/pve.conf /etc/nginx/sites-enabled/
+#           nginx -t && systemctl reload nginx
+# Sonrasinda:  https://<host>/yedek/   -> yedek arayuzu
+#              https://<host>/         -> Proxmox arayuzu
+# UI'yi disariya kapatmak icin /etc/pve-gdrive.conf icinde "ui_bind": "127.0.0.1" yap.
+
+server {
+    listen 443 ssl http2;
+    server_name _;
+
+    # Proxmox'un kendi sertifikasi
+    ssl_certificate     /etc/pve/local/pve-ssl.pem;
+    ssl_certificate_key /etc/pve/local/pve-ssl.key;
+
+    client_max_body_size 0;
+    proxy_read_timeout 3600s;
+
+    # Yedek arayuzu
+    location /yedek/ {
+        proxy_pass http://127.0.0.1:8787/;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Basic Auth basliginin gecmesi sart
+        proxy_pass_header Authorization;
+    }
+
+    # Proxmox arayuzu
+    location / {
+        proxy_pass https://127.0.0.1:8006;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;   # noVNC / xterm.js icin
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+    }
+}
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}

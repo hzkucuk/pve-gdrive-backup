@@ -1,0 +1,14 @@
+{
+  "name": "pve-gdrive-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "pve-gdrive-backup web arayuzu (TypeScript). Derlenip pve_gdrive.py icine gomulur.",
+  "scripts": {
+    "build": "tsc && python3 ../build_ui.py",
+    "check": "tsc --noEmit",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

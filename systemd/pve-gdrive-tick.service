@@ -1,0 +1,11 @@
+[Unit]
+Description=Proxmox -> Google Drive: vakti gelen yedek planlarini calistirir
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py tick
+# Yedek isi host'u yormasin
+Nice=10
+IOSchedulingClass=idle

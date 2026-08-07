@@ -1,0 +1,16 @@
+# calisma zamani ciktilari
+*.log
+*-state.json
+progress-*.json
+test.conf
+test-state.json
+__pycache__/
+*.pyc
+
+# yerel gizli config (SMTP ve UI sifresi icerir)
+pve-gdrive.conf
+/etc-pve-gdrive.conf
+
+# TypeScript
+ui/node_modules/
+ui/dist/
