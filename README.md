@@ -24,16 +24,18 @@ Proxmox dump klasörü  ──copy──▶  Drive'da N gün  ──▶  Google 
 ## Hızlı başlangıç
 
 ```bash
-apt install -y rclone                      # Proxmox host'ta
-git clone https://github.com/hzkucuk/pve-gdrive-backup
-cd pve-gdrive-backup && ./install.sh
+apt install -y rclone
+cd /opt
+curl -fsSL https://github.com/hzkucuk/pve-gdrive-backup/archive/refs/heads/main.tar.gz | tar xz
+cd pve-gdrive-backup-main && ./install.sh
 ```
 
-Arayüz `http://<host-ip>:8787` — varsayılan `admin` / `degistir-beni`
-(ilk açılışta şifre otomatik olarak pbkdf2 ile hash'lenir; **hemen değiştir**).
+> Proxmox'ta `git` kurulu **gelmez**, bu yüzden tarball kullanılır. `curl` ve `wget` hazırdır.
 
-Sonra sırayla: **⚙ Ayarlar** → şifre · **👤 Hesaplar** → Google hesabı ekle ·
-**✉ Mail** → SMTP profili · **+ Yeni Plan** → ilk planın.
+Kurulum **soru soran bir sihirbaz** açar (Türkçe / English): izinli ağı, kaynak klasörü,
+HTTPS'i ve saklama süresini ortamı ölçerek önerir. Şifre rastgele üretilip sonunda gösterilir.
+
+Sonra arayüzde **+ Yeni Plan** ile sihirbazı çalıştır — Google hesabını 3. adımda eklersin.
 
 Ayrıntı için [kurulum kılavuzuna](docs/KURULUM.md) bak.
 

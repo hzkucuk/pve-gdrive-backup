@@ -26,10 +26,13 @@ rclone version
 ## 3. Kurulum
 
 ```bash
-git clone https://github.com/hzkucuk/pve-gdrive-backup
-cd pve-gdrive-backup
-./install.sh
+apt install -y rclone
+cd /opt
+curl -fsSL https://github.com/hzkucuk/pve-gdrive-backup/archive/refs/heads/main.tar.gz | tar xz
+cd pve-gdrive-backup-main && ./install.sh
 ```
+
+> Proxmox'ta `git` kurulu **gelmez**, bu yüzden tarball kullanılır. `curl` ve `wget` hazırdır.
 
 Terminal etkileşimliyse **soru soran bir sihirbaz** açılır (Türkçe / English). Ortamı ölçer
 ve varsayılanları önerir; Enter'a basarak geçebilirsin:
@@ -267,10 +270,24 @@ ssh -N -L 53682:127.0.0.1:53682 root@<yeni-host>    # kendi bilgisayarında
 
 ## 10. Güncelleme
 
+Arayüzden: **⚙ Ayarlar → Güncelleme → ⬇ Güncellemeyi kur**. İndirilen sürüm önce derlenir,
+sonra mevcut config ile çalıştırılıp doğrulanır, ancak ondan sonra kurulur. Program ve config
+yedeklenir; sorun çıkarsa **↶ Önceki sürüme dön**.
+
+Komut satırından:
+
 ```bash
-cd pve-gdrive-backup && git pull
-./install.sh                       # mevcut config ve planlara dokunmaz
-systemctl restart pve-gdrive-ui
+pve_gdrive.py update --check      # yeni sürüm var mı
+pve_gdrive.py update              # kur
+pve_gdrive.py update --rollback   # geri dön
+```
+
+Elle indirmek istersen:
+
+```bash
+cd /opt && rm -rf pve-gdrive-backup-main
+curl -fsSL https://github.com/hzkucuk/pve-gdrive-backup/archive/refs/heads/main.tar.gz | tar xz
+cd pve-gdrive-backup-main && ./install.sh    # mevcut config ve planlara dokunmaz
 ```
 
 Arayüzde değişiklik yaptıysan (TypeScript kaynağı) önce derle:
