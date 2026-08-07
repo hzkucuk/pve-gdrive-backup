@@ -74,6 +74,18 @@
 <div class="wstep" data-step="4" style="display:none">
   <div class="wbaslik"><b>4. Saklama</b> <span class="small">Yedekler ne kadar süre kalsın</span></div>
   <fieldset><legend>Saklama süreleri</legend>
+    <div id="kap-panel" class="kapasite">
+      <div class="kap-durum" id="kap-durum">Kaynak ve hesap seçilince kapasite hesabı burada çıkar.</div>
+      <div class="kap-bar" id="kap-bar" style="display:none">
+        <i class="mevcut" id="kap-mevcut"></i><i class="yeni" id="kap-yeni"></i>
+      </div>
+      <div class="kap-alt" id="kap-alt" style="display:none"></div>
+      <div class="btns" id="kap-btn" style="display:none;margin-top:8px">
+        <button class="sm primary" onclick="kapasiteOner()" id="kap-oner">📐 Önerilen süreyi uygula</button>
+        <button class="sm" onclick="kapasiteYukle(true)">↻ Yeniden ölç</button>
+      </div>
+      <div id="kap-misafir" class="kap-misafir"></div>
+    </div>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
         <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>

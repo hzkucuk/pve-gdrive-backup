@@ -2,6 +2,62 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.2.0 — 2026-08-08
+
+### Eklenenler
+
+- **Plan sihirbazı.** Yeni plan 8 adımda kurulur (Plan → Kaynak → Hedef → Saklama →
+  Zamanlama → Aktarım → Bildirim → Özet). Google hesabı yetkilendirmesi **3. adımın
+  içindedir**; ayrı ekrana gitmek gerekmez. Hiçbir şey adım adım kaydedilmez, son adımda
+  özet onaylanır. Mevcut planı düzenlerken tek sayfa form açılır.
+- **Kapasite planlayıcı.** Kaynak klasör ölçülüp seçilen hesabın kotasına göre projeksiyon
+  gösterilir: günlük üretim, seçilen saklama süresiyle gereken alan, kota doluluğu ve
+  misafir dağılımı. "Önerilen süreyi uygula" düğmesi boş alanın güvenli bir kısmına
+  (`oneri_pay_pct`, varsayılan %60) sığan en uzun süreyi seçer.
+- **Doğrudan HTTPS.** Python'un `ssl` modülü ile; ters vekil veya ek paket gerekmez.
+  Varsayılan Proxmox'un kendi sertifikasıdır. Sertifika okunamazsa servis düz HTTP ile
+  ayakta kalır ve sebebini loglar.
+- **Ağ kısıtlaması** (`allow_networks`). Yalnızca listedeki ağlardan erişilir, diğerleri
+  403 alır. Firewall gerekmez; SSH ve Proxmox arayüzü etkilenmez.
+- **"Beni hatırla"** girişte. İşaretlenirse çerez kalıcı olur ve oturum hareketsizlik
+  yüzünden düşmez; yine de IP'ye bağlıdır.
+- **Otomatik güncelleme.** İndirilen sürüm önce derlenir, sonra **mevcut config ile
+  çalıştırılıp doğrulanır**, ancak ondan sonra kurulur. Program ve config yedeklenir,
+  "önceki sürüme dön" düğmesi vardır. Çalışan yedek varken güncelleme yapılmaz.
+- **Hesap kotaları ana ekranda.** %75 üzeri sarı, %90 üzeri kırmızı. Kota sorgusu
+  önbelleklenir (`quota_cache_min`): ölçüldü, 2.7 sn → 0.2 sn.
+- **Test paketi.** `python3 tests/run_tests.py` — 35 test, sahte rclone ve pgrep ile;
+  gerçek Drive'a dokunmaz.
+
+### Düzeltmeler
+
+- `RE_STATS` "Transferred:" önekini zorunlu tutuyordu; gerçek `--stats-one-line` çıktısı
+  bu öneki içermiyor. **İlerleme takibi gerçek rclone'a karşı hiç çalışmamıştı.** İlerleme
+  artık `rclone rc core/stats` yapısal API'sinden okunur.
+- Otomatik bant genişliği salınıyordu: kendi hızımız rclone'un *ortalama* hızından
+  alınıyordu. Artık aktarılan bayt farkından anlık hesaplanır, üstel yumuşatma ve
+  değişim eşiği eklendi.
+- `run_at: "99:99"` kabul ediliyor ve `%24`/`%60` ile sessizce 03:39'a dönüşüyordu.
+  (Test paketi buldu.)
+- Kaba kuvvet kilidi hiç devreye girmiyordu: `locked_out()` süresi dolmuş kaydı tamamen
+  siliyor, böylece sayaç her istekte sıfırlanıyordu.
+- vzdump tespiti `pgrep -x vzdump` kullanıyordu; vzdump bir perl betiği olduğu için süreç
+  adı `perl` görünür ve tespit gerçek sunucuda hiç eşleşmezdi.
+- Çöp temizliği dosya başına ayrı rclone çağrısı yapıyordu (Drive'da 5-8 sn/dosya).
+  Toplu çağrıya çevrildi: ölçüldü, 10 dosya 8 sn.
+- Kopyalama öncesi yapılan "kaç dosya vardı" listelemesi kaldırıldı (tek başına 20+ sn).
+
+### İç yapı
+
+- 56 sessiz `except` isimlendirildi, `debug` ayarıyla loglanır.
+- `do_run` aşamalara bölündü (82→31 satır). Retention güvenlik kuralı
+  `_retention_calissin_mi()` içinde ve 8 kombinasyonu sınayan testi var.
+- Rapor üreticileri ortak `_bolum_*` fonksiyonlarına bölündü.
+- Arayüzde alan tablosu (`ui/src/alanlar.ts`): `validatePlan` 43→16, `savePlan` 33→17.
+- Global durum sınıflara alındı (`GuvenlikDeposu`, `GuncellemeDurumu`).
+- rclone artık `nice`/`ionice` ile çalışır; systemd birimlerinde `CPUWeight`, `IOWeight`,
+  `MemoryMax`, `TasksMax` ve sertleştirme var.
+
 ## 1.0.0 — 2026-08-08
 
 Gerçek bir Proxmox VE 8.4.19 host'unda ve gerçek Google Drive hesabında uçtan uca doğrulandı.

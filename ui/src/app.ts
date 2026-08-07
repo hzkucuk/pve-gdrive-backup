@@ -445,6 +445,7 @@ function wAdim(yon: number): void {
   }
   wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
   wGoster();
+  if (wAktif === 4) void kapasiteYukle();
   el("m-edit").scrollTop = 0;
 }
 
@@ -589,10 +590,14 @@ function openEditor(pid: string | null): void {
   void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages(); ramHint();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
+  fld("e-kd").oninput = () => { kapasiteCiz(); markDirty(); };
+  fld("e-td").oninput = () => { kapasiteCiz(); markDirty(); };
   fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
   fld("e-tr").oninput = () => { ramHint(); markDirty(); };
   hesapPaneliTasi("w-hesap-yuvasi", false);
+  KAP = null; kapAnahtar = "";
   wGoster();
+  if (!wSihirbaz) void kapasiteYukle();
   openM("m-edit");
 }
 
@@ -629,6 +634,90 @@ async function savePlan(): Promise<void> {
     dirty = false; wSihirbaz = false; closeM("m-edit");
     sel = j.id || sel; remember(); void refresh();
   }
+}
+
+/* ---------- kapasite planlayici ---------- */
+interface Analiz {
+  ok: boolean; hata?: string; dosya?: number; set_sayisi?: number;
+  toplam?: number; gunluk?: number;
+  misafirler?: { ad: string; toplam: number; set_basina: number; pay: number }[];
+}
+let KAP: { analiz: Analiz; kota: Quota; oneri?: number; oneri_pay_pct?: number } | null = null;
+let kapAnahtar = "";
+
+/** Kaynak klasoru olcup secilen hesabin kotasina gore projeksiyon gosterir.
+ *  Saklama suresini tahminle degil olcumle secmek icin. */
+async function kapasiteYukle(zorla?: boolean): Promise<void> {
+  const src = val("e-src").trim(), hesap = val("e-acct");
+  if (!src || !hesap) { setTxt("kap-durum", "Kaynak ve hesap seçilince kapasite hesabı burada çıkar."); return; }
+  const anahtar = src + "|" + hesap;
+  if (!zorla && anahtar === kapAnahtar && KAP) { kapasiteCiz(); return; }
+  setTxt("kap-durum", "ölçülüyor…");
+  try {
+    KAP = await api<{ analiz: Analiz; kota: Quota; oneri?: number; oneri_pay_pct?: number }>(
+      "/api/analiz?src=" + encodeURIComponent(src) + "&hesap=" + encodeURIComponent(hesap));
+    kapAnahtar = anahtar;
+  } catch { setTxt("kap-durum", "ölçüm başarısız"); return; }
+  kapasiteCiz();
+}
+
+function kapasiteCiz(): void {
+  if (!KAP) return;
+  const a = KAP.analiz, q = KAP.kota || {};
+  const goster = (id: string, g: boolean) => { el(id).style.display = g ? "" : "none"; };
+  if (!a.ok) {
+    setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || "ölçülemedi") + "</span>");
+    ["kap-bar", "kap-alt", "kap-btn"].forEach((i) => goster(i, false));
+    setHtml("kap-misafir", "");
+    return;
+  }
+  const gunluk = a.gunluk || 0;
+  const gun = Number(val("e-kd")) || 0, cop = Number(val("e-td")) || 0;
+  const gereken = gunluk * (gun + cop);
+  const toplam = Number(q.total) || 0, kullanilan = Number(q.used) || 0, bos = Number(q.free) || 0;
+  const sonraPct = toplam ? ((kullanilan + gereken) / toplam) * 100 : 0;
+  const mevcutPct = toplam ? (kullanilan / toplam) * 100 : 0;
+  const sigar = gereken < bos;
+
+  setHtml("kap-durum",
+    "Ölçüldü: günde <b>" + hb(gunluk) + "</b> üretiliyor ("
+    + (a.set_sayisi || 0) + " günlük set, toplam " + hb(a.toplam) + ").<br>"
+    + "<b>" + gun + " gün</b> saklama + <b>" + cop + " gün</b> çöp → Drive'da <b>" + hb(gereken)
+    + "</b> gerekir.");
+  goster("kap-bar", true); goster("kap-alt", true); goster("kap-btn", true);
+  const bar = el("kap-bar");
+  bar.className = "kap-bar" + (!sigar ? " tasma" : (sonraPct >= 80 ? " uyari" : ""));
+  el("kap-mevcut").style.width = Math.min(100, mevcutPct) + "%";
+  el("kap-yeni").style.width = Math.min(100 - Math.min(100, mevcutPct),
+    toplam ? (gereken / toplam) * 100 : 0) + "%";
+  setHtml("kap-alt",
+    "<span>şu an dolu: " + hb(kullanilan) + "</span>"
+    + "<span>bu planla: <b>%" + sonraPct.toFixed(1) + "</b></span>"
+    + "<span>hesap: " + hb(toplam) + "</span>");
+
+  let uyari = "";
+  if (!sigar) {
+    uyari = "⚠ Bu süre hesaba <b>sığmaz</b>: " + hb(gereken) + " gerekiyor, " + hb(bos) + " boş var.";
+  } else if (sonraPct >= 85) {
+    uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + " dolar. Misafirler büyürse yer biter.";
+  }
+  if (KAP.oneri) {
+    uyari += (uyari ? "<br>" : "") + "Önerilen: <b>" + KAP.oneri + " gün</b> (boş alanın %"
+      + (KAP.oneri_pay_pct || 60) + "'ini kullanır, büyümeye pay bırakır).";
+  }
+  const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
+    + " set var); hedef doluluğa ancak " + gun + " gün sonra ulaşılır.";
+  setHtml("kap-misafir",
+    (uyari ? '<div class="kap-uyari">' + uyari + ilk + "</div>" : '<div class="kap-uyari">' + ilk.slice(4) + "</div>")
+    + "<table><tbody>" + (a.misafirler || []).map((m) =>
+      "<tr><td>" + esc(m.ad) + "</td><td>set başına " + hb(m.set_basina)
+      + " · %" + m.pay + "</td></tr>").join("") + "</tbody></table>");
+}
+
+function kapasiteOner(): void {
+  if (!KAP || !KAP.oneri) return;
+  setVal("e-kd", KAP.oneri); good("e-kd"); markDirty(); kapasiteCiz();
+  flash(KAP.oneri + " gün uygulandı", true);
 }
 
 /* ---------- klasor gezgini ---------- */

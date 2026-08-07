@@ -7,7 +7,7 @@ temizler ve hepsini TypeScript ile yazılmış bir **web arayüzünden** yöneti
 Proxmox dump klasörü  ──copy──▶  Drive'da N gün  ──▶  Google çöpünde M gün  ──▶  kalıcı silinir
 ```
 
-- **Sunucuda sıfır bağımlılık** — Python 3 stdlib + `rclone`. Node.js gerekmez.
+- **Sunucuda sıfır bağımlılık** — Python 3 stdlib + `rclone`. Node.js, Docker, paket kurulumu yok.
 - **Çok planlı** — her plan kendi kaynağı, hedef Google hesabı, süreleri, saati ve mail alıcısıyla bağımsız
 - **Veri güvenliği önce** — yükleme başarısızsa hiçbir yedek silinmez
 - **Proxmox dostu** — kendi `vzdump` işinle çakışmaz, hattı başka yedekleme yazılımlarıyla paylaşır

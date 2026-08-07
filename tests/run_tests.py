@@ -286,6 +286,56 @@ def t_normalize():
         esit(p["drive_trash_days"], 0.0); esit(p["weekdays"], [3])
     finally: o.temizle()
 
+# ============================ KAPASITE ============================
+@test("kaynak analizi gunluk uretimi dogru olcer", "kapasite")
+def t_analiz():
+    o = Ortam()
+    try:
+        # 3 gunluk set, her gun ayni iki misafir
+        for g in (1, 2, 3):
+            o.dosya(f"vzdump-qemu-100-2026_08_{g:02d}-03_00_00.vma.zst", boyut=300_000)
+            o.dosya(f"vzdump-lxc-201-2026_08_{g:02d}-03_20_00.tar.zst", boyut=100_000)
+        o.dosya("alakasiz.txt", boyut=999)
+        o.plan(); G = o.modul()
+        a = G.kaynak_analiz(o.dump)
+        dogru(a["ok"], "analiz basarili olmali")
+        esit(a["set_sayisi"], 3, "3 farkli gun")
+        esit(a["dosya"], 6, "alakasiz dosya sayilmamali")
+        esit(a["toplam"], 1_200_000, "toplam boyut")
+        esit(int(a["gunluk"]), 400_000, "gunluk ortalama = toplam / gun sayisi")
+        esit(len(a["misafirler"]), 2, "iki misafir")
+        esit(a["misafirler"][0]["ad"], "qemu-100", "en buyuk once")
+        esit(a["misafirler"][0]["pay"], 75.0, "pay yuzdesi")
+    finally: o.temizle()
+
+@test("bos klasor ve gecersiz yol duzgun raporlanir", "kapasite")
+def t_analiz_hata():
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru(not G.kaynak_analiz(o.dump)["ok"], "bos klasor ok=False dondurmeli")
+        r = G.kaynak_analiz("/kesinlikle/olmayan/yol")
+        dogru(not r["ok"] and "okunamadi" in r["hata"], "olmayan yol icin anlamli hata")
+    finally: o.temizle()
+
+@test("saklama projeksiyonu ve onerisi tutarli", "kapasite")
+def t_projeksiyon():
+    o = Ortam()
+    try:
+        G = o.modul()
+        GB = 1024 ** 3
+        analiz = {"ok": True, "gunluk": 50 * GB, "toplam": 200 * GB}
+        kota = {"ok": True, "total": 2000 * GB, "used": 200 * GB, "free": 1800 * GB}
+        pr = G.saklama_projeksiyon(analiz, kota, 10, 1)
+        esit(pr["gereken"], 11 * 50 * GB, "10 gun + 1 gun cop = 11 gunluk yer")
+        dogru(pr["sigar"], "550 GB, 1800 GB bosa sigar")
+        dogru(not G.saklama_projeksiyon(analiz, kota, 60, 1)["sigar"], "60 gun sigmamali")
+        # oneri: bos alanin %60'i = 1080 GB -> 1080/50 - 1 = 20.6 -> 20 gun
+        esit(G.saklama_oneri(analiz, kota, 1, 60), 20, "oneri hesabi")
+        dogru(G.saklama_oneri(analiz, kota, 1, 30) < G.saklama_oneri(analiz, kota, 1, 60),
+              "daha dusuk pay daha kisa sure onerir")
+    finally: o.temizle()
+
 # ============================ AYRISTIRICILAR ============================
 @test("rclone istatistik satiri dogru ayristirilir", "ayristirma")
 def t_stats():

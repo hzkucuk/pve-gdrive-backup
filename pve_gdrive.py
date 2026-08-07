@@ -23,7 +23,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.1.0"
+SURUM = "1.2.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -58,8 +58,9 @@ GLOBAL_DEFAULTS = {
     "update_url": "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py",
     "update_backup_keep": 5,      # saklanacak eski surum sayisi
     "quota_cache_min": 15,        # hesap kotasi kac dakika onbellekte tutulsun
+    "oneri_pay_pct": 60,          # saklama onerisi bos alanin en fazla bu yuzdesini kullanir
     # Zamanlayici: systemd timer yerine surecin kendi icinde calissin mi.
-    # null = otomatik (konteynerde acik, systemd kurulumunda kapali)
+    # null = otomatik: systemd timer yoksa surec ici zamanlayici acilir
     "debug": False,               # ayrintili hata izleri loga yazilsin mi
     "internal_scheduler": None,
     "scheduler_interval_sec": 300,
@@ -745,6 +746,67 @@ def guest_summary(p):
            for v in g.values()]
     out.sort(key=lambda x: x["last"])
     return out
+
+def kaynak_analiz(src_dir):
+    """Kaynak klasoru olcer: gunluk uretim, set sayisi, misafir dagilimi.
+
+    Saklama suresini tahminle degil olcumle secebilmek icin. Proxmox her gun
+    tam yedek uretir; gunluk ortalama = toplam / farkli tarih sayisi."""
+    try: dosyalar = os.listdir(src_dir)
+    except Exception as e:
+        yut("kaynak_analiz", e)
+        return {"ok": False, "hata": f"klasor okunamadi: {src_dir}"}
+    re_d = dump_re()
+    gun = {}; misafir = {}; gun_set = {}; toplam = 0; n = 0
+    for f in dosyalar:
+        m = re_d.match(f)
+        if not m: continue
+        try: b = os.path.getsize(os.path.join(src_dir, f))
+        except Exception as e:
+            yut("kaynak_analiz", e); continue
+        tarih = m.group(4).split("-")[0]          # 2026_08_07
+        ad = f"{m.group(2)}-{m.group(3)}"
+        gun[tarih] = gun.get(tarih, 0) + b
+        misafir[ad] = misafir.get(ad, 0) + b
+        gun_set.setdefault(tarih, set()).add(ad)
+        toplam += b; n += 1
+    if not gun:
+        return {"ok": False, "hata": "bu klasorde taninan vzdump dosyasi yok"}
+    set_sayisi = len(gun)
+    gunluk = toplam / set_sayisi
+    return {"ok": True, "dosya": n, "set_sayisi": set_sayisi, "toplam": toplam,
+            "gunluk": gunluk,
+            "gunler": [{"tarih": t.replace("_", "-"), "boyut": gun[t],
+                        "misafir": len(gun_set[t])} for t in sorted(gun)],
+            "misafirler": sorted(
+                [{"ad": k, "toplam": v, "set_basina": v / set_sayisi,
+                  "pay": round(v / toplam * 100, 1)} for k, v in misafir.items()],
+                key=lambda x: -x["toplam"])}
+
+def saklama_projeksiyon(analiz, kota, keep_days, drive_trash_days=1):
+    """Verilen saklama suresi icin gereken alan ve kotaya oranı."""
+    if not analiz.get("ok"): return None
+    gunluk = analiz["gunluk"]
+    # Drive'da keep_days gun + copte drive_trash_days gun daha bekler
+    gereken = gunluk * (float(keep_days) + float(drive_trash_days))
+    bos = float(kota.get("free") or 0)
+    toplam = float(kota.get("total") or 0)
+    kullanilan = float(kota.get("used") or 0)
+    return {"gereken": gereken, "bos": bos,
+            "sonra_kullanilan": kullanilan + gereken,
+            "sonra_pct": round((kullanilan + gereken) / toplam * 100, 1) if toplam else None,
+            "sigar": gereken < bos,
+            "ilk_yukleme": min(analiz["toplam"], gereken)}
+
+def saklama_oneri(analiz, kota, drive_trash_days=1, pay_pct=None):
+    """Bos alanin guvenli bir kismina sigan en uzun saklama suresi."""
+    if not analiz.get("ok"): return None
+    pay = float(pay_pct if pay_pct is not None else (cfg().get("oneri_pay_pct") or 60)) / 100.0
+    gunluk = analiz["gunluk"]
+    if gunluk <= 0: return None
+    butce = float(kota.get("free") or 0) * pay
+    gun = int(butce / gunluk - float(drive_trash_days))
+    return max(1, min(365, gun))
 
 def local_guests(p):
     """Kaynak klasordeki misafirler - Drive'a hic cikmamis olan var mi diye."""
@@ -1704,39 +1766,29 @@ def browse(path):
     if not any(parent == r or parent.startswith(r + os.sep) for r in roots): parent = ""
     return {"path": p, "parent": parent, "dirs": dirs, "roots": roots, "dumps": count_dumps(p)}
 
-def konteyner_mi():
-    """Docker/LXC gibi bir konteynerde miyiz? Zamanlayici ve yeniden baslatma
-    davranisi buna gore degisir."""
-    if os.environ.get("PVE_GDRIVE_CONTAINER"): return True
-    if os.path.exists("/.dockerenv"): return True
-    try:
-        with open("/proc/1/cgroup") as f:
-            ic = f.read()
-        if any(x in ic for x in ("docker", "containerd", "kubepods", "lxc")): return True
-    except Exception as e: yut("konteyner_mi", e)
-    try:
-        with open("/proc/1/comm") as f:
-            return f.read().strip() != "systemd"
-    except Exception as e:
-        yut("konteyner_mi", e)
-        return False
+def systemd_var_mi():
+    """systemd ile mi yonetiliyoruz? Yeniden baslatma yontemi buna gore secilir."""
+    if not os.path.exists("/run/systemd/system"): return False
+    return os.path.exists("/usr/bin/systemctl") or os.path.exists("/bin/systemctl")
 
 def ic_zamanlayici_acik():
+    """Zamanlayiciyi surecin kendisi mi calistirsin.
+    Varsayilan: systemd timer varsa hayir, yoksa evet."""
     v = cfg().get("internal_scheduler")
-    return konteyner_mi() if v is None else bool(v)
+    return (not systemd_var_mi()) if v is None else bool(v)
 
 def servisi_yeniden_baslat():
-    """systemd varsa servisi yeniden baslatir; konteynerde surecten cikar,
-    Docker'in restart politikasi ayaga kaldirir."""
-    if konteyner_mi():
-        log("guncelleme kuruldu, konteyner yeniden baslatiliyor (restart policy)")
+    """systemd varsa servisi yeniden baslatir; yoksa surecten cikar ve disaridaki
+    denetleyicinin ayaga kaldirmasini bekler."""
+    if not systemd_var_mi():
+        log("guncelleme kuruldu, surec yeniden baslatiliyor")
         threading.Timer(2.0, lambda: os._exit(0)).start()
-        return "konteyner yeniden başlatılıyor"
+        return "süreç yeniden başlatılıyor"
     subprocess.Popen(["systemctl", "restart", "pve-gdrive-ui.service"], start_new_session=True)
     return "servis yeniden başlatılıyor"
 
 def zamanlayici_dongusu(dur_bayragi):
-    """Konteynerde systemd timer olmadigi icin tick'i surecin kendisi calistirir."""
+    """systemd timer yoksa tick'i surecin kendisi calistirir."""
     aralik = max(30, int(cfg().get("scheduler_interval_sec") or 300))
     log(f"ic zamanlayici acik ({aralik} sn'de bir kontrol)")
     while not dur_bayragi.is_set():
@@ -2137,7 +2189,7 @@ def public_status():
             "smtp_ready": bool(smtp_profiles(C)),
             "tls": {"aktif": TLS_AKTIF, "sertifika": cert_bilgisi()},
             "hesaplar": hesap_ozeti(),
-            "surum": SURUM, "konteyner": konteyner_mi(),
+            "surum": SURUM,
             "ic_zamanlayici": ic_zamanlayici_acik(),
             "guncelleme": {"uzak": GUNCELLEME_DURUMU["uzak_surum"],
                            "yeni_var": bool(GUNCELLEME_DURUMU["uzak_surum"]
@@ -2302,6 +2354,16 @@ class H(BaseHTTPRequestHandler):
             self._json(auth_status())
         elif p == "/api/update/check":
             self._json(guncelleme_kontrol(zorla=q.get("force", [""])[0] == "1"))
+        elif p == "/api/analiz":
+            src = unquote(q.get("src", [""])[0])
+            hesap = q.get("hesap", [""])[0]
+            a = kaynak_analiz(src) if src else {"ok": False, "hata": "kaynak klasor secilmedi"}
+            kota = remote_quota_onbellekli(hesap) if hesap else {}
+            cevap = {"analiz": a, "kota": kota}
+            if a.get("ok") and kota.get("ok"):
+                cevap["oneri"] = saklama_oneri(a, kota)
+                cevap["oneri_pay_pct"] = int(cfg().get("oneri_pay_pct") or 60)
+            self._json(cevap)
         elif p == "/api/ifaces":
             ifs = net_ifaces(); vars = default_iface()
             self._json({"default": vars,
@@ -2562,7 +2624,7 @@ def serve():
         TLS_AKTIF = True
     sema = "https" if TLS_AKTIF else "http"
     log(f"web UI hazir -> {sema}://{C['ui_bind']}:{C['ui_port']}  (kullanici: {C['ui_user']})"
-        + (f" | surum {SURUM}" + (" | konteyner" if konteyner_mi() else "")))
+        + f" | surum {SURUM}")
     if ic_zamanlayici_acik():
         dur = threading.Event()
         threading.Thread(target=zamanlayici_dongusu, args=(dur,), daemon=True).start()
@@ -2746,6 +2808,24 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .hesap .alt{font-size:11px;color:#8b97a5}
 .hesap.hata{border-color:#5c1a1a}
 
+/* --- kapasite planlayici --- */
+.kapasite{background:#0f151d;border:1px solid #232b36;border-radius:10px;padding:12px;margin-bottom:14px}
+.kap-durum{font-size:12px;color:#9fb4c9;line-height:1.6}
+.kap-durum b{color:#e6edf3}
+.kap-bar{display:flex;height:14px;border-radius:7px;background:#232b36;overflow:hidden;margin:10px 0 6px}
+.kap-bar i{display:block;height:100%}
+.kap-bar i.mevcut{background:#4b5b6d}
+.kap-bar i.yeni{background:#3fb950}
+.kap-bar.uyari i.yeni{background:#d29922}
+.kap-bar.tasma i.yeni{background:#f85149}
+.kap-alt{font-size:11px;color:#8b97a5;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.kap-misafir{margin-top:10px;font-size:11px;color:#8b97a5}
+.kap-misafir table{width:100%;font-size:11px}
+.kap-misafir td{padding:2px 6px;border:none}
+.kap-misafir td:last-child{text-align:right;color:#c9d4df}
+.kap-uyari{color:#ffd479;margin-top:8px;font-size:12px;line-height:1.5}
+.kap-hata{color:#ff9b9b}
+
 </style></head><body>
 <div class="wrap">
 <header>
@@ -2823,6 +2903,18 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 <div class="wstep" data-step="4" style="display:none">
   <div class="wbaslik"><b>4. Saklama</b> <span class="small">Yedekler ne kadar süre kalsın</span></div>
   <fieldset><legend>Saklama süreleri</legend>
+    <div id="kap-panel" class="kapasite">
+      <div class="kap-durum" id="kap-durum">Kaynak ve hesap seçilince kapasite hesabı burada çıkar.</div>
+      <div class="kap-bar" id="kap-bar" style="display:none">
+        <i class="mevcut" id="kap-mevcut"></i><i class="yeni" id="kap-yeni"></i>
+      </div>
+      <div class="kap-alt" id="kap-alt" style="display:none"></div>
+      <div class="btns" id="kap-btn" style="display:none;margin-top:8px">
+        <button class="sm primary" onclick="kapasiteOner()" id="kap-oner">📐 Önerilen süreyi uygula</button>
+        <button class="sm" onclick="kapasiteYukle(true)">↻ Yeniden ölç</button>
+      </div>
+      <div id="kap-misafir" class="kap-misafir"></div>
+    </div>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
         <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
@@ -3644,6 +3736,8 @@ function wAdim(yon) {
     }
     wAktif = Math.min(ADIMLAR.length, Math.max(1, wAktif + yon));
     wGoster();
+    if (wAktif === 4)
+        void kapasiteYukle();
     el("m-edit").scrollTop = 0;
 }
 function wSatir(baslik, deger, uyari) {
@@ -3799,10 +3893,16 @@ function openEditor(pid) {
     ramHint();
     Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
         .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
+    fld("e-kd").oninput = () => { kapasiteCiz(); markDirty(); };
+    fld("e-td").oninput = () => { kapasiteCiz(); markDirty(); };
     fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
     fld("e-tr").oninput = () => { ramHint(); markDirty(); };
     hesapPaneliTasi("w-hesap-yuvasi", false);
+    KAP = null;
+    kapAnahtar = "";
     wGoster();
+    if (!wSihirbaz)
+        void kapasiteYukle();
     openM("m-edit");
 }
 function validatePlan() {
@@ -3849,6 +3949,90 @@ async function savePlan() {
         remember();
         void refresh();
     }
+}
+let KAP = null;
+let kapAnahtar = "";
+/** Kaynak klasoru olcup secilen hesabin kotasina gore projeksiyon gosterir.
+ *  Saklama suresini tahminle degil olcumle secmek icin. */
+async function kapasiteYukle(zorla) {
+    const src = val("e-src").trim(), hesap = val("e-acct");
+    if (!src || !hesap) {
+        setTxt("kap-durum", "Kaynak ve hesap seçilince kapasite hesabı burada çıkar.");
+        return;
+    }
+    const anahtar = src + "|" + hesap;
+    if (!zorla && anahtar === kapAnahtar && KAP) {
+        kapasiteCiz();
+        return;
+    }
+    setTxt("kap-durum", "ölçülüyor…");
+    try {
+        KAP = await api("/api/analiz?src=" + encodeURIComponent(src) + "&hesap=" + encodeURIComponent(hesap));
+        kapAnahtar = anahtar;
+    }
+    catch {
+        setTxt("kap-durum", "ölçüm başarısız");
+        return;
+    }
+    kapasiteCiz();
+}
+function kapasiteCiz() {
+    if (!KAP)
+        return;
+    const a = KAP.analiz, q = KAP.kota || {};
+    const goster = (id, g) => { el(id).style.display = g ? "" : "none"; };
+    if (!a.ok) {
+        setHtml("kap-durum", '<span class="kap-hata">⚠ ' + esc(a.hata || "ölçülemedi") + "</span>");
+        ["kap-bar", "kap-alt", "kap-btn"].forEach((i) => goster(i, false));
+        setHtml("kap-misafir", "");
+        return;
+    }
+    const gunluk = a.gunluk || 0;
+    const gun = Number(val("e-kd")) || 0, cop = Number(val("e-td")) || 0;
+    const gereken = gunluk * (gun + cop);
+    const toplam = Number(q.total) || 0, kullanilan = Number(q.used) || 0, bos = Number(q.free) || 0;
+    const sonraPct = toplam ? ((kullanilan + gereken) / toplam) * 100 : 0;
+    const mevcutPct = toplam ? (kullanilan / toplam) * 100 : 0;
+    const sigar = gereken < bos;
+    setHtml("kap-durum", "Ölçüldü: günde <b>" + hb(gunluk) + "</b> üretiliyor ("
+        + (a.set_sayisi || 0) + " günlük set, toplam " + hb(a.toplam) + ").<br>"
+        + "<b>" + gun + " gün</b> saklama + <b>" + cop + " gün</b> çöp → Drive'da <b>" + hb(gereken)
+        + "</b> gerekir.");
+    goster("kap-bar", true);
+    goster("kap-alt", true);
+    goster("kap-btn", true);
+    const bar = el("kap-bar");
+    bar.className = "kap-bar" + (!sigar ? " tasma" : (sonraPct >= 80 ? " uyari" : ""));
+    el("kap-mevcut").style.width = Math.min(100, mevcutPct) + "%";
+    el("kap-yeni").style.width = Math.min(100 - Math.min(100, mevcutPct), toplam ? (gereken / toplam) * 100 : 0) + "%";
+    setHtml("kap-alt", "<span>şu an dolu: " + hb(kullanilan) + "</span>"
+        + "<span>bu planla: <b>%" + sonraPct.toFixed(1) + "</b></span>"
+        + "<span>hesap: " + hb(toplam) + "</span>");
+    let uyari = "";
+    if (!sigar) {
+        uyari = "⚠ Bu süre hesaba <b>sığmaz</b>: " + hb(gereken) + " gerekiyor, " + hb(bos) + " boş var.";
+    }
+    else if (sonraPct >= 85) {
+        uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + " dolar. Misafirler büyürse yer biter.";
+    }
+    if (KAP.oneri) {
+        uyari += (uyari ? "<br>" : "") + "Önerilen: <b>" + KAP.oneri + " gün</b> (boş alanın %"
+            + (KAP.oneri_pay_pct || 60) + "'ini kullanır, büyümeye pay bırakır).";
+    }
+    const ilk = "<br>İlk yükleme <b>" + hb(a.toplam) + "</b> olur (kaynakta " + (a.set_sayisi || 0)
+        + " set var); hedef doluluğa ancak " + gun + " gün sonra ulaşılır.";
+    setHtml("kap-misafir", (uyari ? '<div class="kap-uyari">' + uyari + ilk + "</div>" : '<div class="kap-uyari">' + ilk.slice(4) + "</div>")
+        + "<table><tbody>" + (a.misafirler || []).map((m) => "<tr><td>" + esc(m.ad) + "</td><td>set başına " + hb(m.set_basina)
+        + " · %" + m.pay + "</td></tr>").join("") + "</tbody></table>");
+}
+function kapasiteOner() {
+    if (!KAP || !KAP.oneri)
+        return;
+    setVal("e-kd", KAP.oneri);
+    good("e-kd");
+    markDirty();
+    kapasiteCiz();
+    flash(KAP.oneri + " gün uygulandı", true);
 }
 /* ---------- klasor gezgini ---------- */
 async function loadStorages() {

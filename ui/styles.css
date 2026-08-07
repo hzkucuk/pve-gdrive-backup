@@ -100,3 +100,21 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .hesap.dolu .mini i{background:#f85149}
 .hesap .alt{font-size:11px;color:#8b97a5}
 .hesap.hata{border-color:#5c1a1a}
+
+/* --- kapasite planlayici --- */
+.kapasite{background:#0f151d;border:1px solid #232b36;border-radius:10px;padding:12px;margin-bottom:14px}
+.kap-durum{font-size:12px;color:#9fb4c9;line-height:1.6}
+.kap-durum b{color:#e6edf3}
+.kap-bar{display:flex;height:14px;border-radius:7px;background:#232b36;overflow:hidden;margin:10px 0 6px}
+.kap-bar i{display:block;height:100%}
+.kap-bar i.mevcut{background:#4b5b6d}
+.kap-bar i.yeni{background:#3fb950}
+.kap-bar.uyari i.yeni{background:#d29922}
+.kap-bar.tasma i.yeni{background:#f85149}
+.kap-alt{font-size:11px;color:#8b97a5;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.kap-misafir{margin-top:10px;font-size:11px;color:#8b97a5}
+.kap-misafir table{width:100%;font-size:11px}
+.kap-misafir td{padding:2px 6px;border:none}
+.kap-misafir td:last-child{text-align:right;color:#c9d4df}
+.kap-uyari{color:#ffd479;margin-top:8px;font-size:12px;line-height:1.5}
+.kap-hata{color:#ff9b9b}
