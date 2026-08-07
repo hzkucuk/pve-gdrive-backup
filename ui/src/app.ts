@@ -704,7 +704,11 @@ function kapasiteCiz(): void {
     + "<span>hesap: " + hb(toplam) + "</span>");
 
   let uyari = "";
-  if (!sigar) {
+  if (KAP.kota && (KAP.kota as unknown as Record<string, unknown>).bekliyor) {
+    uyari = C("Kota ölçülüyor, birkaç saniye sonra tekrar bak.");
+  } else if (!toplam) {
+    uyari = C("Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.");
+  } else if (!sigar) {
     uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
   } else if (sonraPct >= 85) {
     uyari = "⚠ Hesap %" + sonraPct.toFixed(0) + C(" dolar. VM/CT'ler büyürse yer biter.");

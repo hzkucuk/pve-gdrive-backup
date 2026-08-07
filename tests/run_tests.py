@@ -318,6 +318,29 @@ def t_analiz_hata():
         dogru(not r["ok"] and "okunamadi" in r["hata"], "olmayan yol icin anlamli hata")
     finally: o.temizle()
 
+@test("kota bilinmiyorsa 'sigmaz' denmez", "kapasite")
+def t_kota_bilinmiyor():
+    """Kota sorgusu basarisiz oldugunda 'sigmaz' raporlamak yanlis alarmdir;
+    dogru cevap 'bilinmiyor'. (Gercek sunucuda 34 sn suren sorgu zaman asimina
+    ugrayinca planlayici 215 GB'in 1.8 TB'ye sigmadigini soylemisti.)"""
+    o = Ortam()
+    try:
+        G = o.modul()
+        GB = 1024 ** 3
+        analiz = {"ok": True, "gunluk": 50 * GB, "toplam": 200 * GB}
+        # kota alinamadi
+        for bos_kota in ({}, {"ok": False, "error": "zaman asimi"}, {"ok": None, "bekliyor": True}):
+            pr = G.saklama_projeksiyon(analiz, bos_kota, 3, 1)
+            esit(pr["sigar"], None, f"kota yokken sigar None olmali: {bos_kota}")
+            esit(pr["kota_var"], False, "kota_var False olmali")
+            dogru(pr["gereken"] > 0, "gereken alan yine de hesaplanmali")
+        # kota varken normal calisir
+        kota = {"ok": True, "total": 2000 * GB, "used": 200 * GB, "free": 1800 * GB}
+        pr = G.saklama_projeksiyon(analiz, kota, 3, 1)
+        esit(pr["sigar"], True, "200 GB, 1800 GB bosa sigar")
+        esit(pr["kota_var"], True)
+    finally: o.temizle()
+
 @test("saklama projeksiyonu ve onerisi tutarli", "kapasite")
 def t_projeksiyon():
     o = Ortam()

@@ -885,7 +885,10 @@ def kaynak_analiz(src_dir):
                 key=lambda x: -x["toplam"])}
 
 def saklama_projeksiyon(analiz, kota, keep_days, drive_trash_days=1):
-    """Verilen saklama suresi icin gereken alan ve kotaya oranı."""
+    """Verilen saklama suresi icin gereken alan ve kotaya orani.
+
+    Kota bilinmiyorsa 'sigar' None doner: bilinmeyeni 'sigmaz' diye raporlamak
+    yanlis alarm uretir, bu bilgi eksikliginden daha kotudur."""
     if not analiz.get("ok"): return None
     gunluk = analiz["gunluk"]
     # Drive'da keep_days gun + copte drive_trash_days gun daha bekler
@@ -893,10 +896,11 @@ def saklama_projeksiyon(analiz, kota, keep_days, drive_trash_days=1):
     bos = float(kota.get("free") or 0)
     toplam = float(kota.get("total") or 0)
     kullanilan = float(kota.get("used") or 0)
-    return {"gereken": gereken, "bos": bos,
+    kota_var = bool(toplam) and kota.get("ok") is not False
+    return {"gereken": gereken, "bos": bos, "kota_var": kota_var,
             "sonra_kullanilan": kullanilan + gereken,
             "sonra_pct": round((kullanilan + gereken) / toplam * 100, 1) if toplam else None,
-            "sigar": gereken < bos,
+            "sigar": (gereken < bos) if kota_var else None,
             "ilk_yukleme": min(analiz["toplam"], gereken)}
 
 def saklama_oneri(analiz, kota, drive_trash_days=1, pay_pct=None):
@@ -1666,16 +1670,38 @@ def rclone_remotes():
 
 _KOTA_ONBELLEK = {}   # hesap adi -> {"veri": {...}, "zaman": ts}
 
-def remote_quota_onbellekli(name, zorla=False):
-    """Kota sorgusu her arayuz yenilemesinde yapilmaz: bir rclone about cagrisi
-    saniyeler surer ve Drive API kotasini yer. quota_cache_min kadar onbellekte tutulur."""
+_KOTA_ISLER = set()
+
+def _kota_arkaplan(name):
+    """Kotayi arka planda tazeler. Olculdu: bir 'rclone about' cagrisi 34 sn
+    surebiliyor; bunu /api/status icinde beklemek arayuzu kilitler."""
+    try:
+        veri = remote_quota(name)
+        _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
+    except Exception as e:
+        yut("_kota_arkaplan", e)
+    finally:
+        _KOTA_ISLER.discard(name)
+
+def remote_quota_onbellekli(name, zorla=False, bekle=False):
+    """Onbellekten aninda doner; suresi dolduysa tazelemeyi ARKA PLANA atar.
+
+    bekle=True yalnizca kullanicinin acikca bekledigi yerlerde (hesap testi,
+    kapasite planlayici) kullanilir. Arayuz asla kota sorgusunu beklemez."""
     ttl = float(cfg().get("quota_cache_min") or 15) * 60
     kayit = _KOTA_ONBELLEK.get(name)
-    if not zorla and kayit and (time.time() - kayit["zaman"]) < ttl:
+    taze = kayit and (time.time() - kayit["zaman"]) < ttl
+    if taze and not zorla:
         return kayit["veri"]
-    veri = remote_quota(name)
-    _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
-    return veri
+    if bekle or zorla:
+        veri = remote_quota(name)
+        _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
+        return veri
+    if name not in _KOTA_ISLER:
+        _KOTA_ISLER.add(name)
+        threading.Thread(target=_kota_arkaplan, args=(name,), daemon=True).start()
+    # Eski deger varsa onu goster (bayat ama dogru), yoksa "olculuyor"
+    return kayit["veri"] if kayit else {"ok": None, "bekliyor": True}
 
 def hesap_ozeti(zorla=False):
     """Ana ekranda gosterilecek hesap + kota listesi."""
@@ -2488,7 +2514,7 @@ class H(BaseHTTPRequestHandler):
             rs = rclone_remotes()
             if q.get("quota", [""])[0] == "1":
                 zorla = q.get("force", [""])[0] == "1"
-                for r in rs: r["quota"] = remote_quota_onbellekli(r["name"], zorla)
+                for r in rs: r["quota"] = remote_quota_onbellekli(r["name"], zorla, bekle=True)
             self._json({"remotes": rs})
         elif p == "/api/remote/auth/status":
             self._json(auth_status())
@@ -2498,7 +2524,8 @@ class H(BaseHTTPRequestHandler):
             src = unquote(q.get("src", [""])[0])
             hesap = q.get("hesap", [""])[0]
             a = kaynak_analiz(src) if src else {"ok": False, "hata": "kaynak klasor secilmedi"}
-            kota = remote_quota_onbellekli(hesap) if hesap else {}
+            # Kapasite planlayicida kullanici zaten bekliyor: guncel kota alinir.
+            kota = remote_quota_onbellekli(hesap, bekle=True) if hesap else {}
             cevap = {"analiz": a, "kota": kota}
             if a.get("ok") and kota.get("ok"):
                 cevap["oneri"] = saklama_oneri(a, kota)
@@ -3831,6 +3858,8 @@ const EN = {
     "Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.": "Uploading does not start while Proxmox's own backup runs. The lock file, process and files being written are all checked.",
     "Trafiğin ölçüleceği ağ arayüzü. Proxmox'ta köprü yerine fiziksel/bond arayüzü seçmek VM ve CT trafiğini de kapsar.": "Interface to measure traffic on. On Proxmox, picking the physical/bond interface instead of the bridge also covers VM and CT traffic.",
     "Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.": "Measures other traffic on the link and adjusts the upload speed live. Backs off when another backup tool uses the line.",
+    "Kota ölçülüyor, birkaç saniye sonra tekrar bak.": "Measuring quota, check again in a few seconds.",
+    "Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.": "Quota unavailable — usage cannot be projected. The required space is still correct.",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -4692,7 +4721,13 @@ function kapasiteCiz() {
         + "<span>bu planla: <b>%" + sonraPct.toFixed(1) + "</b></span>"
         + "<span>hesap: " + hb(toplam) + "</span>");
     let uyari = "";
-    if (!sigar) {
+    if (KAP.kota && KAP.kota.bekliyor) {
+        uyari = C("Kota ölçülüyor, birkaç saniye sonra tekrar bak.");
+    }
+    else if (!toplam) {
+        uyari = C("Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.");
+    }
+    else if (!sigar) {
         uyari = C("⚠ Bu süre hesaba <b>sığmaz</b>: ") + hb(gereken) + " gerekiyor, " + hb(bos) + C(" boş var.");
     }
     else if (sonraPct >= 85) {

@@ -377,4 +377,7 @@ const EN: Record<string, string> = {
   "Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.": "Uploading does not start while Proxmox's own backup runs. The lock file, process and files being written are all checked.",
   "Trafiğin ölçüleceği ağ arayüzü. Proxmox'ta köprü yerine fiziksel/bond arayüzü seçmek VM ve CT trafiğini de kapsar.": "Interface to measure traffic on. On Proxmox, picking the physical/bond interface instead of the bridge also covers VM and CT traffic.",
   "Hattaki diğer trafiği ölçüp yükleme hızını canlı ayarlar. Başka bir yedekleme yazılımı hattı kullandığında geri çekilir.": "Measures other traffic on the link and adjusts the upload speed live. Backs off when another backup tool uses the line.",
+  "Kota ölçülüyor, birkaç saniye sonra tekrar bak.": "Measuring quota, check again in a few seconds.",
+  "Kota okunamadı — doluluk hesaplanamıyor. Gereken alan yine de doğru.":
+    "Quota unavailable — usage cannot be projected. The required space is still correct.",
 };
