@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.6.0"
+SURUM = "1.6.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -115,6 +115,9 @@ GLOBAL_DEFAULTS = {
     "telegram_enabled": False,
     "telegram_token": "",         # BotFather'dan alinan jeton (SIR)
     "telegram_chat_id": "",       # kisi ya da grup id'si
+    # Mesajlarin basinda gorunecek ad. Bos = sunucunun kendi adi.
+    # Birden fazla Proxmox ayni sohbete yaziyorsa ayirt etmek icin.
+    "telegram_etiket": "",
     "failure_mail": True,         # systemd birimi cokunce mail at
     "failure_mail_to": "",        # bos ise ilk planin alicisi kullanilir
     "failure_smtp_profile": "",
@@ -2246,7 +2249,8 @@ def tg_test(chat=None):
     if not hedef: return {"ok": False, "msg": "sohbet (chat id) girilmemis"}
     veri = urllib.parse.urlencode({
         "chat_id": hedef,
-        "text": (f"<b>pve-gdrive-backup</b> test\n{os.uname().nodename} · v{SURUM}\n"
+        "text": (f"<b>{_html.escape(str(cfg().get('telegram_etiket') or os.uname().nodename))}"
+                 f"</b> · pve-gdrive-backup test\nv{SURUM}\n"
                  f"{now_str()}\n\nBildirimler buraya dusecek."),
         "parse_mode": "HTML"}).encode()
     try:
@@ -2262,9 +2266,16 @@ def tg_test(chat=None):
         return {"ok": False, "msg": str(e).replace(token, "<jeton>")[:180]}
 
 def tg_metin(baslik, satirlar, durum=None):
+    """Mesajin basinda SUNUCU ADI durur.
+
+    Birden fazla Proxmox ayni sohbete yazdiginda hangisinden geldigi belli
+    olmali; yoksa "yedek basarili" mesaji hangi makineye ait bilinmez.
+    telegram_etiket ile ozel bir ad verilebilir (ornek: 'ofis', 'kolokasyon')."""
     simge = {"basarili": "✅", "HATA": "🛑", "atlandi": "⏸"}.get(durum, "ℹ️")
+    etiket = str(cfg().get("telegram_etiket") or "").strip() or os.uname().nodename
     govde = "\n".join(f"{_html.escape(str(x))}" for x in satirlar if str(x).strip())
-    return f"{simge} <b>{_html.escape(baslik)}</b>\n<pre>{govde}</pre>"
+    return (f"{simge} <b>{_html.escape(etiket)}</b> · {_html.escape(baslik)}\n"
+            f"<pre>{govde}</pre>")
 
 def notify_wanted(p, status):
     return bool(p.get({"basarili": "notify_success", "HATA": "notify_failure",
@@ -3576,7 +3587,7 @@ def public_status():
                           "quota_cache_min", "dil",
                           "failure_mail", "failure_mail_to", "failure_smtp_profile",
                           "failure_mail_lines", "tick_uyari_dk", "butunluk_mail",
-                          "telegram_enabled", "telegram_chat_id",
+                          "telegram_enabled", "telegram_chat_id", "telegram_etiket",
                           "sse_enabled", "sse_watch_ms", "sse_heartbeat_sec", "sse_max_clients",
                           "sse_ping_sec",
                           "remember_enabled", "remember_days", "session_ip_bind",
@@ -4086,7 +4097,8 @@ def save_settings(data):
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
     if str(data.get("cookie_samesite", "")) in ("Lax", "Strict", "None"):
         C["cookie_samesite"] = data["cookie_samesite"]
-    for k in ("failure_mail_to", "failure_smtp_profile", "telegram_chat_id"):
+    for k in ("failure_mail_to", "failure_smtp_profile", "telegram_chat_id",
+              "telegram_etiket"):
         if k in data: C[k] = str(data[k] or "")
     if "telegram_enabled" in data: C["telegram_enabled"] = bool(data["telegram_enabled"])
     if "telegram_token" in data:
@@ -5194,6 +5206,11 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="errmsg" id="err-tgtoken"></div>
         <div class="eg" id="g-tgtokenhint">Bu alan <b>hiçbir zaman geri gösterilmez</b>.
           Boş bırakırsan mevcut jeton korunur.</div></div>
+      <label for="g-tget">Sunucu etiketi</label>
+      <div><input id="g-tget" placeholder="(boş = sunucu adı)">
+        <div class="eg">Mesajların başında görünür. <b>Birden fazla Proxmox aynı sohbete
+          yazıyorsa</b> hangisinden geldiğini ayırt etmek için ad ver:
+          <code>ofis</code>, <code>kolokasyon</code>, <code>yedek-dc</code>.</div></div>
       <label for="g-tgchat">Sohbet (chat id)</label>
       <div><input id="g-tgchat" placeholder="123456789">
         <div class="eg">Kişisel sohbette kendi id'in, grupta grup id'si (eksi ile başlar).
@@ -5895,6 +5912,8 @@ const EN = {
     "jeton girilmemiş": "no token",
     "önce bot jetonunu gir ve kaydet": "enter the bot token and save first",
     "önce Kaydet'e bas, sonra test et": "press Save first, then test",
+    "Sunucu etiketi": "Server label",
+    "(boş = sunucu adı)": "(empty = hostname)",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -8062,6 +8081,7 @@ function openSettings() {
         : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
     setChk("g-tg", Boolean(s.telegram_enabled));
     setVal("g-tgchat", String(s.telegram_chat_id || ""));
+    setVal("g-tget", String(s.telegram_etiket || ""));
     setVal("g-tgtoken", "");
     setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
     void pveLinkDurum();
@@ -8112,6 +8132,7 @@ async function saveSettings() {
         b.ui_pass = val("g-pass");
     b.telegram_enabled = chk("g-tg");
     b.telegram_chat_id = val("g-tgchat").trim();
+    b.telegram_etiket = val("g-tget").trim();
     // Jeton yalnizca YENI girildiyse gonderilir; bos ise sunucudaki korunur
     if (val("g-tgtoken").trim())
         b.telegram_token = val("g-tgtoken").trim();

@@ -110,7 +110,7 @@ interface Settings {
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;
   update_check: boolean; update_auto: boolean; update_url: string; update_backup_keep: number;
   allow_networks: string[];
-  telegram_enabled?: boolean; telegram_chat_id?: string;
+  telegram_enabled?: boolean; telegram_chat_id?: string; telegram_etiket?: string;
   failure_mail?: boolean; failure_mail_to?: string; tick_uyari_dk?: number;
   sse_enabled?: boolean; sse_watch_ms?: number;
   sse_heartbeat_sec?: number; sse_max_clients?: number;

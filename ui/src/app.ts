@@ -1562,6 +1562,7 @@ function openSettings(): void {
     : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
   setChk("g-tg", Boolean((s as unknown as Record<string, unknown>).telegram_enabled));
   setVal("g-tgchat", String((s as unknown as Record<string, unknown>).telegram_chat_id || ""));
+  setVal("g-tget", String((s as unknown as Record<string, unknown>).telegram_etiket || ""));
   setVal("g-tgtoken", "");
   setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
   void pveLinkDurum(); void oturumlariYukle();
@@ -1603,6 +1604,7 @@ async function saveSettings(): Promise<void> {
   if (val("g-pass")) b.ui_pass = val("g-pass");
   b.telegram_enabled = chk("g-tg");
   b.telegram_chat_id = val("g-tgchat").trim();
+  b.telegram_etiket = val("g-tget").trim();
   // Jeton yalnizca YENI girildiyse gonderilir; bos ise sunucudaki korunur
   if (val("g-tgtoken").trim()) b.telegram_token = val("g-tgtoken").trim();
   const j = await api("/api/settings/save", { method: "POST", body: JSON.stringify(b) });

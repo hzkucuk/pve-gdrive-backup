@@ -597,4 +597,6 @@ const EN: Record<string, string> = {
   "jeton girilmemiş": "no token",
   "önce bot jetonunu gir ve kaydet": "enter the bot token and save first",
   "önce Kaydet'e bas, sonra test et": "press Save first, then test",
+  "Sunucu etiketi": "Server label",
+  "(boş = sunucu adı)": "(empty = hostname)",
 };

@@ -889,6 +889,17 @@ def t_telegram():
               "plan kendi sohbetine yazabilmeli")
         dogru("chat_id=999" in cagri["veri"], "planin sohbeti kullanilmali")
 
+        # Birden fazla sunucu ayni sohbete yaziyorsa hangisi oldugu belli olmali
+        cagri.clear()
+        o.yamala(G.urllib.request, "urlopen", sahte)
+        G.tg_gonder(G.tg_metin("Yedek", ["x"], "basarili"))
+        dogru(os.uname().nodename in cagri["veri"] or
+              G.urllib.parse.quote(os.uname().nodename) in cagri["veri"],
+              "sunucu adi mesajda olmali")
+        c = G.cfg(); c["telegram_etiket"] = "ofis"; G.save_cfg(c)
+        cagri.clear(); G.tg_gonder(G.tg_metin("Yedek", ["x"], "basarili"))
+        dogru("ofis" in cagri["veri"], "etiket verilmisse o kullanilmali")
+
         # Mesaj siniri
         dogru(len(G.tg_kisalt("x" * 9000)) <= 3910, "uzun mesaj kirpilmali")
         dogru("…" in G.tg_kisalt("x" * 9000), "kirpma isareti olmali")
