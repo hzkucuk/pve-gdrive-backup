@@ -1169,16 +1169,115 @@ function kapasiteOner(): void {
 }
 
 /* ---------- klasor gezgini ---------- */
+interface Depo {
+  name: string; type: string; content: string; kapali: boolean;
+  kok_yol: string; path: string; exists: boolean; dumps: number;
+  yedek_alabilir: boolean; neden: string; duzeltme: string; pool?: string;
+  analiz?: YolAnaliz; dump_yok?: boolean; dugumler?: string[];
+}
+interface YolAnaliz {
+  yol: string; var: boolean; yazilabilir: boolean; fstype: string;
+  mountpoint: boolean; bos: number; toplam: number; kok_uzerinde: boolean;
+  dumps: number; uyarilar: string[]; baglama_noktasi?: string;
+}
+let DEPOLAR: Depo[] = [];
+
+/** Depo listesi. Yedek ALAMAYANLAR da gosterilir: sebebiyle ve mumkunse
+ *  tek tikla duzeltme dugmesiyle. Onceden sessizce eleniyorlardi ve ZFS
+ *  havuzu olan sunucuda liste bos kaliyordu. */
 async function loadStorages(): Promise<void> {
   try {
-    const j = await api<{ storages: { name: string; path: string; dumps: number }[] }>("/api/storages");
-    const s = j.storages || [];
-    setHtml("e-stor", s.length ? C("Proxmox depoları: ") + s.map((x) =>
-      "<a href=\"#\" onclick=\"setSrc('" + x.path + "');return false\" style=\"color:#58a6ff\">"
-      + esc(x.name) + " (" + x.dumps + ")</a>").join(" · ") : "");
-  } catch { /* yok say */ }
+    const j = await api<{ storages: Depo[] }>("/api/storages");
+    DEPOLAR = j.storages || [];
+  } catch { DEPOLAR = []; }
+  const kullanilir = DEPOLAR.filter((x) => x.yedek_alabilir);
+  const olmaz = DEPOLAR.filter((x) => !x.yedek_alabilir);
+
+  let h = "";
+  if (kullanilir.length) {
+    // 'backup' isaretli HER depo listelenir; dump/ klasoru henuz olmasa bile.
+    // Secebilmek icin bos alan ve mevcut yedek sayisi da gosterilir.
+    h += C("Proxmox depoları:") + "<ul style=\"margin:4px 0 0 16px\">"
+      + kullanilir.map((x) => {
+          const a2 = x.analiz;
+          const ek: string[] = [];
+          if (a2 && a2.toplam) ek.push(hb(a2.bos) + C(" boş"));
+          ek.push(x.dumps + C(" yedek"));
+          if (x.dump_yok) ek.push(C("dump klasörü ilk yedekte oluşur"));
+          if (a2 && a2.uyarilar && a2.uyarilar.length) {
+            ek.push('<span class="uyari-metin">⚠ '
+              + a2.uyarilar.map((u) => esc(C(u))).join(" · ") + "</span>");
+          }
+          return '<li><a href="#" onclick="setSrc(\'' + x.path
+            + '\');return false" style="color:#58a6ff">' + esc(x.name) + "</a> "
+            + '<span class="small">(' + esc(x.type) + ") — " + ek.join(" · ")
+            + "</span></li>";
+        }).join("") + "</ul>";
+  } else if (DEPOLAR.length) {
+    h += '<b class="uyari-metin">' + C("Yedek alabilen depo yok.") + "</b>";
+  }
+  if (olmaz.length) {
+    h += '<div class="eg" style="margin-top:6px">'
+      + C("Yedek alamayan depolar:") + "<ul style=\"margin:4px 0 0 16px\">"
+      + olmaz.map((x) => {
+          const dugme = x.duzeltme === "dataset"
+            ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
+              + '\',\'dataset\')">' + C("Yedek alanı oluştur") + "</button>"
+            : x.duzeltme === "icerik"
+            ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
+              + '\',\'icerik\')">' + C("Yedek içeriğini aç") + "</button>"
+            : "";
+          return "<li><b>" + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
+            + ")</span> — " + esc(x.neden) + dugme + "</li>";
+        }).join("") + "</ul></div>";
+  }
+  setHtml("e-stor", h);
+  void kaynakAnaliz();
 }
-function setSrc(path: string): void { setVal("e-src", path); markDirty(); }
+
+/** Secilen klasorun gercekte ne oldugunu soyler: dosya sistemi, bos alan,
+ *  bagli mi, kok diskte mi. "Neden olmuyor" sorusunu klasor duzeyinde cevaplar. */
+async function kaynakAnaliz(): Promise<void> {
+  const e = document.getElementById("e-srcanaliz");
+  if (!e) return;
+  const y = val("e-src").trim();
+  if (!y) { e.innerHTML = ""; return; }
+  try {
+    const a = await api<YolAnaliz>("/api/yol-analiz?path=" + encodeURIComponent(y));
+    const parcalar: string[] = [];
+    parcalar.push(a.var ? "✅ " + C("klasör var") : "⚠ " + C("klasör yok"));
+    if (a.fstype) parcalar.push(esc(a.fstype));
+    if (a.toplam) parcalar.push(hb(a.bos) + C(" boş") + " / " + hb(a.toplam));
+    if (a.dumps) parcalar.push(a.dumps + C(" yedek dosyası"));
+    if (a.baglama_noktasi) parcalar.push(C("bağlı: ") + esc(a.baglama_noktasi));
+    let h = '<div class="small">' + parcalar.join(" · ") + "</div>";
+    if (a.uyarilar && a.uyarilar.length) {
+      h += '<div class="small uyari-metin" style="margin-top:4px">⚠ '
+        + a.uyarilar.map((x) => esc(C(x))).join(" · ") + "</div>";
+    }
+    e.innerHTML = h;
+  } catch { e.innerHTML = ""; }
+}
+
+async function depoDuzelt(ad: string, eylem: string): Promise<void> {
+  const d = DEPOLAR.filter((x) => x.name === ad)[0];
+  const metin = eylem === "dataset"
+    ? C("Proxmox'ta şunlar yapılacak:") + "\n\n"
+      + "1. zfs create " + esc((d && d.pool) || ad) + "/yedek\n"
+      + "2. " + C("bu dataset 'dir' deposu olarak eklenecek (içerik: backup)") + "\n\n"
+      + C("Mevcut veriye dokunulmaz. Devam edilsin mi?")
+    : C("Bu deponun içerik listesine 'backup' eklenecek; mevcut içerikler korunur.")
+      + "\n" + C("Devam edilsin mi?");
+  if (!await onay(metin, C("Depo düzeltme"), C("Uygula"), C("Vazgeç"))) return;
+  const j = await api<{ ok: boolean; msg: string; yol?: string }>("/api/depo-duzelt",
+    { method: "POST", body: JSON.stringify({ ad, eylem }) });
+  flash(j.msg || "", j.ok);
+  if (j.ok && j.yol) { setVal("e-src", j.yol); markDirty(); }
+  await loadStorages();
+}
+function setSrc(path: string): void {
+  setVal("e-src", path); markDirty(); void kaynakAnaliz();
+}
 async function openBrowser(): Promise<void> { await goDir(val("e-src") || ""); openM("m-browse"); }
 async function goDir(p: string): Promise<void> {
   const j = await api<BrowseResult>("/api/browse?path=" + encodeURIComponent(p));

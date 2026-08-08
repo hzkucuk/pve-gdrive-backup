@@ -1190,6 +1190,113 @@ def _boru_ve_tty_ile_kos(betik, saniye=6):
     os.close(usta)
     return cikti.decode("utf-8", "replace"), sonuc
 
+@test("yedek alamayan depo SEBEBIYLE listelenir", "depolar")
+def t_depo_kesfi():
+    """ZFS havuzu olan sunucuda kaynak listesi bos kaliyordu: pve_storages()
+    'path' anahtari olmayan ve 'backup' icermeyen her depoyu sessizce
+    atiyordu. Kullanici neden secemedigini anlamiyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        cfgd = os.path.join(o.dizin, "pve"); os.makedirs(cfgd, exist_ok=True)
+        yedek_dizin = os.path.join(o.dizin, "depo"); os.makedirs(yedek_dizin + "/dump")
+        sahte = os.path.join(cfgd, "storage.cfg")
+        open(sahte, "w").write(
+            "zfspool: USB_4T_R1\n\tpool USB_4T_R1\n\tcontent images,rootdir\n\n"
+            "dir: local\n\tpath " + yedek_dizin + "\n\tcontent backup,iso\n\n"
+            "lvmthin: local-lvm\n\tcontent images,rootdir\n\n"
+            "dir: arsiv\n\tpath /tmp\n\tcontent iso\n")
+        # pve_storages sabit yolu okuyor; gecici olarak yonlendir
+        asil_open = open
+        def sahte_open(yol, *a, **k):
+            if yol == "/etc/pve/storage.cfg": yol = sahte
+            return asil_open(yol, *a, **k)
+        import builtins
+        o.yamala(builtins, "open", sahte_open)
+        d = {x["name"]: x for x in G.pve_storages()}
+        o.temizle_yama = None
+
+        esit(len(d), 4, f"HEPSI listelenmeli: {list(d)}")
+        dogru(d["local"]["yedek_alabilir"], "dir+backup yedek alabilmeli")
+        dogru(not d["USB_4T_R1"]["yedek_alabilir"], "zfspool yedek alamaz")
+        dogru("ZFS" in d["USB_4T_R1"]["neden"], f"sebep aciklanmali: {d['USB_4T_R1']['neden']}")
+        esit(d["USB_4T_R1"]["duzeltme"], "dataset", "cozum onerilmeli")
+        esit(d["USB_4T_R1"]["pool"], "USB_4T_R1", "havuz adi tasinmali")
+        dogru(not d["local-lvm"]["yedek_alabilir"], "lvmthin yedek alamaz")
+        dogru(d["local-lvm"]["neden"], "lvmthin icin de sebep olmali")
+        # dir ama backup icerigi yok -> duzeltilebilir
+        dogru(not d["arsiv"]["yedek_alabilir"], "backup icerigi yoksa alamaz")
+        esit(d["arsiv"]["duzeltme"], "icerik", "icerik eklenerek duzeltilebilmeli")
+        dogru("backup" in d["arsiv"]["neden"], "sebep icerigi isaret etmeli")
+        # Yedek alabilende yol analizi de olmali
+        dogru(d["local"].get("analiz"), "kullanilabilir depoda analiz olmali")
+
+        # 'backup' isaretli HER depo listelenmeli - dump/ klasoru henuz
+        # olmasa bile. Proxmox onu ilk yedekte olusturur; elemek yanlis olur.
+        bos_depo = os.path.join(o.dizin, "yenidepo"); os.makedirs(bos_depo)
+        open(sahte, "a").write("\ndir: yeni\n\tpath " + bos_depo + "\n\tcontent backup\n")
+        d2 = {x["name"]: x for x in G.pve_storages()}
+        dogru("yeni" in d2, "dump klasoru olmayan backup deposu da listelenmeli")
+        dogru(d2["yeni"]["yedek_alabilir"], "dump/ yoksa da kullanilabilir sayilmali")
+        dogru(d2["yeni"]["dump_yok"], "dump klasorunun olmadigi belirtilmeli")
+        dogru(d2["yeni"].get("analiz"), "kok yol analiz edilmeli")
+
+        # Baska duguме kisitli depo kullanilabilir gorunmemeli
+        open(sahte, "a").write("\ndir: baska-dugum\n\tpath " + bos_depo
+                               + "\n\tcontent backup\n\tnodes pve-uzak\n")
+        d3 = {x["name"]: x for x in G.pve_storages()}
+        dogru("baska-dugum" in d3, "kisitli depo da gorunmeli")
+        dogru(not d3["baska-dugum"]["yedek_alabilir"], "bu dugumde kullanilamaz")
+        dogru("dugum" in d3["baska-dugum"]["neden"], "sebep dugum kisiti olmali")
+    finally: o.temizle()
+
+@test("kaynak klasor analizi ortami dogru okur", "depolar")
+def t_yol_analiz():
+    o = Ortam()
+    try:
+        G = o.modul()
+        a = G.yol_analiz(o.dump)
+        dogru(a["var"] and a["yazilabilir"], "var olan klasor yazilabilir olmali")
+        if os.path.exists("/proc/mounts"):
+            dogru(a["fstype"], "Linux'ta dosya sistemi tipi okunmali")
+        dogru(a["toplam"] > 0 and a["bos"] >= 0, "alan bilgisi olmali")
+        esit(a["uyarilar"], [], f"saglikli klasorde uyari olmamali: {a['uyarilar']}")
+        y = G.yol_analiz(os.path.join(o.dizin, "boyle-bir-yer-yok"))
+        dogru(not y["var"], "olmayan klasor isaretlenmeli")
+        dogru(any("yok" in u for u in y["uyarilar"]), "sebep yazilmali")
+        # Kok dosya sistemindeki bir yol uyarmali
+        if os.path.exists("/proc/mounts"):
+            k = G.yol_analiz("/")
+            dogru(k["kok_uzerinde"], "kok tespit edilmeli")
+            dogru(any("KOK" in u or "kok" in u.lower() for u in k["uyarilar"]),
+                  f"kok diski doldurma uyarisi olmali: {k['uyarilar']}")
+    finally: o.temizle()
+
+@test("depo duzeltme mevcut icerigi korur", "depolar")
+def t_depo_duzelt():
+    """Icerik listesine backup EKLENIR; digerleri silinirse VM diskleri
+    o depoda gorunmez olur - yikici bir hata."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        cagri = {}
+        o.yamala(G.shutil, "which", lambda x: "/usr/sbin/" + x)
+        o.yamala(G, "pve_storages", lambda hepsi=True: [
+            {"name": "arsiv", "type": "dir", "content": "iso,vztmpl",
+             "yedek_alabilir": False, "duzeltme": "icerik", "pool": None}])
+        def sahte_run(cmd, **k):
+            cagri["cmd"] = cmd
+            class R: returncode = 0; stdout = ""; stderr = ""
+            return R()
+        o.yamala(G.subprocess, "run", sahte_run)
+        r = G.depo_duzelt("arsiv", "icerik")
+        dogru(r["ok"], r["msg"])
+        icerik = cagri["cmd"][cagri["cmd"].index("--content") + 1]
+        for k in ("iso", "vztmpl", "backup"):
+            dogru(k in icerik, f"'{k}' korunmali/eklenmeli: {icerik}")
+        dogru(not G.depo_duzelt("yok-boyle", "icerik")["ok"], "olmayan depo reddedilmeli")
+    finally: o.temizle()
+
 @test("kurulum sihirbazi ekranda GORUNUR", "kurulum")
 def t_sihirbaz_gorunur():
     """install.sh sihirbazi $( ) icinde calistirip son satirdaki JSON'u alir.

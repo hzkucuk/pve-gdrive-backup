@@ -2,6 +2,46 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.7.0 — 2026-08-08
+
+### Kaynak seçici artık ortamı anlıyor
+
+İkinci sunucuda `USB_4T_R1` adlı 4 TB'lık ZFS havuzu yedek için seçilemiyordu ve
+arayüz **sebebini söylemiyordu** — liste boş görünüyordu, o kadar.
+
+Sebep Proxmox'un kısıtı: vzdump çıktısı düz dosyadır, `zfspool` ise dataset/zvol
+sunar; içerik listesine `backup` eklenemez. Ama araç bunu açıklamak yerine
+depoyu sessizce eliyordu: `pve_storages()` `path` anahtarı olmayan **ve**
+`backup` içermeyen her depoyu atıyordu. ZFS havuzunun `path` anahtarı yok
+(`pool` var), yani iki kere görünmezdi.
+
+Artık:
+
+- **`backup` işaretli her depo listelenir** — `dump/` klasörü henüz olmasa bile
+  (Proxmox onu ilk yedekte oluşturur; elemek yanlıştı). Boş alan ve mevcut yedek
+  sayısı da gösterilir.
+- **Yedek alamayanlar da listelenir, sebebiyle**: "ZFS havuzu dosya değil
+  dataset/zvol sunar", "LVM-Thin blok aygıt sunar", "içerik listesinde backup yok".
+- **Tek tıkla düzeltme.** ZFS havuzunda *Yedek alanı oluştur* → `zfs create
+  <havuz>/yedek` + o dataset'i `dir` deposu olarak ekler (`--is_mountpoint yes`,
+  içerik `backup`). İçeriğinde `backup` olmayan dizin deposunda *Yedek içeriğini
+  aç* → mevcut içerikleri **koruyarak** `backup` ekler.
+- **`nodes` kısıtı okunuyor.** `storage.cfg` küme genelindedir; başka düğüme
+  kısıtlı bir depo bu makinede yoktur, kullanılabilir göstermek yanıltıcıydı.
+- **Klasör analizi**: seçilen yol için dosya sistemi, bağlama noktası, boş alan,
+  yazılabilirlik ve mevcut yedek sayısı. Kök dosya sistemindeyse uyarır —
+  host diskini doldurma tuzağı.
+
+`--is_mountpoint yes` bilinçli: havuz bağlı değilse Proxmox kök diske yazmaya
+başlamaz, hata verir.
+
+### Kurulum çıktısı
+
+`proxmox-link.sh` artık arayüzde (*Ayarlar → Bakım ve taşıma*); çıktı önce onu
+söylüyor. Kaynak klasör görünmezse ne yapılacağı da yazılı.
+
+Test: 92 → 96. Yeni `depolar` grubu.
+
 ## 1.6.0 — 2026-08-08
 
 ### Telegram bildirimi

@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.6.2"
+SURUM = "1.7.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -2904,30 +2904,214 @@ def remote_delete(name):
     return {"ok": True, "msg": f"'{name}' silindi (Drive'daki dosyalar duruyor)"}
 
 # ---------- PROXMOX KESFI ----------
-def pve_storages():
-    """/etc/pve/storage.cfg icinden yedek alabilen depolari ve dump klasorlerini cikarir."""
-    out, cur = [], None
+# vzdump ciktisi DUZ DOSYADIR. Bu yuzden yalnizca dosya sistemi sunan depo
+# tipleri yedek tutabilir. ZFS havuzu (zfspool) dataset/zvol sunar, dosya degil;
+# Proxmox onun icerik listesine "backup" eklemene izin vermez. Cozum, havuzun
+# uzerindeki bir dataset'i "dir" deposu olarak tanitmaktir.
+YEDEK_ALABILEN_TIPLER = {"dir", "nfs", "cifs", "pbs", "glusterfs", "cephfs"}
+YEDEK_ALAMAYAN_SEBEP = {
+    "zfspool": "ZFS havuzu dosya degil dataset/zvol sunar; Proxmox buna yedek yazamaz.",
+    "lvm": "LVM birim grubu blok aygit sunar; yedek dosyasi yazilamaz.",
+    "lvmthin": "LVM-Thin blok aygit sunar; yedek dosyasi yazilamaz.",
+    "rbd": "Ceph RBD blok aygit sunar; yedek dosyasi yazilamaz.",
+    "iscsi": "iSCSI blok aygit sunar; yedek dosyasi yazilamaz.",
+    "zfs": "iSCSI uzerinden ZFS blok aygit sunar; yedek dosyasi yazilamaz.",
+}
+
+def _mount_tablosu():
+    """(bagli_yol -> dosya_sistemi_tipi). En uzun eslesme kazanir."""
+    t = {}
+    try:
+        with open("/proc/mounts") as f:
+            for satir in f:
+                p = satir.split()
+                if len(p) >= 3: t[p[1]] = p[2]
+    except Exception as e: yut("_mount_tablosu", e)
+    return t
+
+def yol_analiz(yol):
+    """Bir kaynak klasoru hakkinda karar vermek icin gereken her sey.
+
+    Kullaniciya 'burasi olmaz' demek yetmiyor; NEDEN olmadigini ve yerine ne
+    yapmasi gerektigini soyleyebilmek icin dosya sistemi, bagli olup olmadigi
+    ve bos alan da olculur."""
+    y = os.path.abspath(str(yol or ""))
+    bilgi = {"yol": y, "var": os.path.isdir(y), "yazilabilir": False, "fstype": "",
+             "mountpoint": False, "bos": 0, "toplam": 0, "kok_uzerinde": False,
+             "dumps": 0, "uyarilar": []}
+    tablo = _mount_tablosu()
+    # Yolu kapsayan en uzun bagli nokta
+    en_iyi = ""
+    for m in tablo:
+        if (y == m or y.startswith(m.rstrip("/") + "/")) and len(m) > len(en_iyi): en_iyi = m
+    bilgi["fstype"] = tablo.get(en_iyi, "")
+    if not bilgi["fstype"] and bilgi["var"]:
+        # /proc/mounts yoksa (Linux disi) en azindan bir sey soyle
+        try: bilgi["fstype"] = getattr(os.statvfs(y), "f_fsid", "") and "" or ""
+        except Exception: pass
+    bilgi["baglama_noktasi"] = en_iyi
+    bilgi["mountpoint"] = os.path.ismount(y) if bilgi["var"] else False
+    bilgi["kok_uzerinde"] = en_iyi == "/"
+    if bilgi["var"]:
+        bilgi["yazilabilir"] = os.access(y, os.W_OK)
+        bilgi["dumps"] = count_dumps(y)
+        try:
+            st = os.statvfs(y)
+            bilgi["bos"] = st.f_bavail * st.f_frsize
+            bilgi["toplam"] = st.f_blocks * st.f_frsize
+        except Exception as e: yut("yol_analiz", e)
+        if not bilgi["yazilabilir"]: bilgi["uyarilar"].append("klasor yazilabilir degil")
+    else:
+        bilgi["uyarilar"].append("klasor yok")
+    if bilgi["kok_uzerinde"]:
+        bilgi["uyarilar"].append(
+            "bu klasor KOK dosya sisteminde; yedekler host diskini doldurabilir")
+    return bilgi
+
+def zfs_havuzlari():
+    """Yedek icin kullanilabilecek ZFS dataset'leri (dizin deposu yapilabilir)."""
+    if not shutil.which("zfs"): return []
+    try:
+        r = subprocess.run(["zfs", "list", "-H", "-o", "name,avail,mountpoint", "-t",
+                            "filesystem"], capture_output=True, text=True, timeout=20)
+        if r.returncode != 0: return []
+    except Exception as e:
+        yut("zfs_havuzlari", e); return []
+    out = []
+    for satir in r.stdout.strip().split("\n"):
+        p = satir.split("\t")
+        if len(p) < 3 or p[2] in ("-", "none", "legacy"): continue
+        out.append({"ad": p[0], "bos_h": p[1], "yol": p[2]})
+    return out
+
+def pve_storages(hepsi=True):
+    """Proxmox depolari. hepsi=True ise yedek alamayanlar da SEBEBIYLE dondurulur.
+
+    Once yalnizca yedek alabilenler donuyordu; ZFS havuzu olan bir sunucuda
+    liste bos kaliyor, kullanici neden secemedigini anlamiyordu."""
+    ham, cur = [], None
     try:
         with open("/etc/pve/storage.cfg") as f:
             for line in f:
                 m = re.match(r"^(\w+):\s*(\S+)", line)
                 if m:
-                    cur = {"type": m.group(1), "name": m.group(2), "path": None, "content": ""}
-                    out.append(cur)
+                    cur = {"type": m.group(1), "name": m.group(2), "path": None,
+                           "content": "", "pool": None, "disable": False, "nodes": ""}
+                    ham.append(cur)
                 elif cur is not None:
-                    m2 = re.match(r"\s+(\w+)\s+(.*)", line)
+                    m2 = re.match(r"\s+(\w+)\s*(.*)", line)
                     if m2:
                         k, v = m2.group(1), m2.group(2).strip()
-                        if k in ("path", "content", "export"): cur[k] = v
+                        if k in ("path", "content", "export", "pool"): cur[k] = v
+                        elif k == "nodes": cur["nodes"] = v
+                        elif k == "disable": cur["disable"] = True
     except Exception:
         return []
     res = []
-    for s in out:
-        if not s.get("path") or "backup" not in (s.get("content") or ""): continue
-        d = os.path.join(s["path"], "dump")
-        res.append({"name": s["name"], "type": s["type"], "path": d,
-                    "exists": os.path.isdir(d), "dumps": count_dumps(d)})
+    for st in ham:
+        tip = st["type"]; icerik = st.get("content") or ""
+        tip_uygun = tip in YEDEK_ALABILEN_TIPLER
+        icerik_uygun = "backup" in icerik
+        yol = st.get("path")
+        dump = os.path.join(yol, "dump") if yol else ""
+        kayit = {"name": st["name"], "type": tip, "content": icerik,
+                 "kapali": st["disable"], "kok_yol": yol or "", "path": dump,
+                 "exists": bool(dump) and os.path.isdir(dump),
+                 "dumps": count_dumps(dump) if dump else 0,
+                 "yedek_alabilir": bool(tip_uygun and icerik_uygun and yol),
+                 "neden": "", "duzeltme": ""}
+        # storage.cfg kume genelindedir: baska dugume kisitli bir depo
+        # burada YOK demektir, listeye kullanilabilir diye koymak yaniltir.
+        dugum = os.uname().nodename
+        dugumler = [x.strip() for x in (st.get("nodes") or "").split(",") if x.strip()]
+        kayit["dugumler"] = dugumler
+        if dugumler and dugum not in dugumler:
+            kayit["yedek_alabilir"] = False
+            kayit["neden"] = f"bu depo yalnizca su dugumlerde: {', '.join(dugumler)}"
+        elif st["disable"]:
+            kayit["yedek_alabilir"] = False
+            kayit["neden"] = "depo kapali"
+        elif not tip_uygun:
+            kayit["neden"] = YEDEK_ALAMAYAN_SEBEP.get(
+                tip, f"'{tip}' tipi yedek dosyasi tutamaz")
+            if tip == "zfspool":
+                kayit["duzeltme"] = "dataset"      # dataset + dizin deposu olustur
+                kayit["pool"] = st.get("pool") or st["name"]
+        elif not icerik_uygun:
+            kayit["neden"] = "depo tanimli ama icerik listesinde 'backup' yok"
+            kayit["duzeltme"] = "icerik"           # pvesm set ... --content ...,backup
+        elif not yol:
+            kayit["neden"] = "depo yolu okunamadi"
+        if kayit["yedek_alabilir"]:
+            # dump/ klasoru henuz olmayabilir: ilk yedekte Proxmox olusturur.
+            # Bu depoyu listeden ELEMEK yanlis olur; kok yolu analiz et.
+            kayit["analiz"] = yol_analiz(dump if os.path.isdir(dump) else yol)
+            kayit["dump_yok"] = not os.path.isdir(dump)
+        res.append(kayit)
     return res
+
+def depo_duzelt(ad, eylem, dataset=None):
+    """Yedek alamayan bir depoyu kullanilabilir hale getirir.
+
+    Proxmox'un depo yapilandirmasini degistirir; bu yuzden yalnizca acikca
+    istendiginde ve ne yapilacagi kullaniciya gosterildikten sonra cagrilir."""
+    if not shutil.which("pvesm"):
+        return {"ok": False, "msg": "pvesm yok (Proxmox host'u degil)"}
+    depolar = {d["name"]: d for d in pve_storages()}
+    d = depolar.get(ad)
+    if not d: return {"ok": False, "msg": f"'{ad}' diye bir depo yok"}
+
+    if eylem == "icerik":
+        # Mevcut icerige backup EKLENIR; digerleri korunur (silmek VM'leri bozardi)
+        mevcut = [x.strip() for x in (d["content"] or "").split(",") if x.strip()]
+        if "backup" in mevcut:
+            return {"ok": True, "msg": "zaten yedek alabiliyor"}
+        yeni = ",".join(mevcut + ["backup"])
+        r = subprocess.run(["pvesm", "set", ad, "--content", yeni],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return {"ok": False, "msg": (r.stderr or "").strip()[:200]}
+        log(f"depo icerigine backup eklendi: {ad} -> {yeni}")
+        return {"ok": True, "msg": f"'{ad}' artik yedek alabiliyor ({yeni})"}
+
+    if eylem == "dataset":
+        havuz = d.get("pool") or ad
+        ds = str(dataset or f"{havuz}/yedek").strip().strip("/")
+        if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.:/-]*$", ds):
+            return {"ok": False, "msg": "gecersiz dataset adi"}
+        if not ds.startswith(havuz + "/"):
+            return {"ok": False, "msg": f"dataset '{havuz}/' ile baslamali"}
+        yeni_ad = re.sub(r"[^A-Za-z0-9_-]", "-", ds.replace("/", "-"))[:32]
+        # 1) dataset (varsa dokunma)
+        var = subprocess.run(["zfs", "list", "-H", "-o", "name", ds],
+                             capture_output=True, text=True, timeout=20).returncode == 0
+        if not var:
+            r = subprocess.run(["zfs", "create", "-p", ds],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return {"ok": False, "msg": "dataset olusturulamadi: "
+                                            + (r.stderr or "").strip()[:180]}
+            log(f"zfs dataset olusturuldu: {ds}")
+        # 2) baglama noktasini ogren
+        mp = subprocess.run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds],
+                            capture_output=True, text=True, timeout=20).stdout.strip()
+        if not mp or mp in ("-", "none", "legacy"):
+            return {"ok": False, "msg": f"dataset baglanmamis (mountpoint={mp or 'yok'})"}
+        # 3) dizin deposu olarak tanit
+        if yeni_ad in depolar:
+            return {"ok": True, "msg": f"'{yeni_ad}' deposu zaten var: {mp}",
+                    "yol": os.path.join(mp, "dump")}
+        r = subprocess.run(["pvesm", "add", "dir", yeni_ad, "--path", mp,
+                            "--content", "backup", "--is_mountpoint", "yes"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return {"ok": False, "msg": "depo eklenemedi: " + (r.stderr or "").strip()[:180]}
+        log(f"dizin deposu eklendi: {yeni_ad} -> {mp} (dataset {ds})")
+        return {"ok": True, "yol": os.path.join(mp, "dump"),
+                "msg": f"'{yeni_ad}' eklendi → {mp}. Kaynak klasor olarak "
+                       f"{os.path.join(mp, 'dump')} kullanilabilir."}
+
+    return {"ok": False, "msg": "bilinmeyen eylem"}
 
 def count_dumps(path):
     try: return len([x for x in os.listdir(path) if dump_re().match(x)])
@@ -3887,7 +4071,9 @@ class H(BaseHTTPRequestHandler):
                                    for k, v in sorted(ifs.items())
                                    if not k.startswith(SANAL_ONEK)]})
         elif p == "/api/storages":
-            self._json({"storages": pve_storages()})
+            self._json({"storages": pve_storages(), "zfs": zfs_havuzlari()})
+        elif p == "/api/yol-analiz":
+            self._json(yol_analiz(unquote(q.get("path", [""])[0])))
         else:
             self._send(404, "text/plain; charset=utf-8", "yok")
 
@@ -3927,6 +4113,9 @@ class H(BaseHTTPRequestHandler):
             self._json(ice_aktar(veri, kip))
         elif path == "/api/telegram/test":
             self._json(tg_test(self._body().get("chat")))
+        elif path == "/api/depo-duzelt":
+            b2 = self._body()
+            self._json(depo_duzelt(b2.get("ad", ""), b2.get("eylem", ""), b2.get("dataset")))
         elif path == "/api/proxmox-link":
             self._json(proxmox_link_yaz(self._body().get("ekle", True)))
         elif path == "/api/oturum/kapat":
@@ -4839,7 +5028,8 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><div class="inline"><input id="e-src" placeholder="/var/lib/vz/dump">
         <button class="sm" onclick="openBrowser()">📁 Gözat</button></div>
         <div class="errmsg" id="err-src"></div>
-        <div class="hint" id="e-srchint"></div><div id="e-stor" class="hint"></div>
+        <div class="hint" id="e-srchint"></div>
+        <div id="e-srcanaliz" style="margin-top:4px"></div><div id="e-stor" class="hint"></div>
         <div class="eg">Depo <code>local</code> → <code>/var/lib/vz/dump</code> · Depo <code>Usb1Tb</code> → <code>/mnt/pve/Usb1Tb/dump</code></div></div></div>
   </fieldset>
 </div>
@@ -5914,6 +6104,27 @@ const EN = {
     "önce Kaydet'e bas, sonra test et": "press Save first, then test",
     "Sunucu etiketi": "Server label",
     "(boş = sunucu adı)": "(empty = hostname)",
+    "Yedek alabilen depo yok.": "No storage can hold backups.",
+    "Yedek alamayan depolar:": "Storages that cannot hold backups:",
+    "Yedek alanı oluştur": "Create backup area",
+    "Yedek içeriğini aç": "Enable backup content",
+    "Proxmox depoları:": "Proxmox storages:",
+    " boş": " free",
+    "dump klasörü ilk yedekte oluşur": "dump folder is created on first backup",
+    "klasör var": "folder exists",
+    "klasör yok": "folder missing",
+    " yedek dosyası": " backup files",
+    "bağlı: ": "mounted: ",
+    "klasor yok": "folder does not exist",
+    "klasor yazilabilir degil": "folder is not writable",
+    "bu klasor KOK dosya sisteminde; yedekler host diskini doldurabilir": "this folder is on the ROOT filesystem; backups could fill the host disk",
+    "Proxmox'ta şunlar yapılacak:": "The following will be done on Proxmox:",
+    "bu dataset 'dir' deposu olarak eklenecek (içerik: backup)": "this dataset will be added as a 'dir' storage (content: backup)",
+    "Mevcut veriye dokunulmaz. Devam edilsin mi?": "Existing data is not touched. Continue?",
+    "Bu deponun içerik listesine 'backup' eklenecek; mevcut içerikler korunur.": "'backup' will be added to this storage's content list; existing content is kept.",
+    "Devam edilsin mi?": "Continue?",
+    "Depo düzeltme": "Fix storage",
+    "Uygula": "Apply",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -7598,17 +7809,122 @@ function kapasiteOner() {
     kapasiteCiz();
     flash(KAP.oneri + C(" gün uygulandı"), true);
 }
-/* ---------- klasor gezgini ---------- */
+let DEPOLAR = [];
+/** Depo listesi. Yedek ALAMAYANLAR da gosterilir: sebebiyle ve mumkunse
+ *  tek tikla duzeltme dugmesiyle. Onceden sessizce eleniyorlardi ve ZFS
+ *  havuzu olan sunucuda liste bos kaliyordu. */
 async function loadStorages() {
     try {
         const j = await api("/api/storages");
-        const s = j.storages || [];
-        setHtml("e-stor", s.length ? C("Proxmox depoları: ") + s.map((x) => "<a href=\"#\" onclick=\"setSrc('" + x.path + "');return false\" style=\"color:#58a6ff\">"
-            + esc(x.name) + " (" + x.dumps + ")</a>").join(" · ") : "");
+        DEPOLAR = j.storages || [];
     }
-    catch { /* yok say */ }
+    catch {
+        DEPOLAR = [];
+    }
+    const kullanilir = DEPOLAR.filter((x) => x.yedek_alabilir);
+    const olmaz = DEPOLAR.filter((x) => !x.yedek_alabilir);
+    let h = "";
+    if (kullanilir.length) {
+        // 'backup' isaretli HER depo listelenir; dump/ klasoru henuz olmasa bile.
+        // Secebilmek icin bos alan ve mevcut yedek sayisi da gosterilir.
+        h += C("Proxmox depoları:") + "<ul style=\"margin:4px 0 0 16px\">"
+            + kullanilir.map((x) => {
+                const a2 = x.analiz;
+                const ek = [];
+                if (a2 && a2.toplam)
+                    ek.push(hb(a2.bos) + C(" boş"));
+                ek.push(x.dumps + C(" yedek"));
+                if (x.dump_yok)
+                    ek.push(C("dump klasörü ilk yedekte oluşur"));
+                if (a2 && a2.uyarilar && a2.uyarilar.length) {
+                    ek.push('<span class="uyari-metin">⚠ '
+                        + a2.uyarilar.map((u) => esc(C(u))).join(" · ") + "</span>");
+                }
+                return '<li><a href="#" onclick="setSrc(\'' + x.path
+                    + '\');return false" style="color:#58a6ff">' + esc(x.name) + "</a> "
+                    + '<span class="small">(' + esc(x.type) + ") — " + ek.join(" · ")
+                    + "</span></li>";
+            }).join("") + "</ul>";
+    }
+    else if (DEPOLAR.length) {
+        h += '<b class="uyari-metin">' + C("Yedek alabilen depo yok.") + "</b>";
+    }
+    if (olmaz.length) {
+        h += '<div class="eg" style="margin-top:6px">'
+            + C("Yedek alamayan depolar:") + "<ul style=\"margin:4px 0 0 16px\">"
+            + olmaz.map((x) => {
+                const dugme = x.duzeltme === "dataset"
+                    ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
+                        + '\',\'dataset\')">' + C("Yedek alanı oluştur") + "</button>"
+                    : x.duzeltme === "icerik"
+                        ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
+                            + '\',\'icerik\')">' + C("Yedek içeriğini aç") + "</button>"
+                        : "";
+                return "<li><b>" + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
+                    + ")</span> — " + esc(x.neden) + dugme + "</li>";
+            }).join("") + "</ul></div>";
+    }
+    setHtml("e-stor", h);
+    void kaynakAnaliz();
 }
-function setSrc(path) { setVal("e-src", path); markDirty(); }
+/** Secilen klasorun gercekte ne oldugunu soyler: dosya sistemi, bos alan,
+ *  bagli mi, kok diskte mi. "Neden olmuyor" sorusunu klasor duzeyinde cevaplar. */
+async function kaynakAnaliz() {
+    const e = document.getElementById("e-srcanaliz");
+    if (!e)
+        return;
+    const y = val("e-src").trim();
+    if (!y) {
+        e.innerHTML = "";
+        return;
+    }
+    try {
+        const a = await api("/api/yol-analiz?path=" + encodeURIComponent(y));
+        const parcalar = [];
+        parcalar.push(a.var ? "✅ " + C("klasör var") : "⚠ " + C("klasör yok"));
+        if (a.fstype)
+            parcalar.push(esc(a.fstype));
+        if (a.toplam)
+            parcalar.push(hb(a.bos) + C(" boş") + " / " + hb(a.toplam));
+        if (a.dumps)
+            parcalar.push(a.dumps + C(" yedek dosyası"));
+        if (a.baglama_noktasi)
+            parcalar.push(C("bağlı: ") + esc(a.baglama_noktasi));
+        let h = '<div class="small">' + parcalar.join(" · ") + "</div>";
+        if (a.uyarilar && a.uyarilar.length) {
+            h += '<div class="small uyari-metin" style="margin-top:4px">⚠ '
+                + a.uyarilar.map((x) => esc(C(x))).join(" · ") + "</div>";
+        }
+        e.innerHTML = h;
+    }
+    catch {
+        e.innerHTML = "";
+    }
+}
+async function depoDuzelt(ad, eylem) {
+    const d = DEPOLAR.filter((x) => x.name === ad)[0];
+    const metin = eylem === "dataset"
+        ? C("Proxmox'ta şunlar yapılacak:") + "\n\n"
+            + "1. zfs create " + esc((d && d.pool) || ad) + "/yedek\n"
+            + "2. " + C("bu dataset 'dir' deposu olarak eklenecek (içerik: backup)") + "\n\n"
+            + C("Mevcut veriye dokunulmaz. Devam edilsin mi?")
+        : C("Bu deponun içerik listesine 'backup' eklenecek; mevcut içerikler korunur.")
+            + "\n" + C("Devam edilsin mi?");
+    if (!await onay(metin, C("Depo düzeltme"), C("Uygula"), C("Vazgeç")))
+        return;
+    const j = await api("/api/depo-duzelt", { method: "POST", body: JSON.stringify({ ad, eylem }) });
+    flash(j.msg || "", j.ok);
+    if (j.ok && j.yol) {
+        setVal("e-src", j.yol);
+        markDirty();
+    }
+    await loadStorages();
+}
+function setSrc(path) {
+    setVal("e-src", path);
+    markDirty();
+    void kaynakAnaliz();
+}
 async function openBrowser() { await goDir(val("e-src") || ""); openM("m-browse"); }
 async function goDir(p) {
     const j = await api("/api/browse?path=" + encodeURIComponent(p));

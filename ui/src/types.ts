@@ -146,3 +146,5 @@ interface ApiResult { ok: boolean; msg?: string; id?: string; name?: string; [k:
 interface BrowseResult { path: string; parent?: string; roots?: string[]; dirs?: {name: string; path: string; dumps: number}[]; dumps: number; error?: string }
 interface AuthStart extends ApiResult { url?: string; tunnel?: string }
 interface AuthStatus extends ApiResult { ready?: boolean; waiting?: boolean; url?: string | null }
+
+interface YolAnalizEk { baglama_noktasi?: string }
