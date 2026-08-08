@@ -1580,11 +1580,13 @@ async function pveLinkDurum(): Promise<void> {
   const e = document.getElementById("s-pvelink");
   if (!e) return;
   try {
-    const j = await api<{ ok: boolean; var: boolean; url: string; msg: string }>(
-      "/api/proxmox-link");
+    const j = await api<{ ok: boolean; var: boolean; url: string; ozet: string;
+                          msg: string }>("/api/proxmox-link");
     e.innerHTML = !j.ok ? esc(C("Durum okunamadı: ") + (j.msg || ""))
-      : j.var ? "✅ " + esc(C("Link ekli: ")) + "<code>" + esc(j.url) + "</code>"
-              : "○ " + esc(C("Link yok. Eklenecek adres: ")) + "<code>" + esc(j.url) + "</code>";
+      : (j.var ? "✅ " : "○ ") + "<code>" + esc(j.url) + "</code>"
+        + '<div class="small" style="margin-top:3px">' + esc(j.ozet || "") + "</div>"
+        + '<div class="small">'
+        + esc(C("İki yere de yazılır: Datacenter → Notes ve Node → Notes.")) + "</div>";
   } catch { e.textContent = C("durum okunamadı"); }
 }
 

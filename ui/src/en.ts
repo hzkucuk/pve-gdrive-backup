@@ -620,4 +620,5 @@ const EN: Record<string, string> = {
   "Devam edilsin mi?": "Continue?",
   "Depo düzeltme": "Fix storage",
   "Uygula": "Apply",
+  "İki yere de yazılır: Datacenter → Notes ve Node → Notes.": "Written to both: Datacenter → Notes and Node → Notes.",
 };

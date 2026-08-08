@@ -1190,6 +1190,37 @@ def _boru_ve_tty_ile_kos(betik, saniye=6):
     os.close(usta)
     return cikti.decode("utf-8", "replace"), sonuc
 
+@test("proxmox linki iki not alanina da yazilir", "depolar")
+def t_proxmox_link():
+    """Proxmox'ta iki ayri Notes var: Datacenter (/cluster/options) ve
+    Node (/nodes/<ad>/config). Yalnizca birine yazilinca kullanici otekine
+    bakip 'eklenmemis' saniyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        o.yamala(G.shutil, "which", lambda x: "/usr/bin/" + x)
+        yazilan = []
+        def sahte(cmd, **k):
+            class R: returncode = 0; stderr = ""; stdout = '{"description":""}'
+            if cmd[1] == "set": yazilan.append((cmd[2], cmd[4]))
+            return R()
+        o.yamala(G.subprocess, "run", sahte)
+        r = G.proxmox_link_yaz(True)
+        dogru(r["ok"], r["msg"])
+        uclar = [u for u, _ in yazilan]
+        dogru(any(u == "/cluster/options" for u in uclar), f"Datacenter'a yazilmali: {uclar}")
+        dogru(any(u.startswith("/nodes/") for u in uclar), f"Node'a da yazilmali: {uclar}")
+        for _, metin in yazilan:
+            dogru(G.PVE_LINK_IM in metin, "isaretleyici konmali (sonra temizlemek icin)")
+            dogru("Google Drive Yedek" in metin, "link metni olmali")
+        # Kaldirma ikisinden de silmeli
+        yazilan.clear()
+        G.proxmox_link_yaz(False)
+        esit(len(yazilan), 2, "iki uctan da kaldirilmali")
+        for _, metin in yazilan:
+            dogru(G.PVE_LINK_IM not in metin, "link temizlenmeli")
+    finally: o.temizle()
+
 @test("yedek alamayan depo SEBEBIYLE listelenir", "depolar")
 def t_depo_kesfi():
     """ZFS havuzu olan sunucuda kaynak listesi bos kaliyordu: pve_storages()

@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.7.0"
+SURUM = "1.7.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -4056,8 +4056,9 @@ class H(BaseHTTPRequestHandler):
                                     ("remember_enabled", "remember_days",
                                      "session_ip_bind", "cookie_samesite")}})
         elif p == "/api/proxmox-link":
-            _m, var, hata = proxmox_link_oku()
-            self._json({"ok": not hata, "var": var, "url": proxmox_link_url(), "msg": hata})
+            ozet, var, hata = proxmox_link_oku()
+            self._json({"ok": ozet is not None, "var": var, "url": proxmox_link_url(),
+                        "ozet": ozet or "", "msg": hata})
         elif p == "/api/saglayicilar":
             self._json({"saglayicilar": saglayici_listesi()})
         elif p == "/api/ifaces":
@@ -4589,41 +4590,67 @@ def proxmox_link_url():
 
 PVE_LINK_IM = "<!-- pve-gdrive -->"
 
-def proxmox_link_oku():
-    """Datacenter Notes'taki mevcut metin ve linkimiz orada mi."""
-    if not shutil.which("pvesh"): return None, False, "pvesh yok (Proxmox host'u degil)"
+# Proxmox'ta IKI AYRI not alani var ve kolayca karistiriliyor:
+#   Datacenter -> Notes  = /cluster/options      (kume geneli)
+#   Node -> Notes        = /nodes/<ad>/config    (yalnizca bu makine)
+# Kullanici linki node'un altinda aradi; ikisine birden yazmak en dogrusu.
+PVE_NOT_UCLARI = [("/cluster/options", "Datacenter → Notes"),
+                  ("/nodes/{node}/config", "Node → Notes")]
+
+def _pve_not_uclari():
+    d = os.uname().nodename
+    return [(u.replace("{node}", d), ad) for u, ad in PVE_NOT_UCLARI]
+
+def _pve_not_oku(uc):
     try:
-        r = subprocess.run(["pvesh", "get", "/cluster/options", "--output-format", "json"],
+        r = subprocess.run(["pvesh", "get", uc, "--output-format", "json"],
                            capture_output=True, text=True, timeout=20)
-        if r.returncode != 0:
-            return None, False, (r.stderr or "pvesh okunamadi").strip()[:200]
-        return json.loads(r.stdout or "{}").get("description", "") or "", \
-               PVE_LINK_IM in (json.loads(r.stdout or "{}").get("description") or ""), ""
+        if r.returncode != 0: return None, (r.stderr or "okunamadi").strip()[:150]
+        return json.loads(r.stdout or "{}").get("description") or "", ""
     except Exception as e:
-        return None, False, str(e)[:200]
+        return None, str(e)[:150]
+
+def proxmox_link_oku():
+    """(ozet_metin, herhangi_birinde_var_mi, hata). Iki not alanina da bakar."""
+    if not shutil.which("pvesh"): return None, False, "pvesh yok (Proxmox host'u degil)"
+    bulundu, hatalar, herhangi = [], [], False
+    for uc, ad in _pve_not_uclari():
+        metin, hata = _pve_not_oku(uc)
+        if metin is None: hatalar.append(f"{ad}: {hata}"); continue
+        v = PVE_LINK_IM in metin
+        herhangi = herhangi or v
+        bulundu.append(f"{ad}: {'ekli' if v else 'yok'}")
+    if not bulundu: return None, False, "; ".join(hatalar)
+    return " · ".join(bulundu), herhangi, "; ".join(hatalar)
 
 def proxmox_link_yaz(ekle=True):
-    """Proxmox Datacenter Notes'a arayuz linki ekler/kaldirir.
+    """Arayuz linkini HER IKI not alanina ekler/kaldirir.
 
-    Proxmox'un hicbir dosyasina dokunulmaz, yalnizca not alani guncellenir -
+    Proxmox'un hicbir dosyasina dokunulmaz, yalnizca not alanlari guncellenir -
     surum yukseltmelerinde kaybolmaz ve geri alinmasi tek tiktir."""
-    mevcut, var, hata = proxmox_link_oku()
-    if mevcut is None: return {"ok": False, "msg": hata}
-    satirlar = [x for x in (mevcut or "").split("\n") if PVE_LINK_IM not in x]
-    if ekle:
-        url = proxmox_link_url()
-        satirlar.append(f"{PVE_LINK_IM} [🗄️ Google Drive Yedek]({url})")
-    yeni = "\n".join(x for x in satirlar if x.strip())
-    try:
-        r = subprocess.run(["pvesh", "set", "/cluster/options", "--description", yeni],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode != 0:
-            return {"ok": False, "msg": (r.stderr or "yazilamadi").strip()[:200]}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)[:200]}
-    log(f"Proxmox Notes linki {'eklendi' if ekle else 'kaldirildi'}")
-    return {"ok": True, "msg": ("Datacenter → Notes'a eklendi: " + proxmox_link_url())
-            if ekle else "Datacenter → Notes'tan kaldirildi", "var": ekle}
+    if not shutil.which("pvesh"):
+        return {"ok": False, "msg": "pvesh yok (Proxmox host'u degil)"}
+    url = proxmox_link_url()
+    basarili, hatalar = [], []
+    for uc, ad in _pve_not_uclari():
+        mevcut, hata = _pve_not_oku(uc)
+        if mevcut is None: hatalar.append(f"{ad}: {hata}"); continue
+        satirlar = [x for x in (mevcut or "").split("\n") if PVE_LINK_IM not in x]
+        if ekle: satirlar.append(f"{PVE_LINK_IM} [🗄️ Google Drive Yedek]({url})")
+        yeni = "\n".join(x for x in satirlar if x.strip())
+        try:
+            r = subprocess.run(["pvesh", "set", uc, "--description", yeni],
+                               capture_output=True, text=True, timeout=20)
+            if r.returncode != 0: hatalar.append(f"{ad}: {(r.stderr or '').strip()[:120]}")
+            else: basarili.append(ad)
+        except Exception as e:
+            hatalar.append(f"{ad}: {str(e)[:120]}")
+    if not basarili:
+        return {"ok": False, "msg": "yazilamadi — " + ("; ".join(hatalar) or "bilinmeyen")}
+    log(f"Proxmox not linki {'eklendi' if ekle else 'kaldirildi'}: {', '.join(basarili)}")
+    msg = (", ".join(basarili) + (" → " + url if ekle else " temizlendi"))
+    if hatalar: msg += "  (uyari: " + "; ".join(hatalar) + ")"
+    return {"ok": True, "msg": msg, "var": ekle}
 
 def oturum_listesi(su_anki=None):
     """Acik 'beni hatirla' oturumlari. Jeton DISARI VERILMEZ; yalnizca kisa
@@ -6125,6 +6152,7 @@ const EN = {
     "Devam edilsin mi?": "Continue?",
     "Depo düzeltme": "Fix storage",
     "Uygula": "Apply",
+    "İki yere de yazılır: Datacenter → Notes ve Node → Notes.": "Written to both: Datacenter → Notes and Node → Notes.",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -8311,8 +8339,10 @@ async function pveLinkDurum() {
     try {
         const j = await api("/api/proxmox-link");
         e.innerHTML = !j.ok ? esc(C("Durum okunamadı: ") + (j.msg || ""))
-            : j.var ? "✅ " + esc(C("Link ekli: ")) + "<code>" + esc(j.url) + "</code>"
-                : "○ " + esc(C("Link yok. Eklenecek adres: ")) + "<code>" + esc(j.url) + "</code>";
+            : (j.var ? "✅ " : "○ ") + "<code>" + esc(j.url) + "</code>"
+                + '<div class="small" style="margin-top:3px">' + esc(j.ozet || "") + "</div>"
+                + '<div class="small">'
+                + esc(C("İki yere de yazılır: Datacenter → Notes ve Node → Notes.")) + "</div>";
     }
     catch {
         e.textContent = C("durum okunamadı");
