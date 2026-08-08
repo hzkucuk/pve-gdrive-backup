@@ -848,6 +848,37 @@ def t_hostconf_saklama():
               "vzdump dosyasi yapilandirma sanilmamali")
     finally: o.temizle()
 
+@test("yapilandirma secenekleri plana kaydedilip geri okunur", "yapilandirma")
+def t_hostconf_form():
+    """Arayuzdeki uc alan (e-hc / e-hcj / e-hck) plana yaziliyor mu?
+    Alan tabloya eklenip sunucuda normalize edilmezse kutu isaretlenir ama
+    kaydedilmez - sessizce calismayan bir ayar en kotusu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        r = G.save_plan({"name": "Deneme", "remote": "gdrive:x",
+                         "host_config_enabled": False, "host_config_json": False,
+                         "host_config_keep_count": 7})
+        dogru(r["ok"], r.get("msg"))
+        p = G.get_plan(r["id"])
+        esit(p["host_config_enabled"], False, "kapali secim korunmali")
+        esit(p["host_config_json"], False, "json secimi korunmali")
+        esit(p["host_config_keep_count"], 7, "adet korunmali")
+        G.save_plan({"id": r["id"], "name": "Deneme", "remote": "gdrive:x",
+                     "host_config_enabled": True, "host_config_keep_count": 45})
+        p = G.get_plan(r["id"])
+        esit(p["host_config_enabled"], True, "acik secim korunmali")
+        esit(p["host_config_keep_count"], 45, "yeni adet korunmali")
+        # sacma deger varsayilana donsun, plan bozulmasin
+        G.save_plan({"id": r["id"], "name": "Deneme", "remote": "gdrive:x",
+                     "host_config_keep_count": "abc"})
+        esit(G.get_plan(r["id"])["host_config_keep_count"],
+             G.GLOBAL_DEFAULTS["host_config_keep_count"], "gecersiz deger varsayilana doner")
+        # Arayuz alanlari gomulu pakette gercekten var mi
+        for parca in ('id="e-hc"', 'id="e-hcj"', 'id="e-hck"', "host_config_enabled"):
+            dogru(parca in G.HTML, f"'{parca}' arayuzde bulunmali")
+    finally: o.temizle()
+
 @test("yapilandirma yedegi kapaliyken hicbir sey uretmez", "yapilandirma")
 def t_hostconf_kapali():
     o = Ortam()
