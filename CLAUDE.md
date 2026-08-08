@@ -120,6 +120,25 @@ düşünülecek bir konu değil.
 - Rapor/mail üretimi patlarsa en azından kısa bir bildirim gitmeli.
 - Uzun süre çalışan serviste bellek ve disk sınırsız büyümemeli.
 
+### 8b. Bir hata bulunca sınıfını ara
+
+Bildirilen hatayı düzeltip geçme. Sor: *"Bu hata bir sınıfın örneği mi? Aynı
+kökten başka nerede çıkar?"* Bulduklarını da düzelt ve sınıfı yakalayan bir test
+yaz — tek örneği değil.
+
+Örnekler:
+- Ekranda bir ham `C(...)` çağrısı görüldü → dosyanın tamamı tarandı, 7 tane daha
+  bulundu, sonra deseni yakalayan test eklendi.
+- Bir test `smtplib.SMTP` yamasını geri koymamıştı → her testten sonra süreç
+  genelindeki kritik nesneleri denetleyen nöbetçi eklendi, iki eski sızıntı daha
+  ortaya çıktı.
+- Güncelleme adresi sorgulanırken jeton dosyasının izinleri, yedek dizini ve
+  sembolik bağlantı davranışı da incelendi; üçü de kusurluydu.
+
+Aynı şey doğrulama için de geçerli: bir şeyi ölçerken *ölçümün kendisinin*
+doğru şeyi ölçtüğünü kontrol et. (2026-08-08: çoklu hedef güvenlik testi geçti
+ama mock yardımcısı hedefleri ayırt etmediği için aslında hiçbir şey ölçmüyordu.)
+
 ### 9. Değişiklikten sonra regresyon koş
 
 Kod değiştirdiysen mevcut test paketini yeniden koş ve sonucu göster. Yeni özellik eklediysen
@@ -148,7 +167,7 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [ ] Arayüzde regex doğrulama, tooltip ipuçları, örnek senaryo bilgileri
 - [ ] Çalışan planlar için canlı durum ekranı: %, hız, başlangıç ve tahmini bitiş zamanı
 - [ ] Arayüzde F5 / yenileme koruması
-- [ ] Login ekranı + captcha + güvenlik önlemleri
+- [x] Login ekranı + captcha + güvenlik önlemleri
 - [x] Proxmox arayüzünden erişim: Datacenter Notes linki ve nginx ters vekil (TLS)
 - [x] Bant genişliği plan başına: sabit, saatlik çizelge ve otomatik mod
 - [x] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları

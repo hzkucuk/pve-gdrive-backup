@@ -2,6 +2,52 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.4.3 — 2026-08-08
+
+Güvenlik sertleştirmesi. "Bu betiği kimler değiştirebilir?" sorusu sorulunca
+güncelleme yolu baştan incelendi ve dört kusur bulundu.
+
+### Güncelleme adresi artık serbest değil
+
+Güncelleme, indirdiği dosyayı **root olarak çalışan betiğin üzerine** yazar.
+`update_url` ayarlardan serbestçe değiştirilebiliyordu ve şema/host kısıtı yoktu:
+arayüze giren biri adresi kendi sunucusuna çevirip root kod çalıştırabilirdi.
+
+- Yalnızca `https` ve `update_izinli_hostlar` listesindeki hostlar kabul ediliyor
+  (varsayılan: GitHub). Kendi deposunu kullanan listeye ekler.
+- İsteğe bağlı `update_sha256`: doluysa indirilen dosyanın özeti tutmuyorsa
+  kurulmaz. Sözdizimi kontrolü dosyanın *çalışabilir* olduğunu gösterir,
+  *doğru* dosya olduğunu değil.
+- Adres değişikliği loga denetim kaydı olarak yazılıyor.
+
+### OAuth jetonu dünyaya okunabilir yerde duruyordu
+
+`/tmp/pve-gdrive-auth.out` `0644` olarak oluşuyordu ve içinde erişim jetonu
+vardı. `/tmp` dünyaya yazılabilir olduğu için önceden yerleştirilmiş bir
+sembolik bağlantı, root'a başka bir dosyaya yazdırabilirdi. Dosya artık
+`/var/lib/pve-gdrive/auth.out`, `0600` ve `O_NOFOLLOW|O_EXCL` ile açılıyor.
+Açılışta eski `/tmp` dosyası varsa siliniyor.
+
+### Güncelleme yedekleri ve sembolik bağlantı
+
+- Yedek dizini `0700`, config kopyaları `0600` oldu — içlerinde UI şifre hash'i
+  ve SMTP parolaları düz metin duruyor, varsayılan umask ile `0755`/`0644`
+  oluşuyorlardı.
+- `betik_yolu()` artık `realpath` kullanıyor. Kısa ad (`pve-gdrive`) gerçek
+  dosyaya sembolik bağlantı; yol çözülmediği için güncelleme bağlantının
+  *kendisini* düz dosyayla değiştirebilir, systemd eski hedefi çalıştırmaya
+  devam eder ve "kuruldu" denmesine rağmen hiçbir şey değişmezdi.
+
+### Test koşucusu: süreç geneli sızıntı nöbetçisi
+
+Bir test `smtplib.SMTP` yamasını geri koymamıştı ve hatasını sonraki testlere
+devrediyordu. Her testten sonra kritik global nesneler denetleniyor; sızdıran
+test adıyla raporlanıyor. Nöbetçi eklenir eklenmez iki eski sızıntı daha
+ortaya çıktı. Yamalar artık `o.yamala()` ile yapılıp `temizle()` ile geri
+alınıyor — hatırlamak testin değil yapının işi.
+
+Test: 76 → 81.
+
 ## 1.4.0 — 2026-08-08
 
 ### Yedek hedefler: plan başına N hesap

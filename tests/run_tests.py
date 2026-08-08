@@ -128,7 +128,21 @@ class Ortam:
         except Exception: return []
         return sorted(k.split("/")[-1] for k, v in d.get("files", {}).items()
                       if bool(v.get("trashed")) == copte)
+    def yamala(self, nesne, ad, yeni):
+        """Surec genelindeki bir seyi gecici olarak degistirir; temizle() geri koyar.
+
+        smtplib/urllib gibi moduller tum test kosumunda TEK nesnedir. Elle
+        yamalayip geri koymayi unutan test, hatasini sonraki teste devrediyordu
+        ve sebebi bulmak zor oluyordu. Artik geri koymak yapinin isi."""
+        self._yamalar = getattr(self, "_yamalar", [])
+        self._yamalar.append((nesne, ad, getattr(nesne, ad)))
+        setattr(nesne, ad, yeni)
+
     def temizle(self):
+        for nesne, ad, eski in reversed(getattr(self, "_yamalar", [])):
+            try: setattr(nesne, ad, eski)
+            except Exception: pass
+        self._yamalar = []
         srv = getattr(self, "_srv", None)
         if srv:
             srv.shutdown(); srv.server_close(); self._srv = None
@@ -708,6 +722,13 @@ def t_login_damga():
         h = SahteIsleyici()
         G.H._login_page(h)
         g = h.govde
+        # Damga kartin ALTINDA olmali. body flex; yon verilmezse form ile damga
+        # yan yana dizilir ve damga kartin sagina kacar (ekran goruntusuyle
+        # bildirildi). Kural CSS'te olmali, gozle degil testle korunsun.
+        import re as _re
+        kural = _re.search(r"body\{[^}]*\}", g)
+        dogru(kural and "flex-direction:column" in kural.group(0),
+              "giris sayfasi tek sutun olmali, yoksa damga kartin yanina kacar")
         dogru(G.SURUM in g, f"surum sayfada gorunmeli: {G.SURUM}")
         dogru(os.uname().nodename in g, "sunucu adi gorunmeli")
         dogru("HTTP" in g, "baglanti durumu gorunmeli")
@@ -772,6 +793,129 @@ def t_rclone_conf_yedek():
         esit(G.rclone_conf_yedekle("yok"), "", "config yoksa yedek de yok")
     finally: o.temizle()
 
+@test("OAuth jetonu dunyaya okunabilir yerde durmaz", "guvenlik")
+def t_auth_jeton_izni():
+    """Jeton dosyasi /tmp altindaydi: dunyaya okunabilir olusuyordu ve /tmp
+    dunyaya yazilabilir oldugu icin onceden yerlestirilmis bir sembolik
+    baglanti root'a baska dosyaya yazdirabilirdi."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        yol = G.auth_out_yolu()
+        dogru(not yol.startswith("/tmp/"), f"jeton /tmp altinda olmamali: {yol}")
+        f = G.auth_out_ac(); f.write("test"); f.close()
+        esit(oct(os.stat(yol).st_mode)[-3:], "600", "yalnizca root okuyabilmeli")
+        # Ikinci acilis eskisini temizleyip yeniden olusturmali
+        f = G.auth_out_ac(); f.write("x"); f.close()
+        esit(open(yol).read(), "x", "yeniden acilista icerik sifirlanmali")
+        esit(oct(os.stat(yol).st_mode)[-3:], "600", "izin korunmali")
+        # Onceden yerlestirilmis sembolik baglanti root'a BASKA dosyaya
+        # yazdirmamali. Mekanizmayi degil sonucu olc: kurban dosya bozulmasin.
+        kurban = os.path.join(o.dizin, "kurban")
+        open(kurban, "w").write("dokunma")
+        os.remove(yol); os.symlink(kurban, yol)
+        f = G.auth_out_ac(); f.write("JETON"); f.close()
+        esit(open(kurban).read(), "dokunma", "baglantinin hedefine yazilmamali")
+        dogru(not os.path.islink(yol), "baglanti duz dosyayla degistirilmeli")
+        esit(open(yol).read(), "JETON", "jeton kendi dosyasina yazilmali")
+        esit(oct(os.stat(yol).st_mode)[-3:], "600", "yeni dosya da 600 olmali")
+    finally: o.temizle()
+
+@test("guncelleme yedekleri baskasina okunmaz", "guvenlik")
+def t_yedek_izinleri():
+    """Yedek dizininde config kopyalari var: UI sifre hash'i ve SMTP
+    parolalari duz metin. Varsayilan umask ile 0755 olusuyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        d = G.yedek_dizini()
+        esit(oct(os.stat(d).st_mode)[-3:], "700", "yedek dizini yalnizca root'a acik olmali")
+    finally: o.temizle()
+
+@test("guncelleme sembolik baglantinin uzerine yazmaz", "guvenlik")
+def t_betik_yolu_symlink():
+    """Kisa ad gercek dosyaya sembolik baglanti. Yol cozulmezse os.replace
+    baglantiyi duz dosyayla degistirir; systemd hala eski hedefi calistirir
+    ve guncelleme 'kuruldu' der ama hicbir sey degismez."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        gercek = os.path.join(o.dizin, "gercek.py")
+        open(gercek, "w").write("# gercek\n")
+        bag = os.path.join(o.dizin, "kisa-ad")
+        os.symlink(gercek, bag)
+
+        class SahteAna: __file__ = bag
+        G.sys.modules["__main__"] = SahteAna
+        esit(G.betik_yolu(), os.path.realpath(gercek),
+             "sembolik baglanti cozulup gercek dosya donmeli")
+    finally: o.temizle()
+
+@test("guncelleme adresi keyfi bir sunucuya cevrilemez", "guvenlik")
+def t_guncelleme_adresi():
+    """Guncelleme, indirdigi dosyayi ROOT olarak calisan betigin uzerine yazar.
+    Adres serbest birakilirsa arayuze giren biri kendi sunucusunu gosterip
+    root kod calistirir. Sema ve host kisitli olmali."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        iyi = "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py"
+        dogru(G.guncelleme_adresi_gecerli(iyi)[0], "resmi adres kabul edilmeli")
+        for kotu, neden in (
+            ("http://raw.githubusercontent.com/x.py", "sifresiz http"),
+            ("https://saldirgan.example/evil.py", "izinsiz host"),
+            ("file:///tmp/evil.py", "yerel dosya"),
+            ("ftp://ornek.com/x.py", "baska sema"),
+            ("", "bos"),
+            ("https://raw.githubusercontent.com.saldirgan.net/x.py", "benzer host"),
+        ):
+            ok, sebep = G.guncelleme_adresi_gecerli(kotu)
+            dogru(not ok, f"reddedilmeliydi ({neden}): {kotu}")
+            dogru(sebep, "sebep bildirilmeli")
+        # Indirme de reddetmeli, yalnizca ayar kaydi degil
+        c = G.cfg(); c["update_url"] = "https://saldirgan.example/evil.py"; G.save_cfg(c)
+        ham, uzak, hata = G.guncelleme_indir()
+        dogru(ham is None and "izinli" in hata, f"indirme reddedilmeliydi: {hata}")
+        # Ayarlardan degistirmek de reddedilmeli
+        c = G.cfg(); c["update_url"] = iyi; G.save_cfg(c)
+        r = G.save_settings({"update_url": "https://saldirgan.example/evil.py"})
+        dogru(not r["ok"], f"ayar kaydi reddedilmeliydi: {r}")
+        esit(G.cfg(force=True)["update_url"], iyi, "adres degismemis olmali")
+        # Kullanici kendi hostunu bilerek eklerse calismali (parametrik kalsin)
+        c = G.cfg(); c["update_izinli_hostlar"] = ["kendi-sunucum.local"]; G.save_cfg(c)
+        dogru(G.guncelleme_adresi_gecerli("https://kendi-sunucum.local/x.py")[0],
+              "acikca izin verilen host kabul edilmeli")
+    finally: o.temizle()
+
+@test("guncelleme ozeti sabitlenebilir", "guvenlik")
+def t_guncelleme_ozet():
+    o = Ortam()
+    try:
+        G = o.modul()
+        sahte_kaynak = ('SURUM = "9.9.9"\n' + "def do_run(pid):\n    pass\n" + "# " + "x" * 20000)
+        beklenen = __import__("hashlib").sha256(sahte_kaynak.encode()).hexdigest()
+
+        class SahteYanit:
+            def read(_s): return sahte_kaynak.encode()
+            def __enter__(_s): return _s
+            def __exit__(_s, *a): return False
+        # urllib SUREC GENELINDE tek nesnedir; yamayi geri koymazsan sonraki
+        # testlere sizar (SSE testleri gercek HTTP kullaniyor ve patlamisti).
+        o.yamala(G.urllib.request, "urlopen", lambda *a, **k: SahteYanit())
+
+        c = G.cfg(); c["update_sha256"] = beklenen; G.save_cfg(c)
+        ham, uzak, hata = G.guncelleme_indir()
+        esit(hata, "", f"dogru ozet kabul edilmeli: {hata}")
+        esit(uzak, "9.9.9", "surum okunmali")
+
+        c = G.cfg(); c["update_sha256"] = "0" * 64; G.save_cfg(c)
+        ham, uzak, hata = G.guncelleme_indir()
+        dogru(ham is None and "eslesmiyor" in hata, f"yanlis ozet reddedilmeli: {hata}")
+
+        # Gecersiz uzunlukta ozet ayara yazilmamali
+        dogru(not G.save_settings({"update_sha256": "abc"})["ok"], "kisa ozet reddedilmeli")
+    finally: o.temizle()
+
 @test("zamanlayici gecikmesi fark edilir", "izleme")
 def t_tick_sagligi():
     """Timer durursa hicbir yedek alinmaz ve tek belirtisi 'sonraki calisma'nin
@@ -820,7 +964,7 @@ def t_birim_bildir():
             def login(self, *a): pass
             def send_message(self, m): yakalanan["m"] = m
             def quit(self): pass
-        G.smtplib.SMTP = SahteSMTP
+        o.yamala(G.smtplib, "SMTP", SahteSMTP)
         c = G.cfg()
         c["smtp_profiles"] = [{"id": "s1", "name": "t", "host": "h", "port": 25,
                                "security": "none", "user": "", "pass": "", "from": "a@b.c"}]
@@ -1371,7 +1515,7 @@ def t_mail_multipart():
             def login(self, *a): pass
             def send_message(self, msg): yakalanan["m"] = msg
             def quit(self): pass
-        G.smtplib.SMTP = SahteSMTP
+        o.yamala(G.smtplib, "SMTP", SahteSMTP)
         C = G.cfg()
         C["smtp_profiles"] = [{"id": "s1", "name": "t", "host": "h", "port": 25,
                                "security": "none", "user": "", "pass": "",
@@ -1603,12 +1747,29 @@ def main():
         print("Eslesen test yok."); return 1
     gecti = kaldi = atlandi = 0
     basla = time.time()
+    # Testler surec genelindeki nesneleri yamalar ve geri koymazsa hata
+    # SONRAKI teste sicrar; sebebi bulmak zor olur. Her testten sonra kritik
+    # global'lerin yerinde oldugunu dogrula.
+    import urllib.request as _ur, smtplib as _sm, subprocess as _sp
+    NOBET = {"urlopen": _ur.urlopen, "SMTP": _sm.SMTP, "SMTP_SSL": _sm.SMTP_SSL,
+             "Popen": _sp.Popen, "run": _sp.run}
+
+    def nobet_kontrol():
+        bozuk = [ad for ad, deger in NOBET.items()
+                 if {"urlopen": _ur.urlopen, "SMTP": _sm.SMTP, "SMTP_SSL": _sm.SMTP_SSL,
+                     "Popen": _sp.Popen, "run": _sp.run}[ad] is not deger]
+        return bozuk
+
     for grup, testler in gruplar.items():
         print(f"\n\033[1m{grup.upper()}\033[0m")
         for ad, fn in testler:
             ortam_yedek = dict(os.environ)
             try:
                 fn()
+                sizan = nobet_kontrol()
+                if sizan:
+                    raise AssertionError("surec genelinde yama birakti (temizle() ya da "
+                                         "o.yamala() kullan): " + ", ".join(sizan))
                 print(f"  \033[32m✓\033[0m {ad}"); gecti += 1
             except AssertionError as e:
                 if str(e).startswith("ATLA:"):
@@ -1623,6 +1784,10 @@ def main():
                     import traceback; traceback.print_exc()
             finally:
                 os.environ.clear(); os.environ.update(ortam_yedek)
+                # Sizinti kalmissa bir sonraki testi bozmasin diye onar
+                _ur.urlopen = NOBET["urlopen"]; _sm.SMTP = NOBET["SMTP"]
+                _sm.SMTP_SSL = NOBET["SMTP_SSL"]
+                _sp.Popen = NOBET["Popen"]; _sp.run = NOBET["run"]
     sure = time.time() - basla
     print(f"\n\033[1mSONUC\033[0m  {gecti} gecti, {kaldi} kaldi"
           + (f", {atlandi} atlandi" if atlandi else "") + f"  ({sure:.1f} sn)")

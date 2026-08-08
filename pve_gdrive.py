@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.4.0"
+SURUM = "1.4.3"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -63,6 +63,15 @@ GLOBAL_DEFAULTS = {
     "update_check": True,         # gunde bir yeni surum var mi diye bak
     "update_auto": False,         # bulununca kendiliginden kur (varsayilan: sadece bildir)
     "update_url": "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py",
+    # Guncelleme indirilen betigi ROOT olarak calisan dosyanin uzerine yazar.
+    # Bu yuzden adres serbest birakilamaz: arayuze giren biri adresi kendi
+    # sunucusuna cevirip root kod calistirabilirdi. Yalnizca bu hostlar ve
+    # yalnizca https kabul edilir. Kendi deponu kullanacaksan buraya ekle.
+    "update_izinli_hostlar": ["raw.githubusercontent.com", "github.com",
+                              "objects.githubusercontent.com", "codeload.github.com"],
+    # Doluysa indirilen dosyanin sha256'si bununla ayni olmak zorunda.
+    # Ekstra guvence: adres ele gecse bile eslesmeyen dosya kurulmaz.
+    "update_sha256": "",
     "update_backup_keep": 5,      # saklanacak eski surum sayisi
     "quota_cache_min": 15,        # hesap kotasi kac dakika onbellekte tutulsun
     "oneri_pay_pct": 60,          # saklama onerisi bos alanin en fazla bu yuzdesini kullanir
@@ -2440,7 +2449,27 @@ def saglayici_listesi():
                       "kurulu": True if adlar is None else (tur in adlar)})
     return liste
 
-AUTH_OUT = "/tmp/pve-gdrive-auth.out"
+def auth_out_yolu():
+    """OAuth ciktisi (JETON ICERIR) icin dosya yolu.
+
+    Onceden /tmp altindaydi: dunyaya okunabilir olusuyor ve /tmp dunyaya
+    yazilabilir oldugu icin onceden yerlestirilmis bir sembolik baglanti
+    root olarak baska bir dosyaya yazdirabiliyordu. Artik yalnizca root'un
+    girebildigi durum dizininde, 0600 ve O_NOFOLLOW ile aciliyor."""
+    return os.path.join(os.path.dirname(cfg().get("state_file",
+                        "/var/lib/pve-gdrive/state.json")), "auth.out")
+
+def auth_out_ac():
+    yol = auth_out_yolu()
+    os.makedirs(os.path.dirname(yol), exist_ok=True)
+    try: os.remove(yol)
+    except FileNotFoundError: pass
+    except Exception as e: yut("auth_out_ac", e)
+    fd = os.open(yol, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    return os.fdopen(fd, "w")
+
+# Geriye donuk ad: eski /tmp dosyasi varsa temizlenebilsin diye tutulur
+AUTH_OUT_ESKI = "/tmp/pve-gdrive-auth.out"
 _AUTH = {"proc": None, "url": None, "started": 0}
 
 def rclone_remotes(force=False):
@@ -2546,7 +2575,7 @@ def auth_start(tur="drive"):
         return {"ok": False, "url": None, "tunnel": "",
                 "msg": f"desteklenmeyen saglayici: {tur}"}
     auth_stop()
-    try: os.remove(AUTH_OUT)
+    try: os.remove(auth_out_yolu())
     except Exception as e: yut("auth_start", e)
     tunel = f"ssh -N -L {AUTH_PORT}:127.0.0.1:{AUTH_PORT} root@{local_ip() or os.uname().nodename}"
     if port_dolu_mu(AUTH_PORT):
@@ -2558,7 +2587,7 @@ def auth_start(tur="drive"):
                            f"Sunucuda kontrol et: ss -tlnp | grep {AUTH_PORT}"}
         if n: log(f"yarida kalmis {n} rclone sureci kapatildi (OAuth portu serbest birakildi)")
     sg = saglayici(tur)
-    f = open(AUTH_OUT, "w")
+    f = auth_out_ac()
     _AUTH["tur"] = tur
     _AUTH["proc"] = subprocess.Popen(
         ["rclone", "authorize", tur] + list(sg["auth"]) + ["--auth-no-open-browser"],
@@ -2567,7 +2596,7 @@ def auth_start(tur="drive"):
     hata = ""
     for _ in range(60):
         time.sleep(0.25)
-        try: txt = open(AUTH_OUT).read()
+        try: txt = open(auth_out_yolu()).read()
         except Exception: txt = ""
         m = re.search(r"(http://127\.0\.0\.1:\d+/auth\?state=\S+)", txt)
         if m: _AUTH["url"] = m.group(1); break
@@ -2579,14 +2608,14 @@ def auth_start(tur="drive"):
             "msg": "" if _AUTH["url"] else (hata or "rclone yetkilendirme baslatilamadi, log dosyasina bak")}
 
 def auth_status():
-    try: txt = open(AUTH_OUT).read()
+    try: txt = open(auth_out_yolu()).read()
     except Exception: txt = ""
     got = '"access_token"' in txt
     return {"ok": True, "ready": got, "url": _AUTH.get("url"),
             "waiting": bool(_AUTH.get("proc") and _AUTH["proc"].poll() is None)}
 
 def auth_token():
-    try: txt = open(AUTH_OUT).read()
+    try: txt = open(auth_out_yolu()).read()
     except Exception as e:
         yut("auth_token", e)
         return None
@@ -2786,17 +2815,47 @@ def surum_yeni_mi(uzak, yerel=None):
     return surum_dizi(uzak) > surum_dizi(yerel or SURUM)
 
 def betik_yolu():
-    return os.path.abspath(getattr(sys.modules["__main__"], "__file__", __file__))
+    """Guncellemenin uzerine yazacagi GERCEK dosya.
+
+    realpath sart: kisa ad (/usr/local/bin/pve-gdrive) gercek dosyaya sembolik
+    baglanti. abspath baglantiyi cozmedigi icin os.replace baglantinin KENDISINI
+    duz dosyayla degistirir; systemd hala eski hedefi calistirir ve guncelleme
+    'kuruldu' der ama hicbir sey degismez."""
+    return os.path.realpath(getattr(sys.modules["__main__"], "__file__", __file__))
 
 def yedek_dizini():
+    """Guncelleme yedekleri. Icinde config kopyalari var: UI sifre hash'i ve
+    SMTP parolalari duz metin. Dizin varsayilan umask ile 0755 olusuyordu."""
     d = os.path.join(os.path.dirname(cfg().get("state_file", "/var/lib/pve-gdrive/x")), "yedek")
     os.makedirs(d, exist_ok=True)
+    try: os.chmod(d, 0o700)
+    except Exception as e: yut("yedek_dizini", e)
     return d
+
+def guncelleme_adresi_gecerli(url):
+    """(gecerli_mi, sebep). Guncelleme adresi root olarak calisacak kodu
+    belirledigi icin serbest olamaz: yalnizca https ve izinli host."""
+    try:
+        u = urlparse(str(url or ""))
+    except Exception as e:
+        yut("guncelleme_adresi_gecerli", e); return False, "adres cozulemedi"
+    if u.scheme != "https":
+        return False, "guncelleme adresi https olmali (indirilen dosya root olarak calisir)"
+    host = (u.hostname or "").lower()
+    izinli = [str(h).lower() for h in (cfg().get("update_izinli_hostlar") or [])]
+    if izinli and host not in izinli:
+        return False, (f"'{host}' izinli guncelleme sunucusu degil. "
+                       f"Izinliler: {', '.join(izinli)}")
+    return True, ""
 
 def guncelleme_indir(url=None, zaman_asimi=30):
     """(kaynak_metin, surum, hata). Ag hatasi programi durdurmaz."""
     url = url or cfg().get("update_url")
     if not url: return None, None, "guncelleme adresi tanimli degil"
+    ok, sebep = guncelleme_adresi_gecerli(url)
+    if not ok:
+        log(f"GUVENLIK: guncelleme adresi reddedildi ({url}): {sebep}")
+        return None, None, sebep
     try:
         istek = urllib.request.Request(url, headers={"User-Agent": f"pve-gdrive/{SURUM}"})
         with urllib.request.urlopen(istek, timeout=zaman_asimi) as y:
@@ -2807,6 +2866,16 @@ def guncelleme_indir(url=None, zaman_asimi=30):
         return None, None, "indirilen dosya beklenen bicimde degil"
     m = re.search(r'^SURUM\s*=\s*"([^"]+)"', ham, re.M)
     if not m: return None, None, "surum bilgisi bulunamadi"
+    # Ozet sabitlenmisse eslesmeyen dosya KURULMAZ. Sozdizimi kontrolu dosyanin
+    # calisabilir oldugunu gosterir, DOGRU dosya oldugunu degil.
+    beklenen = str(cfg().get("update_sha256") or "").strip().lower()
+    if beklenen:
+        gelen = hashlib.sha256(ham.encode("utf-8")).hexdigest()
+        if gelen != beklenen:
+            log(f"GUVENLIK: guncelleme ozeti tutmadi (beklenen {beklenen[:16]}…, "
+                f"gelen {gelen[:16]}…) - kurulmadi")
+            return None, None, ("indirilen dosyanin sha256 ozeti ayarlardaki degerle "
+                                "eslesmiyor, kurulmadi")
     return ham, m.group(1), ""
 
 def guncelleme_kontrol(zorla=False):
@@ -2859,7 +2928,9 @@ def guncelleme_uygula(zorla=False):
         # 2) Program ve config yedegi
         prog_yedek = os.path.join(yd, f"pve_gdrive-{SURUM}-{damga}.py")
         shutil.copy2(hedef, prog_yedek)
-        try: shutil.copy2(CONFIG_PATH, os.path.join(yd, f"config-{damga}.json"))
+        try:
+            ck = os.path.join(yd, f"config-{damga}.json")
+            shutil.copy2(CONFIG_PATH, ck); os.chmod(ck, 0o600)
         except Exception as e: yut("guncelleme_uygula", e)
         # 3) Yerine koy (atomik) ve servisi yeniden baslat
         os.replace(gecici, hedef)
@@ -3248,7 +3319,8 @@ def public_status():
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
-                          "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
+                          "update_check", "update_auto", "update_url", "update_backup_keep",
+                          "update_izinli_hostlar", "update_sha256", "debug",
                           "quota_cache_min", "dil",
                           "failure_mail", "failure_mail_to", "failure_smtp_profile",
                           "failure_mail_lines", "tick_uyari_dk",
@@ -3546,12 +3618,12 @@ class H(BaseHTTPRequestHandler):
                                   _AUTH.get("tur") or b2.get("tur") or "drive")
                 if r.get("ok"):
                     auth_stop()
-                    try: os.remove(AUTH_OUT)
+                    try: os.remove(auth_out_yolu())
                     except Exception as e: yut("_post", e)
                 self._json(r)
         elif path == "/api/remote/auth/cancel":
             auth_stop()
-            try: os.remove(AUTH_OUT)
+            try: os.remove(auth_out_yolu())
             except Exception as e: yut("_post", e)
             self._json({"ok": True, "msg": "iptal edildi"})
         elif path == "/api/remote/add":
@@ -3700,7 +3772,25 @@ def save_settings(data):
         if k in data:
             try: C[k] = max(1, int(data[k]))
             except Exception as e: yut("save_settings", e)
-    if data.get("update_url"): C["update_url"] = str(data["update_url"])
+    if data.get("update_url"):
+        yeni_url = str(data["update_url"])
+        ok, sebep = guncelleme_adresi_gecerli(yeni_url)
+        if not ok:
+            log(f"GUVENLIK: guncelleme adresi degistirilmek istendi ama reddedildi "
+                f"({yeni_url}): {sebep}")
+            return {"ok": False, "msg": sebep}
+        if yeni_url != C.get("update_url"):
+            # Denetim izi: bu ayar root olarak ne calisacagini belirler
+            log(f"GUVENLIK: guncelleme adresi degisti: {C.get('update_url')} -> {yeni_url}")
+        C["update_url"] = yeni_url
+    if "update_sha256" in data:
+        oz = re.sub(r"[^0-9a-fA-F]", "", str(data["update_sha256"] or "")).lower()
+        if oz and len(oz) != 64:
+            return {"ok": False, "msg": "sha256 ozeti 64 onaltilik karakter olmali"}
+        C["update_sha256"] = oz
+    if isinstance(data.get("update_izinli_hostlar"), list):
+        C["update_izinli_hostlar"] = [str(h).strip().lower()
+                                      for h in data["update_izinli_hostlar"] if str(h).strip()]
     if isinstance(data.get("allow_networks"), list):
         temiz, hatali = [], []
         for x in data["allow_networks"]:
@@ -3868,6 +3958,14 @@ def serve():
     ensure_hashed_pw()
     n = DEPO.kalicilari_yukle()
     if n: log(f"{n} hatirlanan oturum geri yuklendi")
+    # Eski surumler OAuth ciktisini /tmp altina, dunyaya okunabilir biraktiyordu.
+    # Icinde jeton kalmis olabilir; acilista temizle.
+    try:
+        if os.path.exists(AUTH_OUT_ESKI):
+            os.remove(AUTH_OUT_ESKI)
+            log(f"GUVENLIK: eski OAuth cikti dosyasi silindi ({AUTH_OUT_ESKI}) - "
+                f"dunyaya okunabilir bir konumda jeton kalmis olabilirdi")
+    except Exception as e: yut("eski_auth_temizle", e)
     httpd = ThreadingHTTPServer((C["ui_bind"], int(C["ui_port"])), H)
     ctx = ssl_context()
     if ctx:
@@ -3987,7 +4085,10 @@ LOGIN_HTML = r"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1117'/%3E%3Cpath d='M20 40 L32 18 L44 40 Z' fill='%23e57000'/%3E%3Cpath d='M14 44h36a3 3 0 000-6h-1.2a10 10 0 00-19.3-3.4A7 7 0 0014 44Z' fill='%2358a6ff'/%3E%3Cpath d='M32 46v9m0 0-4.5-4.5M32 55l4.5-4.5' stroke='%237ee2a8' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E"><style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial;
- display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+ display:flex;flex-direction:column;align-items:center;justify-content:center;
+ min-height:100vh;padding:20px}
+/* Kart ve altindaki damga tek sutun: yon verilmezse body'nin flex'i ikisini
+   YAN YANA diziyor ve damga kartin sagina kaciyordu. */
 .box{background:#161b22;border:1px solid #232b36;border-radius:14px;padding:26px;width:100%;max-width:380px}
 .girislogo{width:56px;height:56px;margin:0 auto 12px;display:block}
 .girislogo svg{width:100%;height:100%}
@@ -4007,7 +4108,7 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
 .cap{display:flex;gap:10px;align-items:center;margin-top:5px}
 .cap img{border-radius:8px;border:1px solid #30363d;background:#0d1117}
 .cap button{width:auto;margin:0;padding:8px 10px;background:#21262d;border-color:#30363d;font-size:12px}
-.damga{margin-top:14px;text-align:center;font-size:11px;color:#6b7785;
+.damga{margin-top:14px;font-size:11px;color:#6b7785;width:100%;max-width:380px;
  display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap}
 .damga-ad{color:#8b97a5}
 .damga-surum{color:#8b97a5;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
