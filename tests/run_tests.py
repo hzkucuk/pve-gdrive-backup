@@ -630,6 +630,36 @@ def t_rapor():
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
     finally: o.temizle()
 
+@test("login sayfasi surum ve sunucu bilgisi gosterir", "arayuz")
+def t_login_damga():
+    """Sifreyi yazmadan once hangi surume ve hangi sunucuya girdigini,
+    baglantinin sifreli olup olmadigini gormek gerekir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru("{{SURUM}}" in G.LOGIN_HTML, "sablonda surum yeri olmali")
+        for yer in ("{{SUNUCU}}", "{{TLS}}", "{{TLSSINIF}}", "{{TLSIPUCU}}"):
+            dogru(yer in G.LOGIN_HTML, f"{yer} sablonda olmali")
+
+        class SahteIsleyici:
+            headers = {}
+            path = "/"
+            def _send(_s, kod, ctype, govde, extra=None): _s.govde = govde
+        h = SahteIsleyici()
+        G.H._login_page(h)
+        g = h.govde
+        dogru(G.SURUM in g, f"surum sayfada gorunmeli: {G.SURUM}")
+        dogru(os.uname().nodename in g, "sunucu adi gorunmeli")
+        dogru("HTTP" in g, "baglanti durumu gorunmeli")
+        for kalan in ("{{SURUM}}", "{{SUNUCU}}", "{{TLS}}", "{{TLSSINIF}}", "{{TLSIPUCU}}"):
+            dogru(kalan not in g, f"{kalan} degistirilmeden kalmis")
+        # TLS kapaliyken uyari, acikken guvenli rozet
+        dogru("kapali" in g and "⚠" in g, "TLS kapaliyken uyari gostermeli")
+        G.TLS_AKTIF = True
+        h2 = SahteIsleyici(); G.H._login_page(h2)
+        dogru("acik" in h2.govde and "🔒" in h2.govde, "TLS acikken guvenli rozet")
+    finally: o.temizle()
+
 @test("hesap eklenmediyse 'eklendi' denmez", "izleme")
 def t_remote_dogrulama():
     """rclone rc=0 dondugu halde hesabin yazilmadigi bir durum yasandi:

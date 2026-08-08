@@ -523,4 +523,5 @@ const EN: Record<string, string> = {
   "varsayilan rota": "default route",
   "Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki bond/fiziksel arayüz doğru ölçümü verir.": "A bridge (vmbr0) also counts VM-to-VM local traffic, which never reaches the internet and does not compete with your upload. The bond or physical interface under the bridge gives the correct measurement.",
   "Zamanlayici henuz hic calismadi.": "The scheduler has never run yet.",
+  "Bağlandığın sunucu": "Server you are connecting to",
 };

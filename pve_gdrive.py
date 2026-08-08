@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.3.1"
+SURUM = "1.3.2"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -3236,7 +3236,18 @@ class H(BaseHTTPRequestHandler):
                              .replace("{{DISABLED}}", "disabled" if kilit else "")
                              .replace("{{HATIRLA}}", "flex" if hatirla_acik else "none")
                              .replace("{{HATIRLAGUN}}", str(int(C.get("remember_days") or 30)))
-                             .replace("{{CID}}", cid or ""))
+                             .replace("{{CID}}", cid or "")
+                             # Hangi surume ve hangi sunucuya girdigini sifreyi
+                             # yazmadan once gor: birden fazla Proxmox varken
+                             # karistirmamak, TLS'siz bir sayfaya parola
+                             # girmemek icin.
+                             .replace("{{SURUM}}", _html.escape(SURUM))
+                             .replace("{{SUNUCU}}", _html.escape(os.uname().nodename))
+                             .replace("{{TLS}}", "🔒 HTTPS" if TLS_AKTIF else "⚠ HTTP")
+                             .replace("{{TLSSINIF}}", "acik" if TLS_AKTIF else "kapali")
+                             .replace("{{TLSIPUCU}}", _html.escape(M(
+                                 "Bağlantı şifreli" if TLS_AKTIF
+                                 else "Trafik şifresiz — yalnızca VPN içinde kullan"))))
 
     def _json(self, obj, code=200):
         self._send(code, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False))
@@ -3832,6 +3843,14 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
 .cap{display:flex;gap:10px;align-items:center;margin-top:5px}
 .cap img{border-radius:8px;border:1px solid #30363d;background:#0d1117}
 .cap button{width:auto;margin:0;padding:8px 10px;background:#21262d;border-color:#30363d;font-size:12px}
+.damga{margin-top:14px;text-align:center;font-size:11px;color:#6b7785;
+ display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap}
+.damga-ad{color:#8b97a5}
+.damga-surum{color:#8b97a5;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.damga-ayrac{opacity:.45}
+.damga-tls{padding:1px 6px;border-radius:999px;font-weight:700;font-size:10px}
+.damga-tls.acik{background:#16301f;color:#7ee2a8}
+.damga-tls.kapali{background:#3a1d1d;color:#ff9b9b}
 .foot{font-size:11px;color:#6e7c8c;margin-top:16px;text-align:center;line-height:1.6}
 .hatirla{align-items:center;gap:8px;margin-top:14px;font-size:13px;color:#9fb4c9;cursor:pointer}
 .hatirla input{width:auto;margin:0}
@@ -3862,6 +3881,14 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
   <div class="foot">İşaretlemezsen oturum hareketsiz kalınca sona erer.<br>
     Çok fazla hatalı denemede adresin geçici olarak kilitlenir.</div>
 </form>
+<div class="damga">
+  <span class="damga-ad">pve-gdrive-backup</span>
+  <span class="damga-surum">v{{SURUM}}</span>
+  <span class="damga-ayrac">·</span>
+  <span title="Bağlandığın sunucu">{{SUNUCU}}</span>
+  <span class="damga-ayrac">·</span>
+  <span class="damga-tls {{TLSSINIF}}" title="{{TLSIPUCU}}">{{TLS}}</span>
+</div>
 <script>
 function yenile(){var r=Math.random().toString(36).slice(2);
  fetch("/captcha.svg?cid=").then(function(){});
@@ -5018,6 +5045,7 @@ const EN = {
     "varsayilan rota": "default route",
     "Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki bond/fiziksel arayüz doğru ölçümü verir.": "A bridge (vmbr0) also counts VM-to-VM local traffic, which never reaches the internet and does not compete with your upload. The bond or physical interface under the bridge gives the correct measurement.",
     "Zamanlayici henuz hic calismadi.": "The scheduler has never run yet.",
+    "Bağlandığın sunucu": "Server you are connecting to",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.

@@ -2,6 +2,23 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.3.2 — 2026-08-08
+
+### Giriş ekranında sürüm ve sunucu bilgisi
+
+Şifreyi yazmadan önce nereye girdiğini görüyorsun. Kartın altında:
+
+```
+pve-gdrive-backup  v1.3.2  ·  pve  ·  🔒 HTTPS
+```
+
+- **Sürüm** — güncelleme sonrası gerçekten yenisinin çalıştığını doğrulamak için.
+- **Sunucu adı** — birden fazla Proxmox host'u varsa hangisine bağlandığını karıştırmamak için.
+- **Bağlantı durumu** — TLS kapalıysa yeşil kilit yerine kırmızı `⚠ HTTP` çıkar.
+  Parolayı şifresiz bir sayfaya girmeden önce görürsün.
+
+Test: 67 → 68.
+
 ## 1.3.1 — 2026-08-08
 
 ### rclone hesap yazımı doğrulanıyor
