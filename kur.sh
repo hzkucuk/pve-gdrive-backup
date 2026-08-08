@@ -17,15 +17,21 @@ hata()  { renk "31;1" "HATA: $*" >&2; exit 1; }
 
 [ "$(id -u)" = "0" ] || hata "root olarak calistir (sudo -i)"
 
-# curl | bash ile calisirken stdin borudan gelir ve sihirbaz soru soramaz.
-# Terminal VARSA girdiyi ona baglayip etkilesimi geri kazaniriz. Dosyanin varligi
-# yetmez, gercekten acilabiliyor olmasi gerekir (cron/ssh -T'de acilmaz).
-if [ ! -t 0 ]; then
-  if { exec 3</dev/tty; } 2>/dev/null; then
-    exec 0<&3 3<&-
-  else
-    export PGD_SESSIZ=1   # terminal yok: sihirbaz atlanir, otomatik tespit kullanilir
-  fi
+# curl | bash ile calisirken stdin BORUDUR ve bash betigin kendisini oradan
+# okur. Sihirbazin soru sorabilmesi icin terminale ihtiyaci var, ama bu betigin
+# stdin'ini terminale cevirmek OLUMCUL: bash betigin kalanini klavyeden beklemeye
+# baslar, ekrana hicbir sey yazilmadan asili kalir. (Proxmox web konsolunda tam
+# olarak bu oldu; ssh -T'de /dev/tty acilmadigi icin fark edilmemisti.)
+#
+# Dogrusu: kendi stdin'imize DOKUNMA, terminali yalnizca calistiracagimiz
+# sihirbaza ayri bir betimleyiciyle ver.
+TTY_VAR=0
+if [ -t 0 ]; then
+  TTY_VAR=1                 # zaten terminaldeyiz (indirilip elle calistirilmis)
+elif { : </dev/tty; } 2>/dev/null; then
+  TTY_VAR=1                 # boruyuz ama terminal erisilebilir
+else
+  export PGD_SESSIZ=1       # terminal yok: sihirbaz atlanir, otomatik tespit
 fi
 
 # Ilk satir HEMEN basilir: kurulum sessizce asili kalirsa nerede takildigi
@@ -94,4 +100,9 @@ chmod +x "$HEDEF"/install.sh "$HEDEF"/kurulum.py "$HEDEF"/proxmox-link.sh 2>/dev
 
 bilgi "kurulum baslatiliyor"
 cd "$HEDEF"
-./install.sh
+# Terminali yalnizca install.sh'e ver; bizim stdin'imiz boru olarak kalir.
+if [ "$TTY_VAR" = "1" ] && [ -z "${PGD_SESSIZ:-}" ]; then
+  ./install.sh </dev/tty
+else
+  ./install.sh
+fi

@@ -1155,6 +1155,67 @@ def t_bakim_arayuzu():
         dogru("ui_pass" not in (d.get("ayarlar") or {}), "arayuz sifresi asla cikmamali")
     finally: o.temizle()
 
+def _boru_ve_tty_ile_kos(betik, saniye=6):
+    """Betigi 'curl | bash' gibi BORUDAN calistirir ve surece bir KONTROL
+    TERMINALI de verir. Proxmox web konsolunun kosulu tam budur; ssh -T'de
+    /dev/tty acilmadigi icin bu yol hic denenmiyordu ve kirikligi kacmisti.
+    (cikti, 'bitti'|'ZAMAN ASIMI') doner."""
+    import pty, fcntl, termios
+    usta, kole = pty.openpty()
+    r, w = os.pipe()
+    os.write(w, betik.encode()); os.close(w)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            fcntl.ioctl(kole, termios.TIOCSCTTY, 0)
+            os.dup2(r, 0); os.dup2(kole, 1); os.dup2(kole, 2)
+            os.close(usta)
+            os.execvp("bash", ["bash"])
+        except Exception:
+            os._exit(127)
+    os.close(kole); os.close(r)
+    cikti = b""; basla = time.time(); os.set_blocking(usta, False)
+    sonuc = "ZAMAN ASIMI"
+    while time.time() - basla < saniye:
+        try: parca = os.read(usta, 4096)
+        except BlockingIOError: parca = b""
+        except OSError: break
+        if parca: cikti += parca
+        else: time.sleep(0.05)
+        if os.waitpid(pid, os.WNOHANG)[0]: sonuc = "bitti"; break
+    if sonuc != "bitti":
+        try: os.kill(pid, 9); os.waitpid(pid, 0)
+        except Exception: pass
+    os.close(usta)
+    return cikti.decode("utf-8", "replace"), sonuc
+
+@test("kur.sh boru + terminal ile asili kalmaz", "kurulum")
+def t_kur_boru_tty():
+    """GERCEK hata buydu: 'curl | bash' derken bash betigi STDIN'den okur.
+    Onceki surum stdin'i /dev/tty'ye ceviriyordu; bash betigin kalanini
+    klavyeden beklemeye basliyor, ekrana HICBIR SEY yazmadan asili kaliyordu.
+    Proxmox web konsolunda tam olarak bu yasandi.
+
+    Test gercek kur.sh'in stdin isleyen onsozunu calistirir."""
+    ham = open(os.path.join(KOK, "kur.sh")).read()
+    kesme = ham.find('bilgi "pve-gdrive-backup kurulumu basliyor"')
+    dogru(kesme > 0, "kur.sh ilk bilgi satirini icermeli")
+    onsoz = ham[:kesme] + '\necho ONSOZ-GECILDI\necho SONA-KADAR-OKUNDU\n'
+    # root kontrolu testi durdurmasin
+    onsoz = onsoz.replace('[ "$(id -u)" = "0" ] || hata "root olarak calistir (sudo -i)"', "")
+
+    cikti, durum = _boru_ve_tty_ile_kos(onsoz)
+    dogru(durum == "bitti", f"betik asili kaldi ({durum}); cikti: {cikti.strip()[:80]!r}")
+    dogru("SONA-KADAR-OKUNDU" in cikti,
+          f"bash betigin sonuna ulasamadi - stdin calinmis olabilir: {cikti.strip()[:120]!r}")
+
+    # Kirik desen geri gelmesin: kendi stdin'imizi terminale cevirmek yasak
+    dogru("exec 0<&3" not in ham,
+          "bash'in kendi stdin'i terminale cevrilmemeli (betigin kalani oradan okunuyor)")
+    # Terminal yine de sihirbaza ulasabilmeli
+    dogru("</dev/tty" in ham, "sihirbaza terminal ayrica verilmeli")
+
 @test("tek satirlik kurulum sessizce asilmaz", "kurulum")
 def t_kur_zaman_asimi():
     """Kurulum ilk denemede curl'de takilip ekrana HICBIR SEY yazmadan asili
