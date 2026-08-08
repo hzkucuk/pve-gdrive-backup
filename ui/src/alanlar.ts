@@ -78,6 +78,7 @@ const PLAN_ALANLARI: Alan[] = [
   // Bant genisligi cizelgesi ve otomatik mod: yalnizca ilgiliyken dogrulanir
   { id: "e-bwsch",  anahtar: "bwlimit_schedule", tip: "metin", adim: 6, ops: true, vars: "",
     ozelDogrula: (id) => vBwSched(id) },
+  { id: "e-bwlmode", anahtar: "bw_auto_link_mode", tip: "metin", adim: 0, vars: "ogren" },
   { id: "e-bwlink", anahtar: "bw_auto_link",        tip: "metin", adim: 6, rx: RX.bw, vars: "100M",
     kosul: () => chk("e-bwauto"), mesaj: C("ör. 12M, 100M") },
   { id: "e-bwres",  anahtar: "bw_auto_reserve_pct", tip: "sayi", adim: 6, min: 0, max: 95, vars: 30,

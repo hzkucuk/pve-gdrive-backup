@@ -1,0 +1,22 @@
+[Unit]
+# Sablon birim: OnFailure=pve-gdrive-bildir@%n.service ile cagrilir.
+# %i, coken birimin adidir (ornek: pve-gdrive-ui.service).
+Description=pve-gdrive: %i birimi coktugunde mail gonderir
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py bildir %i
+
+# Bildirim isi hicbir zaman host'u yormasin
+Nice=10
+CPUWeight=10
+MemoryMax=256M
+TasksMax=32
+TimeoutStartSec=120
+
+NoNewPrivileges=yes
+ProtectHome=tmpfs
+Environment=RCLONE_CONFIG=/var/lib/pve-gdrive/rclone.conf
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

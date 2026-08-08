@@ -252,6 +252,12 @@ function bwBytes(t: string): number {
   const carp: Record<string, number> = { "": 1, B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
   return parseFloat(m[1]) * (carp[m[2].toUpperCase()] || 1);
 }
+/** Elle kapasite alani yalnizca manuel kipte gorunsun. */
+function bwLinkKipi(): void {
+  const satir = document.getElementById("bwlink-satir");
+  if (satir) satir.style.display = val("e-bwlmode") === "manuel" ? "" : "none";
+}
+
 function bwAutoToggle(): void {
   const acik = chk("e-bwauto");
   el("bwauto-box").style.display = acik ? "" : "none";
@@ -259,17 +265,30 @@ function bwAutoToggle(): void {
   fld("e-bwsch").disabled = acik;
   markDirty();
 }
+interface IfaceBilgi {
+  name: string; tx: number; rx: number;
+  default: boolean; onerilen: boolean; kopru: boolean; hiz: number;
+}
+
 async function loadIfaces(secili: string): Promise<void> {
   try {
-    const j = await api<{ default: string; ifaces: { name: string; tx: number; default: boolean }[] }>("/api/ifaces");
+    const j = await api<{ default: string; onerilen: string; onerilen_neden: string;
+                          ifaces: IfaceBilgi[] }>("/api/ifaces");
     const list = j.ifaces || [];
-    setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-      + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
-        + " — " + hb(i.tx) + C(" gönderilmiş") + (i.default ? C(" (varsayılan rota)") : "")
-        + "</option>").join(""));
+    const etiket = (i: IfaceBilgi): string => esc(i.name)
+      + (i.kopru ? C("  · köprü") : "")
+      + (i.hiz ? "  · " + i.hiz + " Mbit" : "")
+      + "  · " + hb(i.tx) + C(" gönderilmiş")
+      + (i.onerilen ? C("  ← önerilen") : "");
+    setHtml("e-bwif", '<option value="">' + C("(otomatik: ") + esc(j.onerilen || "-")
+      + ")</option>" + list.map((i) => '<option value="' + esc(i.name) + '">'
+        + etiket(i) + "</option>").join(""));
     setVal("e-bwif", secili);
-    setTxt("e-bwifhint", C("Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; ")
-      + C("VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç."));
+    setHtml("e-bwifhint", C("Otomatik seçim: ") + "<b>" + esc(j.onerilen || "-") + "</b> ("
+      + esc(C(j.onerilen_neden || "")) + "). "
+      + C("Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik "
+        + "internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki "
+        + "bond/fiziksel arayüz doğru ölçümü verir."));
   } catch { /* yok say */ }
 }
 
@@ -299,6 +318,22 @@ function pillOf(p: Plan): string {
     + ">⏸ ATLANDI</span>";
   return '<span class="pill idle">' + esc(s.status || "—").toUpperCase() + "</span>";
 }
+/** Zamanlayici durmussa bunu susarak geçmek olmaz: timer olurse hicbir yedek
+ *  alinmaz ve tek belirtisi "sonraki calisma"nin gecmiste kalmasi olur. */
+function saglikCiz(): void {
+  const h = S && S.saglik;
+  const kutu = document.getElementById("saglik");
+  if (!kutu) return;
+  if (!h || h.tick === "iyi") { kutu.style.display = "none"; kutu.textContent = ""; return; }
+  kutu.style.display = "";
+  kutu.className = "card uyari-kutu";
+  kutu.innerHTML = '<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
+                                                         : "Zamanlayıcı hiç çalışmadı"))
+    + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
+    + '<div class="small" style="margin-top:5px">'
+    + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>";
+}
+
 function progOf(p: Plan): string {
   const g = p.weekdays && p.weekdays.length
     ? p.weekdays.map((d) => WD[d - 1]).join(",") : "her gün";
@@ -440,6 +475,7 @@ function render(): void {
       + "</span>"
     : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
       + "</span>");
+  saglikCiz();
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
@@ -847,9 +883,10 @@ function openEditor(pid: string | null): void {
     + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
   setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
   void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages();
-  ramHint(); saklamaIpucu();
+  ramHint(); saklamaIpucu(); bwLinkKipi();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
+  fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
   fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
   fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
   fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };

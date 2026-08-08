@@ -3,9 +3,16 @@ Description=Proxmox -> Google Drive: vakti gelen yedek planlarini calistirir
 After=network-online.target
 Wants=network-online.target
 
+# Birim coktugunde haber ver (bkz. pve-gdrive-bildir@.service).
+# Arac kendini izlemiyordu: servis olurse yedek alinmadigi ancak
+# haftalik raporda -o da gidebilirse- fark ediliyordu.
+OnFailure=pve-gdrive-bildir@%n.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py tick
+# Bir tur asla sonsuza kadar surmesin: kilitli kalan surec sonrakini de bloklar
+TimeoutStartSec=6h
 
 # --- Kaynak denetimi: yedekleme isi hipervizoru ve VM/CT'leri yormasin ---
 Nice=10

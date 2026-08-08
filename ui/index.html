@@ -23,6 +23,7 @@
 </header>
 
 <div class="hesaplar" id="hesapserit"></div>
+<div class="card uyari-kutu" id="saglik" style="display:none"></div>
 <div class="plans" id="plans"></div>
 <div id="detail"></div>
 
@@ -195,8 +196,18 @@
         <div class="eg">Sunucunda UrBackup gibi başka bir yedekleme varsa bu modu aç:
           o yüklerken sen yavaşlar, hat boşalınca hızlanırsın.</div></div></div>
     <div id="bwauto-box" style="display:none">
-      <div class="f"><label class="tip" title="İnternet bağlantının toplam YÜKLEME kapasitesi. Hesaplamanın temeli budur.">Hat kapasitesi</label>
-        <div><input id="e-bwlink" placeholder="100M"><div class="errmsg" id="err-bwlink"></div>
+      <div class="f"><label class="tip" title="Hat kapasitesi ölçülerek mi bulunsun, elle mi girilsin?">Hat kapasitesi</label>
+        <div><select id="e-bwlmode">
+            <option value="ogren">Ölç ve öğren (önerilen)</option>
+            <option value="manuel">Elle gireceğim</option>
+          </select>
+          <div class="eg" id="eg-bwlmode">Arayüzün bağ hızı internet yükleme hızını
+            <b>göstermez</b>: 4×1 Gbit bond'un arkasında 60 Mbit'lik bir ISS hattı olabilir.
+            Öğrenme kipinde araç, kendi sınırına dayanmadığı anlarda fiilen ulaştığı en
+            yüksek sürekli hızı ölçer ve onu temel alır. Ölçülmüş bir alt sınır,
+            uydurulmuş bir üst sınırdan iyidir.</div></div></div>
+      <div class="f" id="bwlink-satir"><label class="tip" title="Yalnızca elle kipte kullanılır.">Elle hat kapasitesi</label>
+        <div><input id="e-bwlink" placeholder="12M"><div class="errmsg" id="err-bwlink"></div>
           <div class="eg">Yükleme hızın. 100 Mbit ≈ <code>12M</code> · 1 Gbit ≈ <code>120M</code> ·
             simetrik 100/100 fiber ≈ <code>12M</code>. <b>Bit değil bayt yaz.</b></div></div></div>
       <div class="f"><label class="tip" title="Hattın bu yüzdesi her zaman diğer uygulamalara bırakılır.">Diğerlerine ayrılan</label>

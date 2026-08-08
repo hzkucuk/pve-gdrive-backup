@@ -630,6 +630,153 @@ def t_rapor():
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
     finally: o.temizle()
 
+@test("zamanlayici gecikmesi fark edilir", "izleme")
+def t_tick_sagligi():
+    """Timer durursa hicbir yedek alinmaz ve tek belirtisi 'sonraki calisma'nin
+    gecmiste kalmasidir. Damga eskirse arayuz ve rapor uyarmali."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        d, m2 = G.tick_sagligi()
+        esit(d, "bilinmiyor", "hic tick yokken bilinmiyor olmali")
+        dogru(m2, "sebep yazilmali")
+        G.tick_damgasi_yaz()
+        esit(G.tick_sagligi()[0], "iyi", "taze damga iyi olmali")
+        dogru(G.tick_yasi_dk() < 1, "yas kucuk olmali")
+        # damgayi geriye al
+        G.put_state_root({"last_tick_epoch": int(time.time()) - 3600})
+        d, m2 = G.tick_sagligi()
+        esit(d, "gecikmis", "bir saatlik damga gecikmis sayilmali")
+        dogru("60" in m2, f"kac dakika gectigi yazmali: {m2}")
+        c = G.cfg(); c["tick_uyari_dk"] = 120; G.save_cfg(c)
+        esit(G.tick_sagligi()[0], "iyi", "esik yukselince iyi olmali")
+    finally: o.temizle()
+
+@test("tick her calismada damga birakir", "izleme")
+def t_tick_damga():
+    o = Ortam()
+    try:
+        o.plan(run_at="23:59")          # bugun calismasin, sadece damga birakilsin
+        G = o.modul()
+        dogru(G.tick_yasi_dk() is None, "baslangicta damga yok")
+        G.do_tick()
+        dogru(G.tick_yasi_dk() is not None, "tick damga birakmali")
+        dogru(G.read_state().get("last_tick"), "okunabilir zaman damgasi da olmali")
+        esit(G.public_status()["saglik"]["tick"], "iyi", "durum API'si sagligi bildirmeli")
+    finally: o.temizle()
+
+@test("birim hatasi maili gunlukle birlikte gider", "izleme")
+def t_birim_bildir():
+    o = Ortam()
+    try:
+        o.plan(mail_to="yonetici@ornek.com")
+        G = o.modul()
+        yakalanan = {}
+        class SahteSMTP:
+            def __init__(self, *a, **k): pass
+            def starttls(self): pass
+            def login(self, *a): pass
+            def send_message(self, m): yakalanan["m"] = m
+            def quit(self): pass
+        G.smtplib.SMTP = SahteSMTP
+        c = G.cfg()
+        c["smtp_profiles"] = [{"id": "s1", "name": "t", "host": "h", "port": 25,
+                               "security": "none", "user": "", "pass": "", "from": "a@b.c"}]
+        c["plans"][0]["smtp_profile"] = "s1"
+        G.save_cfg(c)
+        esit(G.birim_bildir("pve-gdrive-ui.service"), 0, "bildirim basarili olmali")
+        m2 = yakalanan["m"]
+        esit(m2["To"], "yonetici@ornek.com", "alici plandan alinmali")
+        dogru("pve-gdrive-ui.service" in m2["Subject"], f"konu birimi icermeli: {m2['Subject']}")
+        govde = m2.get_body(("plain",)).get_content()
+        for parca in ("SYSTEMD DURUMU", "SON GUNLUK", "UYARILAR"):
+            dogru(parca in govde, f"'{parca}' bolumu olmali")
+        # kapatilinca susmali
+        c = G.cfg(); c["failure_mail"] = False; G.save_cfg(c)
+        yakalanan.clear()
+        esit(G.birim_bildir("pve-gdrive-ui.service"), 1, "kapaliyken basarisiz donmeli")
+        dogru("m" not in yakalanan, "kapaliyken mail gitmemeli")
+    finally: o.temizle()
+
+@test("systemd birimleri hata bildirimi tanimlar", "izleme")
+def t_systemd_onfailure():
+    kok = os.path.join(KOK, "systemd")
+    sablon = os.path.join(kok, "pve-gdrive-bildir@.service")
+    dogru(os.path.exists(sablon), "bildirim sablon birimi olmali")
+    ic = open(sablon).read()
+    dogru("pve_gdrive.py bildir %i" in ic, "sablon coken birimin adini gecmeli")
+    for birim in ("pve-gdrive-ui.service", "pve-gdrive-tick.service"):
+        s2 = open(os.path.join(kok, birim)).read()
+        dogru("OnFailure=pve-gdrive-bildir@%n.service" in s2, f"{birim} OnFailure tanimlamali")
+    tick = open(os.path.join(kok, "pve-gdrive-tick.service")).read()
+    dogru("TimeoutStartSec" in tick, "tick sonsuza kadar surmemeli")
+
+@test("koprunun altindaki uplink secilir", "bantgenisligi")
+def t_wan_iface():
+    """Proxmox'ta varsayilan rota vmbr0 gibi bir kopruden gecer. Koprunun
+    sayaclari VM<->VM yerel trafigi de sayar; o trafik internete cikmaz ve
+    yukleme hizimizla yarismaz. Olcum koprunun uplink uyesinden yapilmali."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        sahte = os.path.join(o.dizin, "sys")
+        def ag(ad, kopru=False, uyeler=(), bond=False, fiziksel=False):
+            d = os.path.join(sahte, ad); os.makedirs(d, exist_ok=True)
+            if kopru:
+                os.makedirs(os.path.join(d, "bridge"), exist_ok=True)
+                for u in uyeler: os.makedirs(os.path.join(d, "brif", u), exist_ok=True)
+            if bond: os.makedirs(os.path.join(d, "bonding"), exist_ok=True)
+            if fiziksel: os.makedirs(os.path.join(d, "device"), exist_ok=True)
+        ag("vmbr0", kopru=True, uyeler=["bond0", "tap105i0", "veth100i0", "fwpr102p0"])
+        ag("bond0", bond=True); ag("eno1", fiziksel=True)
+        G.kopru_mu = lambda i: os.path.isdir(os.path.join(sahte, i, "bridge"))
+        gercek_kopru_uplink = G.kopru_uplink
+        def sahte_uplink(i):
+            try: uyeler = sorted(os.listdir(os.path.join(sahte, i, "brif")))
+            except Exception: return ""
+            aday = [u for u in uyeler if not u.startswith(G.SANAL_ONEK)]
+            for u in aday:
+                if os.path.isdir(os.path.join(sahte, u, "bonding")): return u
+            for u in aday:
+                if os.path.exists(os.path.join(sahte, u, "device")): return u
+            return aday[0] if aday else ""
+        G.kopru_uplink = sahte_uplink
+        G.default_iface = lambda: "vmbr0"
+        i, neden = G.wan_iface()
+        esit(i, "bond0", "bond uplink secilmeliydi")
+        dogru("uplink" in neden, f"sebep aciklanmali: {neden}")
+        esit(G.wan_iface("eno3")[0], "eno3", "elle secim her zaman kazanir")
+        # Kopru degilse dokunulmaz
+        G.default_iface = lambda: "eno1"
+        esit(G.wan_iface()[0], "eno1", "kopru olmayan arayuz oldugu gibi kalir")
+        # Sanal uyeler asla secilmez
+        G.kopru_uplink = gercek_kopru_uplink
+        for sanal in ("tap105i0", "veth100i0", "fwpr102p0", "fwbr1i0", "docker0"):
+            dogru(sanal.startswith(G.SANAL_ONEK), f"{sanal} sanal sayilmali")
+        dogru(not "bond0".startswith(G.SANAL_ONEK), "bond0 sanal sayilmamali")
+    finally: o.temizle()
+
+@test("hat kapasitesi olculerek ogrenilir ve kalici yazilir", "bantgenisligi")
+def t_bw_ogrenme():
+    """Arayuzun bag hizi internet yukleme hizini gostermez. Olculen deger
+    saklanir; gerileme icin kolayca dusmemeli."""
+    o = Ortam()
+    try:
+        o.plan()
+        G = o.modul()
+        esit(G.bw_ogrenilen_oku("p1"), 0.0, "baslangicta olcum yok")
+        G.bw_ogrenilen_yaz("p1", 8_086_657)              # 7.7 MB/sn
+        esit(int(G.bw_ogrenilen_oku("p1")), 8_086_657, "olcum kalici olmali")
+        s = G.pstate(G.read_state(), "p1")
+        dogru(s.get("bw_olculen_zaman"), "olcum zamani da yazilmali")
+        # varsayilan kip ogrenme
+        esit(G.get_plan("p1")["bw_auto_link_mode"], "ogren", "varsayilan kip ogrenme")
+        o.plan(bw_auto_link_mode="sacma")
+        esit(G.get_plan("p1")["bw_auto_link_mode"], "ogren", "gecersiz kip varsayilana doner")
+        o.plan(bw_auto_link_mode="manuel")
+        esit(G.get_plan("p1")["bw_auto_link_mode"], "manuel", "manuel kip korunur")
+    finally: o.temizle()
+
 @test("host yapilandirma arsivi ozel anahtarlari almaz", "yapilandirma")
 def t_hostconf_gizli():
     """Kume CA anahtari ve authkey.key sifresiz Drive'a cikmamali.

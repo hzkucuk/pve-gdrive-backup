@@ -151,7 +151,10 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [ ] Login ekranı + captcha + güvenlik önlemleri
 - [x] Proxmox arayüzünden erişim: Datacenter Notes linki ve nginx ters vekil (TLS)
 - [x] Bant genişliği plan başına: sabit, saatlik çizelge ve otomatik mod
-- [ ] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları
+- [x] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları
+- [x] Bant genişliği ölçümü doğru arayüzden (köprü değil, altındaki bond/fiziksel)
+- [x] Hat kapasitesi tahmin değil ölçüm: fiilen ulaşılan en yüksek hız öğrenilir
+- [x] Servis izleme: systemd OnFailure maili + zamanlayıcı gecikme uyarısı
 - [x] Arayüzde canlı olay akışı (SSE): durum, ilerleme ve log anında düşer
 - [x] Sağ tık menüleri: plan, hesap, SMTP, log ve tablo satırları
 - [x] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)

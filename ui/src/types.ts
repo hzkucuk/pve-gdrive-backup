@@ -55,7 +55,7 @@ interface Plan {
   bw_auto_reserve_pct: number;
   bw_auto_min: string;
   bw_auto_max: string;
-  bw_auto_iface: string;
+  bw_auto_iface: string; bw_auto_link_mode?: "ogren" | "manuel";
   bw_auto_interval_sec: number;
   bw_auto_smooth: number;
   bw_auto_step_pct: number;
@@ -91,6 +91,11 @@ interface Plan {
   src_dumps: number;
 }
 
+interface Saglik {
+  tick: "iyi" | "gecikmis" | "bilinmiyor";
+  tick_mesaj: string; tick_son: string | null; tick_yas_dk: number;
+}
+
 interface Settings {
   ui_bind: string; ui_port: number; ui_user: string; ui_refresh_sec: number;
   browse_roots: string[]; allow_account_cleanup: boolean; history_max: number;
@@ -100,6 +105,7 @@ interface Settings {
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;
   update_check: boolean; update_auto: boolean; update_url: string; update_backup_keep: number;
   allow_networks: string[];
+  failure_mail?: boolean; failure_mail_to?: string; tick_uyari_dk?: number;
   sse_enabled?: boolean; sse_watch_ms?: number;
   sse_heartbeat_sec?: number; sse_max_clients?: number;
   remember_enabled?: boolean; remember_days?: number;
@@ -122,6 +128,7 @@ interface Status {
   tls?: { aktif: boolean; sertifika: { konu: string; veren: string; bitis: string } | null };
   hesaplar?: { name: string; type: string; quota: Quota; pct: number | null }[];
   surum?: string;
+  saglik?: Saglik;
   guncelleme?: { uzak: string | null; yeni_var: boolean; otomatik: boolean; hata: string };
   csrf: string;
   login?: boolean;

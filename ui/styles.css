@@ -155,3 +155,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .ctx-oge.pasif:hover{background:transparent;color:#5b6472}
 .ctx-simge{width:17px;text-align:center;flex:0 0 auto;opacity:.9}
 .ctx-metin{overflow:hidden;text-overflow:ellipsis}
+
+/* Zamanlayici/servis saglik uyarisi */
+.uyari-kutu{border-color:#8a2b2b;background:#1f1414;margin-bottom:12px}
+.uyari-kutu code{background:#2a1a1a;padding:1px 5px;border-radius:4px}

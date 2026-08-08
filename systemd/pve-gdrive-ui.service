@@ -3,6 +3,11 @@ Description=Proxmox -> Google Drive yedek web arayuzu
 After=network-online.target
 Wants=network-online.target
 
+# Birim coktugunde haber ver (bkz. pve-gdrive-bildir@.service).
+# Arac kendini izlemiyordu: servis olurse yedek alinmadigi ancak
+# haftalik raporda -o da gidebilirse- fark ediliyordu.
+OnFailure=pve-gdrive-bildir@%n.service
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/pve_gdrive.py serve

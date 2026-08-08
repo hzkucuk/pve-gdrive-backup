@@ -94,6 +94,12 @@ GLOBAL_DEFAULTS = {
     "rclone_tail_lines": 40,    # rclone ciktisindan bellekte tutulacak son satir sayisi
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
+    # --- servis izleme ---
+    "failure_mail": True,         # systemd birimi cokunce mail at
+    "failure_mail_to": "",        # bos ise ilk planin alicisi kullanilir
+    "failure_smtp_profile": "",
+    "failure_mail_lines": 40,     # maile eklenecek gunluk satiri
+    "tick_uyari_dk": 20,          # bu kadar dakikadir tick gelmediyse uyar
     # --- host yapilandirma yedegi ---
     # vzdump diskleri alir, host yapilandirmasini almaz. Bu kucuk arsiv
     # "diskleri nereye geri yukleyecegim" sorusunun cevabidir.
@@ -164,7 +170,11 @@ PLAN_DEFAULTS = {
     "bwlimit_upload_only": True,  # sinir yalnizca yuklemeye uygulansin
     # --- otomatik bant genisligi: hattaki diger trafige gore kendini ayarlar ---
     "bwlimit_auto": False,
-    "bw_auto_link": "100M",       # toplam YUKLEME kapasiten (ISS hizin)
+    # Hat kapasitesi nasil belirlensin: "ogren" (fiilen olculen en yuksek
+    # surekli hiz) veya "manuel" (asagidaki bw_auto_link). Arayuzun link hizi
+    # kullanilmaz: 1 Gbit LAN'in arkasinda 60 Mbit ISS olabilir.
+    "bw_auto_link_mode": "ogren",
+    "bw_auto_link": "100M",       # yalnizca manuel kipte: toplam YUKLEME kapasiten
     "bw_auto_reserve_pct": 30,    # bu yuzde kadari her zaman digerlerine birakilir
     "bw_auto_min": "1M",          # hat mesgulken inilecek taban
     "bw_auto_max": "",            # bos = bwlimit degeri tavan olarak kullanilir
@@ -303,6 +313,8 @@ def norm_plan(p):
     q["bwlimit_schedule"] = str(q.get("bwlimit_schedule") or "").strip()
     q["bwlimit_upload_only"] = bool(q.get("bwlimit_upload_only", True))
     q["bwlimit_auto"] = bool(q.get("bwlimit_auto", False))
+    if str(q.get("bw_auto_link_mode")) not in ("ogren", "manuel"):
+        q["bw_auto_link_mode"] = PLAN_DEFAULTS["bw_auto_link_mode"]
     for k in ("bw_auto_link", "bw_auto_min", "bw_auto_max", "bw_auto_iface"):
         q[k] = str(q.get(k) or "").strip()
     for k, alt, ust in (("bw_auto_reserve_pct", 0, 95), ("bw_auto_interval_sec", 2, 3600),
@@ -488,6 +500,92 @@ def log(msg, plan=None):
       # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
       if not os.environ.get("PVE_GDRIVE_QUIET"): print(line, flush=True)
 
+
+# ---------- SERVIS IZLEME ----------
+# Arac kendini izlemiyordu: pve-gdrive-ui coker ya da tick timer durursa
+# kimse haberdar olmuyor, yedek alinmadigi ancak haftalik raporda (o da
+# gidebilirse) fark ediliyordu. Iki katman:
+#   1) systemd OnFailure= -> birim cokunce hemen mail
+#   2) her tick "yasiyorum" damgasi birakir; damga eskirse arayuz ve rapor uyarir
+
+def tick_damgasi_yaz():
+    put_state_root({"last_tick": now_str(), "last_tick_epoch": int(time.time())})
+
+def tick_yasi_dk():
+    """Son tick'in uzerinden kac dakika gecti? Hic calismadiysa None."""
+    try:
+        e = float(read_state().get("last_tick_epoch") or 0)
+    except Exception as ex:
+        yut("tick_yasi_dk", ex); return None
+    if not e: return None
+    return max(0.0, (time.time() - e) / 60.0)
+
+def tick_sagligi():
+    """(durum, mesaj). durum: iyi | gecikmis | bilinmiyor"""
+    esik = float(cfg().get("tick_uyari_dk") or 20)
+    yas = tick_yasi_dk()
+    if yas is None:
+        return "bilinmiyor", M("Zamanlayici henuz hic calismadi.")
+    if yas > esik:
+        return "gecikmis", (M("Zamanlayici {d} dakikadir calismadi (esik {e} dk). "
+                              "pve-gdrive-tick.timer duruyor olabilir.")
+                            .replace("{d}", str(int(yas))).replace("{e}", str(int(esik))))
+    return "iyi", ""
+
+def birim_bildir(birim):
+    """systemd OnFailure= bunu cagirir. Coken birimin son gunlugunu maile koyar."""
+    C = cfg()
+    if not C.get("failure_mail", True):
+        log(f"birim hatasi bildirimi kapali: {birim}"); return 1
+    satirlar = []
+    try:
+        r = subprocess.run(["journalctl", "-u", birim, "-n",
+                            str(int(C.get("failure_mail_lines") or 40)),
+                            "--no-pager", "-o", "short-iso"],
+                           capture_output=True, text=True, timeout=30)
+        satirlar = (r.stdout or r.stderr or "").strip().split("\n")
+    except Exception as e:
+        satirlar = [f"journalctl okunamadi: {e}"]
+    try:
+        d = subprocess.run(["systemctl", "show", birim, "-p",
+                            "Result,ExecMainStatus,NRestarts,ActiveState"],
+                           capture_output=True, text=True, timeout=15).stdout.strip()
+    except Exception as e:
+        d = f"systemctl okunamadi: {e}"
+
+    govde = "\n".join([
+        f"[HATA] Servis birimi coktu - {birim}",
+        "=" * 58, "",
+        "OZET",
+        f"  Birim        : {birim}",
+        f"  Zaman        : {now_str()}",
+        f"  Sunucu       : {os.uname().nodename}",
+        "",
+        "SYSTEMD DURUMU",
+    ] + [f"  {x}" for x in d.split("\n") if x.strip()] + [
+        "",
+        "SON GUNLUK",
+    ] + [f"  {x}" for x in satirlar[-int(C.get("failure_mail_lines") or 40):]] + [
+        "",
+        "UYARILAR",
+        "  ! Bu birim calismadigi surece yedek alinmiyor olabilir.",
+        "",
+        f"Log: {C.get('log_file')}",
+    ])
+    # Alici: acikca verilmisse o, yoksa ilk planin adresi
+    alici = C.get("failure_mail_to") or ""
+    profil = C.get("failure_smtp_profile") or ""
+    if not alici:
+        for pl in C.get("plans", []):
+            if pl.get("mail_to"):
+                alici = pl["mail_to"]; profil = profil or pl.get("smtp_profile"); break
+    if not alici:
+        log(f"birim hatasi ({birim}) - bildirilecek mail adresi yok"); return 1
+    konu = f"[Proxmox Yedek] SERVIS HATASI - {birim}"
+    ok = send_mail(alici, konu, metni_cevir(govde), profil, durum="HATA")
+    log(f"birim hatasi bildirildi: {birim} -> {alici}" if ok
+        else f"birim hatasi bildirilemedi: {birim}")
+    return 0 if ok else 1
 
 # ---------- HOST YAPILANDIRMA YEDEGI ----------
 # vzdump yalnizca disk yedegi alir. Host olursa elinde diskler olur ama onlari
@@ -803,6 +901,11 @@ def put_pstate(pid, patch):
     st["updated"] = now_str()
     write_state(st)
     return s
+
+def put_state_root(patch):
+    """Plan disi, kok duzeyindeki durum alanlari (ornegin son tick damgasi)."""
+    st = read_state(); st.update(patch); st["updated"] = now_str()
+    write_state(st)
 
 # ---------- ILERLEME (canlı durum) ----------
 def progress_path(pid):
@@ -1295,6 +1398,8 @@ def build_report(p):
             uyari.append("Su VM/CT'ler henuz Drive'a cikmadi: " + ", ".join(eksik))
     L.append("")
 
+    tick_durum, tick_mesaj = tick_sagligi()
+    if tick_durum != "iyi": uyari.append(tick_mesaj)
     if s.get("status") == "HATA": uyari.append("Son calisma HATA ile bitti.")
     stale = int(p.get("report_stale_days") or 0)
     if stale and s.get("last_run"):
@@ -1474,8 +1579,61 @@ def default_iface():
     ifs = net_ifaces()
     return max(ifs, key=lambda k: ifs[k][1]) if ifs else ""
 
+SANAL_ONEK = ("tap", "veth", "fwbr", "fwln", "fwpr", "docker", "lo", "vnet")
+
+def kopru_mu(iface):
+    return os.path.isdir(f"/sys/class/net/{iface}/bridge")
+
+def kopru_uplink(iface):
+    """Bir koprunun disariya cikan uyesini bulur.
+
+    Neden gerekli: Proxmox'ta varsayilan rota vmbr0 gibi bir kopruden gecer.
+    Koprunun sayaclari VM'ler ARASI yerel trafigi de sayar - o trafik hic
+    internete cikmaz, bizim yukleme hizimizla yarismaz. Koprunun altindaki
+    bond/fiziksel arayuz ise tam dogru olcumu verir: VM'lerin internet trafigi
+    dahil, VM<->VM trafigi haric.
+    """
+    try: uyeler = sorted(os.listdir(f"/sys/class/net/{iface}/brif"))
+    except Exception: return ""
+    aday = [u for u in uyeler if not u.startswith(SANAL_ONEK)]
+    if not aday: return ""
+    # bond once: birden fazla fiziksel bagi tek noktada topluyor
+    for u in aday:
+        if os.path.isdir(f"/sys/class/net/{u}/bonding"): return u
+    for u in aday:
+        if os.path.exists(f"/sys/class/net/{u}/device"): return u
+    return aday[0]
+
+def wan_iface(secili=""):
+    """Olculecek arayuz. Kullanici secmediyse varsayilan rotanin arayuzu,
+    o bir kopruyse altindaki uplink. (arayuz, nasil_secildi) doner."""
+    if secili: return secili, "elle secildi"
+    ana = default_iface()
+    if not ana: return "", "bulunamadi"
+    if kopru_mu(ana):
+        alt = kopru_uplink(ana)
+        if alt: return alt, f"{ana} koprusunun uplink'i"
+        return ana, f"{ana} koprusu (uplink uyesi bulunamadi)"
+    return ana, "varsayilan rota"
+
+def iface_link_mbit(iface):
+    """Arayuzun bildirdigi bag hizi (Mbit). Koprulerde uydurmadir; yalnizca
+    bilgi amacli gosterilir, hicbir hesapta kullanilmaz."""
+    try:
+        with open(f"/sys/class/net/{iface}/speed") as f: return int(f.read().strip())
+    except Exception: return 0
+
 def tx_bytes(iface):
     return net_ifaces().get(iface, (0, 0))[1]
+
+def bw_ogrenilen_oku(pid):
+    """Daha once olculmus en yuksek surekli yukleme hizi (bayt/sn)."""
+    try: return float(pstate(read_state(), pid).get("bw_olculen") or 0)
+    except Exception as e:
+        yut("bw_ogrenilen_oku", e); return 0.0
+
+def bw_ogrenilen_yaz(pid, deger):
+    put_pstate(pid, {"bw_olculen": int(deger), "bw_olculen_zaman": now_str()})
 
 def rc_port(pid):
     """Plan basina sabit ama cakismayan yerel rc portu."""
@@ -1520,21 +1678,38 @@ def bw_auto_izle(p, port, dur_bayragi):
     """rclone calisirken hattaki DIGER trafigi olcup sinirimizi canli ayarlar.
     Boylece UrBackup gibi baska bir yedekleme yazilimi hatti kullandiginda geri cekiliriz."""
     pid = p["id"]
-    iface = p.get("bw_auto_iface") or default_iface()
+    iface, nasil = wan_iface(p.get("bw_auto_iface"))
     if not iface:
         log("otomatik bant genisligi: ag arayuzu bulunamadi, sabit sinir kullanilacak", pid); return
     aralik = max(2, int(p.get("bw_auto_interval_sec") or 10))
-    link = bw_bytes(p.get("bw_auto_link")) or bw_bytes("100M")
     taban = bw_bytes(p.get("bw_auto_min")) or bw_bytes("1M")
+
+    # Hat kapasitesi: elle girilen deger bir TAHMIN. Arayuzun link hizi da
+    # internet yukleme hizini gostermez (1 Gbit LAN'in arkasinda 60 Mbit ISS
+    # olabilir). Ogrenme kipinde daha once fiilen olculmus en yuksek surekli
+    # hizi taban aliriz - olculmus bir alt sinir, uydurulmus bir ust sinirdan
+    # iyidir.
+    elle = bw_bytes(p.get("bw_auto_link"))
+    ogrenilen = bw_ogrenilen_oku(pid)
+    kip = str(p.get("bw_auto_link_mode") or "ogren")
+    if kip == "manuel" or not ogrenilen:
+        link = elle or ogrenilen or bw_bytes("100M")
+        kaynak = "elle" if elle and kip == "manuel" else ("olculen" if ogrenilen else "varsayilan")
+    else:
+        link = ogrenilen
+        kaynak = "olculen"
     tavan = bw_bytes(p.get("bw_auto_max")) or bw_bytes(p.get("bwlimit")) or link
     pay = max(0.0, 1.0 - float(p.get("bw_auto_reserve_pct") or 0) / 100.0)
-    log(f"otomatik bant genisligi acik: arayuz={iface} link={bw_str(link)} "
-        f"taban={bw_str(taban)} tavan={bw_str(tavan)} pay=%{int(pay*100)}", pid)
+    log(f"otomatik bant genisligi acik: arayuz={iface} ({nasil}) "
+        f"hat={bw_str(link)} ({kaynak}) taban={bw_str(taban)} tavan={bw_str(tavan)} "
+        f"pay=%{int(pay*100)}", pid)
     alfa = float(p.get("bw_auto_smooth") or 0.4)
     adim = float(p.get("bw_auto_step_pct") or 25) / 100.0
     onceki = tx_bytes(iface); son_hedef = 0
     onceki_done = float((get_progress(pid) or {}).get("done") or 0)
     diger_ema = None
+    tepe = 0.0            # bu kosuda gorulen en yuksek kendi hizimiz
+    tepe_ornek = 0        # kac olcumde tepeye yakin kalindi (tek sicrama yanıltmasin)
     while not dur_bayragi.is_set():
         dur_bayragi.wait(aralik)
         if dur_bayragi.is_set(): break
@@ -1549,6 +1724,14 @@ def bw_auto_izle(p, port, dur_bayragi):
         bizim = max(0.0, (done - onceki_done) / aralik) if done >= onceki_done else 0.0
         onceki_done = done
         if bizim <= 0: bizim = float(pr.get("speed_bps") or 0)   # sayac yoksa ortalamaya dus
+        # Hat kapasitesini ogren: yalnizca kendi sinirimiza dayanmadigimiz
+        # anlarda olcum anlamli. Sinira dayaniyorsak gordugumuz hiz hattin
+        # degil, kendi kisitimizin sonucudur.
+        if kip != "manuel" and bizim > tepe and (not son_hedef or bizim < son_hedef * 0.95):
+            tepe = bizim; tepe_ornek = 1
+        elif tepe and bizim >= tepe * 0.85:
+            tepe_ornek += 1
+
         diger_ham = max(0.0, toplam - bizim)
         diger_ema = diger_ham if diger_ema is None else (alfa * diger_ham + (1 - alfa) * diger_ema)
         diger = diger_ema
@@ -1565,6 +1748,16 @@ def bw_auto_izle(p, port, dur_bayragi):
                 f"diger: {human(diger)}/sn)", pid)
         else:
             log(f"bant genisligi ayarlanamadi: {cikti[:120]}", pid)
+
+    # Kosu bitti: ogrenilen kapasiteyi kalici yaz. Tek bir sicrama yeterli
+    # degil (>=2 olcum) ve yalnizca oncekinden anlamli olcude buyukse
+    # guncellenir; boylece yavas bir gun kapasiteyi kalici dusurmez.
+    if kip != "manuel" and tepe > 0 and tepe_ornek >= 2:
+        eski = bw_ogrenilen_oku(pid)
+        if tepe > eski * 1.05 or not eski:
+            bw_ogrenilen_yaz(pid, tepe)
+            log(f"olculen yukleme kapasitesi guncellendi: {bw_str(int(tepe))}/sn"
+                + (f" (onceki {bw_str(int(eski))})" if eski else ""), pid)
 
 def dt_epoch(s):
     try: return int(datetime.strptime(s, DT_FMT).timestamp())
@@ -2067,6 +2260,7 @@ def do_run(pid, trigger="zamanlanmis"):
 
 def do_tick():
     """systemd timer bunu sik araliklarla cagirir; vakti gelen planlari calistirir."""
+    tick_damgasi_yaz()      # "yasiyorum": timer durursa arayuz ve rapor fark etsin
     st = read_state(); ran = []
     for p in cfg().get("plans", []):
         try:
@@ -2846,7 +3040,11 @@ def public_status():
                       "next_run": nr.strftime(TS_FMT) if nr else None,
                       "src_exists": os.path.isdir(p["src_dir"]),
                       "src_dumps": count_dumps(p["src_dir"])})
+    tick_durum, tick_mesaj = tick_sagligi()
     return {"plans": plans, "updated": st.get("updated"),
+            "saglik": {"tick": tick_durum, "tick_mesaj": tick_mesaj,
+                       "tick_son": st.get("last_tick"),
+                       "tick_yas_dk": round(tick_yasi_dk() or 0, 1)},
             "settings": {k: C.get(k) for k in
                          ("ui_bind", "ui_port", "ui_user", "smtp_host", "smtp_port", "smtp_user",
                           "mail_from", "browse_roots", "allow_account_cleanup", "history_max",
@@ -2856,6 +3054,8 @@ def public_status():
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
                           "quota_cache_min", "dil",
+                          "failure_mail", "failure_mail_to", "failure_smtp_profile",
+                          "failure_mail_lines", "tick_uyari_dk",
                           "sse_enabled", "sse_watch_ms", "sse_heartbeat_sec", "sse_max_clients",
                           "sse_ping_sec",
                           "remember_enabled", "remember_days", "session_ip_bind",
@@ -3093,9 +3293,14 @@ class H(BaseHTTPRequestHandler):
             self._json(cevap)
         elif p == "/api/ifaces":
             ifs = net_ifaces(); vars = default_iface()
-            self._json({"default": vars,
-                        "ifaces": [{"name": k, "rx": v[0], "tx": v[1], "default": k == vars}
-                                   for k, v in sorted(ifs.items())]})
+            onerilen, nasil = wan_iface()
+            self._json({"default": vars, "onerilen": onerilen, "onerilen_neden": nasil,
+                        "ifaces": [{"name": k, "rx": v[0], "tx": v[1],
+                                    "default": k == vars, "onerilen": k == onerilen,
+                                    "kopru": kopru_mu(k),
+                                    "hiz": iface_link_mbit(k)}
+                                   for k, v in sorted(ifs.items())
+                                   if not k.startswith(SANAL_ONEK)]})
         elif p == "/api/storages":
             self._json({"storages": pve_storages()})
         else:
@@ -3266,13 +3471,16 @@ def save_settings(data):
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
+    for k in ("failure_mail_to", "failure_smtp_profile"):
+        if k in data: C[k] = str(data[k] or "")
     for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik",
-              "sse_enabled"):
+              "sse_enabled", "failure_mail"):
         if k in data: C[k] = bool(data[k])
     if str(data.get("session_ip_bind", "")) in ("ip", "ag", "yok"):
         C["session_ip_bind"] = data["session_ip_bind"]
     for k in ("remember_days", "session_timeout_min", "sse_watch_ms",
-              "sse_heartbeat_sec", "sse_max_clients", "sse_ping_sec"):
+              "sse_heartbeat_sec", "sse_max_clients", "sse_ping_sec",
+              "failure_mail_lines", "tick_uyari_dk"):
         if k in data:
             try: C[k] = max(1, int(data[k]))
             except Exception as e: yut("save_settings", e)
@@ -3783,6 +3991,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .ctx-simge{width:17px;text-align:center;flex:0 0 auto;opacity:.9}
 .ctx-metin{overflow:hidden;text-overflow:ellipsis}
 
+/* Zamanlayici/servis saglik uyarisi */
+.uyari-kutu{border-color:#8a2b2b;background:#1f1414;margin-bottom:12px}
+.uyari-kutu code{background:#2a1a1a;padding:1px 5px;border-radius:4px}
+
 </style></head><body>
 <div class="wrap">
 <header>
@@ -3809,6 +4021,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 </header>
 
 <div class="hesaplar" id="hesapserit"></div>
+<div class="card uyari-kutu" id="saglik" style="display:none"></div>
 <div class="plans" id="plans"></div>
 <div id="detail"></div>
 
@@ -3981,8 +4194,18 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="eg">Sunucunda UrBackup gibi başka bir yedekleme varsa bu modu aç:
           o yüklerken sen yavaşlar, hat boşalınca hızlanırsın.</div></div></div>
     <div id="bwauto-box" style="display:none">
-      <div class="f"><label class="tip" title="İnternet bağlantının toplam YÜKLEME kapasitesi. Hesaplamanın temeli budur.">Hat kapasitesi</label>
-        <div><input id="e-bwlink" placeholder="100M"><div class="errmsg" id="err-bwlink"></div>
+      <div class="f"><label class="tip" title="Hat kapasitesi ölçülerek mi bulunsun, elle mi girilsin?">Hat kapasitesi</label>
+        <div><select id="e-bwlmode">
+            <option value="ogren">Ölç ve öğren (önerilen)</option>
+            <option value="manuel">Elle gireceğim</option>
+          </select>
+          <div class="eg" id="eg-bwlmode">Arayüzün bağ hızı internet yükleme hızını
+            <b>göstermez</b>: 4×1 Gbit bond'un arkasında 60 Mbit'lik bir ISS hattı olabilir.
+            Öğrenme kipinde araç, kendi sınırına dayanmadığı anlarda fiilen ulaştığı en
+            yüksek sürekli hızı ölçer ve onu temel alır. Ölçülmüş bir alt sınır,
+            uydurulmuş bir üst sınırdan iyidir.</div></div></div>
+      <div class="f" id="bwlink-satir"><label class="tip" title="Yalnızca elle kipte kullanılır.">Elle hat kapasitesi</label>
+        <div><input id="e-bwlink" placeholder="12M"><div class="errmsg" id="err-bwlink"></div>
           <div class="eg">Yükleme hızın. 100 Mbit ≈ <code>12M</code> · 1 Gbit ≈ <code>120M</code> ·
             simetrik 100/100 fiber ≈ <code>12M</code>. <b>Bit değil bayt yaz.</b></div></div></div>
       <div class="f"><label class="tip" title="Hattın bu yüzdesi her zaman diğer uygulamalara bırakılır.">Diğerlerine ayrılan</label>
@@ -4743,6 +4966,17 @@ const EN = {
     "Saklanacak arşiv (adet)": "Archives to keep",
     "Yapılandırma arşivini indir": "Download configuration archive",
     "Yapılandırmayı şimdi yedekle": "Back up configuration now",
+    "Zamanlayıcı gecikmiş": "Scheduler is late",
+    "Zamanlayıcı hiç çalışmadı": "Scheduler has never run",
+    "Kontrol et: ": "Check: ",
+    "(otomatik: ": "(automatic: ",
+    "  · köprü": "  · bridge",
+    "  ← önerilen": "  ← recommended",
+    "Otomatik seçim: ": "Automatic choice: ",
+    "elle secildi": "selected manually",
+    "varsayilan rota": "default route",
+    "Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki bond/fiziksel arayüz doğru ölçümü verir.": "A bridge (vmbr0) also counts VM-to-VM local traffic, which never reaches the internet and does not compete with your upload. The bond or physical interface under the bridge gives the correct measurement.",
+    "Zamanlayici henuz hic calismadi.": "The scheduler has never run yet.",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -5438,6 +5672,12 @@ function bwBytes(t) {
     const carp = { "": 1, B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
     return parseFloat(m[1]) * (carp[m[2].toUpperCase()] || 1);
 }
+/** Elle kapasite alani yalnizca manuel kipte gorunsun. */
+function bwLinkKipi() {
+    const satir = document.getElementById("bwlink-satir");
+    if (satir)
+        satir.style.display = val("e-bwlmode") === "manuel" ? "" : "none";
+}
 function bwAutoToggle() {
     const acik = chk("e-bwauto");
     el("bwauto-box").style.display = acik ? "" : "none";
@@ -5449,13 +5689,20 @@ async function loadIfaces(secili) {
     try {
         const j = await api("/api/ifaces");
         const list = j.ifaces || [];
-        setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-            + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
-                + " — " + hb(i.tx) + C(" gönderilmiş") + (i.default ? C(" (varsayılan rota)") : "")
-                + "</option>").join(""));
+        const etiket = (i) => esc(i.name)
+            + (i.kopru ? C("  · köprü") : "")
+            + (i.hiz ? "  · " + i.hiz + " Mbit" : "")
+            + "  · " + hb(i.tx) + C(" gönderilmiş")
+            + (i.onerilen ? C("  ← önerilen") : "");
+        setHtml("e-bwif", '<option value="">' + C("(otomatik: ") + esc(j.onerilen || "-")
+            + ")</option>" + list.map((i) => '<option value="' + esc(i.name) + '">'
+            + etiket(i) + "</option>").join(""));
         setVal("e-bwif", secili);
-        setTxt("e-bwifhint", C("Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; ")
-            + C("VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç."));
+        setHtml("e-bwifhint", C("Otomatik seçim: ") + "<b>" + esc(j.onerilen || "-") + "</b> ("
+            + esc(C(j.onerilen_neden || "")) + "). "
+            + C("Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik "
+                + "internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki "
+                + "bond/fiziksel arayüz doğru ölçümü verir."));
     }
     catch { /* yok say */ }
 }
@@ -5490,6 +5737,26 @@ function pillOf(p) {
                 + "Sebep kartın altındaki özet satırında yazar. Sonraki turda tekrar denenir.")
             + ">⏸ ATLANDI</span>";
     return '<span class="pill idle">' + esc(s.status || "—").toUpperCase() + "</span>";
+}
+/** Zamanlayici durmussa bunu susarak geçmek olmaz: timer olurse hicbir yedek
+ *  alinmaz ve tek belirtisi "sonraki calisma"nin gecmiste kalmasi olur. */
+function saglikCiz() {
+    const h = S && S.saglik;
+    const kutu = document.getElementById("saglik");
+    if (!kutu)
+        return;
+    if (!h || h.tick === "iyi") {
+        kutu.style.display = "none";
+        kutu.textContent = "";
+        return;
+    }
+    kutu.style.display = "";
+    kutu.className = "card uyari-kutu";
+    kutu.innerHTML = '<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
+        : "Zamanlayıcı hiç çalışmadı"))
+        + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
+        + '<div class="small" style="margin-top:5px">'
+        + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>";
 }
 function progOf(p) {
     const g = p.weekdays && p.weekdays.length
@@ -5639,6 +5906,7 @@ function render() {
             + "</span>"
         : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
             + "</span>");
+    saglikCiz();
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
@@ -6087,8 +6355,10 @@ function openEditor(pid) {
     void loadStorages();
     ramHint();
     saklamaIpucu();
+    bwLinkKipi();
     Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
         .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
+    fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
     fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
     fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
     fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
@@ -6951,6 +7221,7 @@ const PLAN_ALANLARI = [
     // Bant genisligi cizelgesi ve otomatik mod: yalnizca ilgiliyken dogrulanir
     { id: "e-bwsch", anahtar: "bwlimit_schedule", tip: "metin", adim: 6, ops: true, vars: "",
         ozelDogrula: (id) => vBwSched(id) },
+    { id: "e-bwlmode", anahtar: "bw_auto_link_mode", tip: "metin", adim: 0, vars: "ogren" },
     { id: "e-bwlink", anahtar: "bw_auto_link", tip: "metin", adim: 6, rx: RX.bw, vars: "100M",
         kosul: () => chk("e-bwauto"), mesaj: C("ör. 12M, 100M") },
     { id: "e-bwres", anahtar: "bw_auto_reserve_pct", tip: "sayi", adim: 6, min: 0, max: 95, vars: 30,
@@ -7047,6 +7318,15 @@ def main():
         targets = [pid] if pid else [p["id"] for p in cfg().get("plans", []) if p.get("enabled", True)]
         if not targets: print("calisacak plan yok")
         for t in targets: do_run(t, trig)
+    elif cmd == "bildir":
+        # systemd OnFailure= bunu cagirir: pve-gdrive.py bildir <birim>
+        sys.exit(birim_bildir(sys.argv[2] if len(sys.argv) > 2 else "bilinmeyen"))
+    elif cmd == "saglik":
+        d, m2 = tick_sagligi()
+        yas = tick_yasi_dk()
+        print(f"zamanlayici : {d}" + (f" (son tick {int(yas)} dk once)" if yas is not None else ""))
+        if m2: print(f"uyari       : {m2}")
+        sys.exit(0 if d == "iyi" else 1)
     elif cmd == "serve": serve()
     elif cmd == "snapshot":
         for p in cfg().get("plans", []):
