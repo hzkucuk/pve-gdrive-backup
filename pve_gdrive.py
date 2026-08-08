@@ -13,6 +13,9 @@ Komutlar:
   python3 pve_gdrive.py serve             # web arayuzunu baslatir
   python3 pve_gdrive.py snapshot [--plan ID]  # Drive durumunu tazeler
   python3 pve_gdrive.py status            # durum JSON (stdout)
+  python3 pve_gdrive.py saglik            # zamanlayici yasiyor mu (cikis kodu 0/1)
+  python3 pve_gdrive.py oturumlar         # kayitli "beni hatirla" oturumlari
+  python3 pve_gdrive.py version           # surum
   python3 pve_gdrive.py plans             # planlari listeler
   python3 pve_gdrive.py aglar             # izinli aglari gosterir/duzenler (kurtarma)
   python3 pve_gdrive.py disa-aktar        # plan/mail ayarlarini JSON olarak yazar
@@ -27,7 +30,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.4.5"
+SURUM = "1.5.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -3687,6 +3690,12 @@ class H(BaseHTTPRequestHandler):
                 with _SEC_LOCK:
                     dusen = SESSIONS.pop(m.group(1), None)
                     if dusen and dusen.get("kalici"): DEPO._dusen.add(m.group(1))
+                # Cikisin KIMDEN geldigi kaydedilir: kullanici mi tikladi, yoksa
+                # baska bir sey mi tetikledi? Oturum sessizce kaybolmasin.
+                log(f"cikis istegi: adres={client_ip(self)} "
+                    f"referer={(self.headers.get('Referer') or '-')[:60]} "
+                    f"csrf={'var' if self.headers.get('X-CSRF-Token') else 'YOK'} "
+                    f"ua={(self.headers.get('User-Agent') or '-')[:50]}")
                 if dusen and dusen.get("kalici"): DEPO.kalicilari_yaz("cikis")
             self._send(200, "application/json; charset=utf-8", '{"ok":true}', [self._cookie("", True)])
             return
@@ -5466,6 +5475,7 @@ const EN = {
     "OAuth akışı çalışıyor ama yükleme/saklama davranışı gerçek hesapla denenmedi. Önce küçük bir planla dene.": "The OAuth flow works, but upload/retention behaviour has not been tested with a real account. Try a small plan first.",
     "Kapsam drive.file: yalnizca bu aracin olusturdugu dosyalari gorur, Drive'inin gerisine erisemez.": "Scope drive.file: it only sees files this tool created and cannot reach the rest of your Drive.",
     "Bazi kurumsal hesaplarda drive_id/drive_type de gerekir; gerekirse hesabi rclone config ile elle kur.": "Some business accounts also need drive_id/drive_type; if so, configure the account manually with rclone config.",
+    "Oturumu kapatmak istediğine emin misin?\n\"Beni hatırla\" işaretlemiş olsan bile hatırlanan oturum silinir.": "Are you sure you want to sign out?\nEven if you ticked \"Remember me\", the remembered session is deleted.",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -6610,7 +6620,13 @@ async function delPlan(pid) {
     void refresh();
 }
 async function logout() {
-    if (dirty && !await onay(C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?"), C("Çıkış"), C("Çık"), C("Vazgeç")))
+    // Cikis her zaman sorulur. Yanlislikla (ya da beklenmedik bir yoldan)
+    // tetiklenen bir cikis, "beni hatirla" oturumunu sessizce yok ediyordu.
+    const metin = dirty
+        ? C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?")
+        : C("Oturumu kapatmak istediğine emin misin?\n"
+            + "\"Beni hatırla\" işaretlemiş olsan bile hatırlanan oturum silinir.");
+    if (!await onay(metin, C("Çıkış"), C("Çık"), C("Vazgeç")))
         return;
     await api("/logout", { method: "POST" });
     location.reload();
@@ -7970,6 +7986,8 @@ def main():
     elif cmd == "bildir":
         # systemd OnFailure= bunu cagirir: pve-gdrive.py bildir <birim>
         sys.exit(birim_bildir(sys.argv[2] if len(sys.argv) > 2 else "bilinmeyen"))
+    elif cmd in ("version", "surum", "--version"):
+        print(SURUM)
     elif cmd == "oturumlar":
         yol = oturum_dosyasi()
         print(f"dosya: {yol}")

@@ -2,6 +2,31 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.5.0 — 2026-08-08
+
+### Kurulum betiği eksik kalmıştı
+
+İkinci bir sunucuya kurulum hazırlanırken üç boşluk çıktı:
+
+- **`/var/lib/pve-gdrive` `0755` oluşuyordu.** İçinde OAuth jetonu, oturum
+  dosyası ve config yedekleri var. Artık `0700`.
+- **Kısa ad yoktu.** `ln -sfn` ile `pve-gdrive` komutu kuruluyor; güncelleme
+  `realpath` kullandığı için bağlantı güvenli.
+- **`pve_gdrive.py version` diye bir komut yoktu**, ama kurulum çıktısı onu
+  çağırıyor ve koca kullanım metnini basıyordu. Komut eklendi.
+
+Kurulum çıktısına teşhis komutları ve "beni hatırla" notu eklendi: çıkış yapınca
+hatırlanan oturum silinir (tasarım gereği), çerez adrese bağlıdır.
+
+### Bu sınıfı yakalayan test
+
+Yeni bir systemd birimi veya dizin eklenip kurulum betiğini güncellemeyi
+unutmak kolay — ilk sunucuda çalışır, ikinciye kurunca eksik çıkar. İki test
+eklendi: `systemd/` altındaki her birim kurulum globlarıyla eşleşiyor mu, ve
+kurulum çıktısında tavsiye edilen her komut programda gerçekten tanımlı mı.
+
+Test: 84 → 86.
+
 ## 1.4.5 — 2026-08-08
 
 ### Sunucu oturum dosyasını yalnızca açılışta okuyordu

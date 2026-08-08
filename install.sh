@@ -24,8 +24,14 @@ if systemctl list-unit-files 2>/dev/null | grep -q pve-gdrive-backup.timer; then
 fi
 
 install -m 755 "$here/pve_gdrive.py" /usr/local/bin/pve_gdrive.py
+# Kisa ad: "pve-gdrive saglik" gibi kullanim icin. Sembolik baglanti guvenli,
+# guncelleme realpath ile gercek dosyayi bulur (bkz. betik_yolu).
+ln -sfn /usr/local/bin/pve_gdrive.py /usr/local/bin/pve-gdrive
+# pve-gdrive-bildir@.service dahil tum birimler (sablon birim enable edilmez,
+# OnFailure ile ihtiyac aninda calisir)
 install -m 644 "$here"/systemd/pve-gdrive-*.service "$here"/systemd/pve-gdrive-*.timer /etc/systemd/system/
-mkdir -p /var/lib/pve-gdrive
+# Durum dizininde jetonlar, oturumlar ve config yedekleri var: yalnizca root
+mkdir -p /var/lib/pve-gdrive && chmod 700 /var/lib/pve-gdrive
 
 etkilesimli=0
 [ -t 0 ] && [ -t 1 ] && [ -z "${PGD_SESSIZ:-}" ] && [ -f "$here/kurulum.py" ] && etkilesimli=1
@@ -123,7 +129,8 @@ echo "================= Kurulum tamam ================="
 echo "  Arayuz   : ${sema}://${ip:-<host-ip>}:${port}"
 echo "  Kullanici: ${kul}"
 [ -n "$sifre" ] && echo "  SIFRE    : ${sifre}   <-- simdi kaydet, bir daha gosterilmez"
-echo "  Servis   : $(systemctl is-active pve-gdrive-ui) | Surum: $(pve_gdrive.py version)"
+echo "  Servis   : $(systemctl is-active pve-gdrive-ui) | Surum: $(pve_gdrive.py version 2>/dev/null || echo '?')"
+echo "  Bildirim : birim cokerse mail (pve-gdrive-bildir@.service)"
 echo
 echo "Siradaki adimlar:"
 echo "  1) Google hesabi: kendi bilgisayarinda bir terminalde tunel ac"
@@ -134,5 +141,15 @@ echo "  3) Proxmox linki: ./proxmox-link.sh"
 echo "  4) Plan KAPALI olusturuldu; hesabi secip gozden gecirdikten sonra etkinlestir."
 echo
 echo "Baska bir kurulumdan ayar tasima:"
-echo "  eski hostta: pve_gdrive.py disa-aktar > ayarlar.json"
-echo "  bu hostta  : pve_gdrive.py ice-aktar < ayarlar.json"
+echo "  eski hostta: pve-gdrive disa-aktar > ayarlar.json"
+echo "  bu hostta  : pve-gdrive ice-aktar < ayarlar.json"
+echo
+echo "Teshis komutlari:"
+echo "  pve-gdrive saglik      zamanlayici yasiyor mu (cikis kodu 0/1)"
+echo "  pve-gdrive plans       planlar ve sonraki calisma"
+echo "  pve-gdrive oturumlar   'beni hatirla' oturumlari"
+echo "  journalctl -u pve-gdrive-ui -f"
+echo
+echo "NOT: 'Beni hatirla' cikis yapinca silinir (tasarim geregi). Sinamak icin"
+echo "     cikisa basma, sekmeyi kapatip tekrar ac. Ayrica cerez ADRESE baglidir:"
+echo "     hep ayni adresle gir (IP ile girdiysen hep IP ile)."

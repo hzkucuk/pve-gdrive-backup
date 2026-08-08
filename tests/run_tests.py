@@ -984,6 +984,55 @@ def t_birim_bildir():
         dogru("m" not in yakalanan, "kapaliyken mail gitmemeli")
     finally: o.temizle()
 
+@test("kurulum betigi tum birimleri ve dizinleri kapsar", "kurulum")
+def t_kurulum_kapsam():
+    """Yeni bir systemd birimi ya da dizin eklendiginde kurulum betigini
+    guncellemeyi unutmak kolay: ilk sunucuda calisir, ikinciye kurunca
+    eksik cikar."""
+    ik = open(os.path.join(KOK, "install.sh")).read()
+    # Depodaki her birim kurulum tarafindan kopyalanabiliyor mu (glob ile)
+    import fnmatch as _fn
+    globlar = re.findall(r'systemd/(pve-gdrive-[^\s"]+)', ik)
+    dogru(globlar, "install.sh systemd birimlerini kopyalamali")
+    for birim in os.listdir(os.path.join(KOK, "systemd")):
+        dogru(any(_fn.fnmatch(birim, g) for g in globlar),
+              f"'{birim}' kurulum tarafindan kopyalanmiyor (globlar: {globlar})")
+    # Durum dizini yalnizca root'a acik olmali: jeton, oturum, config yedegi var
+    dogru("chmod 700 /var/lib/pve-gdrive" in ik, "durum dizini 700 yapilmali")
+    dogru("chmod 600" in ik or "0o600" in ik, "config 600 olmali")
+    # Kisa ad
+    dogru("ln -sfn /usr/local/bin/pve_gdrive.py /usr/local/bin/pve-gdrive" in ik,
+          "kisa ad baglantisi kurulmali")
+    # Servisler etkinlestiriliyor
+    for birim in ("pve-gdrive-ui.service", "pve-gdrive-tick.timer"):
+        dogru(f"enable --now {birim}" in ik, f"{birim} etkinlestirilmeli")
+    # Sablon birim ENABLE EDILMEMELI (OnFailure ile cagrilir)
+    dogru("enable --now pve-gdrive-bildir" not in ik, "sablon birim enable edilmemeli")
+
+@test("kurulum ciktisindaki komutlar gercekten var", "kurulum")
+def t_kurulum_komutlari():
+    """Kurulum sonunda tavsiye edilen komut yoksa kullanici ilk denemede
+    duvara toslar."""
+    ik = open(os.path.join(KOK, "install.sh")).read()
+    o = Ortam()
+    try:
+        G = o.modul()
+        kaynak = open(BETIK).read()
+        for komut in re.findall(r"pve-gdrive (\w[\w-]*)", ik):
+            if komut in ("saglik", "plans", "oturumlar", "disa-aktar", "ice-aktar",
+                         "version", "status", "tick", "run", "serve", "init", "snapshot"):
+                dogru(f'"{komut}"' in kaynak, f"'{komut}' komutu programda tanimli olmali")
+        # version komutu sadece surumu basmali (kurulum ciktisinda kullaniliyor)
+        r = subprocess.run([sys.executable, BETIK, "version"], capture_output=True, text=True,
+                           env={**os.environ, "PVE_GDRIVE_CONF": o.cfg_yolu, "PVE_GDRIVE_QUIET": "1"})
+        cikti = r.stdout.strip()
+        dogru(re.match(r"^\d+\.\d+\.\d+$", cikti), f"'version' sade surum basmali: {cikti!r}")
+        esit(cikti, G.SURUM, "surum kaynakla ayni olmali")
+        # Betikte adi gecen yardimci dosyalar gercekten var mi
+        for dosya in ("proxmox-link.sh", "kurulum.py"):
+            dogru(os.path.exists(os.path.join(KOK, dosya)), f"{dosya} depoda olmali")
+    finally: o.temizle()
+
 @test("systemd birimleri hata bildirimi tanimlar", "izleme")
 def t_systemd_onfailure():
     kok = os.path.join(KOK, "systemd")

@@ -659,8 +659,13 @@ async function delPlan(pid: string): Promise<void> {
   void refresh();
 }
 async function logout(): Promise<void> {
-  if (dirty && !await onay(C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?"),
-                           C("Çıkış"), C("Çık"), C("Vazgeç"))) return;
+  // Cikis her zaman sorulur. Yanlislikla (ya da beklenmedik bir yoldan)
+  // tetiklenen bir cikis, "beni hatirla" oturumunu sessizce yok ediyordu.
+  const metin = dirty
+    ? C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?")
+    : C("Oturumu kapatmak istediğine emin misin?\n"
+      + "\"Beni hatırla\" işaretlemiş olsan bile hatırlanan oturum silinir.");
+  if (!await onay(metin, C("Çıkış"), C("Çık"), C("Vazgeç"))) return;
   await api("/logout", { method: "POST" });
   location.reload();
 }

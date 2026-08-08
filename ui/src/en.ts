@@ -547,4 +547,5 @@ const EN: Record<string, string> = {
   "OAuth akışı çalışıyor ama yükleme/saklama davranışı gerçek hesapla denenmedi. Önce küçük bir planla dene.": "The OAuth flow works, but upload/retention behaviour has not been tested with a real account. Try a small plan first.",
   "Kapsam drive.file: yalnizca bu aracin olusturdugu dosyalari gorur, Drive'inin gerisine erisemez.": "Scope drive.file: it only sees files this tool created and cannot reach the rest of your Drive.",
   "Bazi kurumsal hesaplarda drive_id/drive_type de gerekir; gerekirse hesabi rclone config ile elle kur.": "Some business accounts also need drive_id/drive_type; if so, configure the account manually with rclone config.",
+  "Oturumu kapatmak istediğine emin misin?\n\"Beni hatırla\" işaretlemiş olsan bile hatırlanan oturum silinir.": "Are you sure you want to sign out?\nEven if you ticked \"Remember me\", the remembered session is deleted.",
 };
