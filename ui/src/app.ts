@@ -283,11 +283,20 @@ function vMails(id: string, optional?: boolean): boolean {
 /* ---------- plan kartlari ---------- */
 function pillOf(p: Plan): string {
   const s = p.state || ({} as PlanState);
+  const ip = (t: string): string => ' title="' + esc(C(t)) + '"';
   if (p.running) return '<span class="pill run">● ÇALIŞIYOR</span>';
-  if (!p.enabled) return '<span class="pill off">KAPALI</span>';
+  if (!p.enabled) return '<span class="pill off"' + ip("Zamanlama kapalı; dosyalara dokunulmaz.")
+    + ">KAPALI</span>";
+  // Hic calismamis plan "ATLANDI" gibi gorunmesin: ikisi ayri sey.
+  if (!s.last_run) return '<span class="pill idle"'
+    + ip("Bu plan henüz hiç çalışmadı. İlk çalışma: " + (p.next_run || "-"))
+    + ">⏳ BEKLİYOR</span>";
   if (s.status === "basarili") return '<span class="pill ok">✔ BAŞARILI</span>';
   if (s.status === "HATA") return '<span class="pill err">✖ HATA</span>';
-  if (s.status === "atlandi") return '<span class="pill run">⏸ ATLANDI</span>';
+  if (s.status === "atlandi") return '<span class="pill run"'
+    + ip("Son denemede iş yapılmadı — genelde vzdump hâlâ çalışıyordu. "
+       + "Sebep kartın altındaki özet satırında yazar. Sonraki turda tekrar denenir.")
+    + ">⏸ ATLANDI</span>";
   return '<span class="pill idle">' + esc(s.status || "—").toUpperCase() + "</span>";
 }
 function progOf(p: Plan): string {
@@ -484,10 +493,102 @@ async function refresh(): Promise<void> {
   if (S && S.login) { location.reload(); return; }
   render();
   void loadLog();
+  akisBaslat();
+  yoklamaAyarla();
+}
+
+/* ---------- canli olay akisi (SSE) ----------
+ * Once birkac saniyede bir /api/status cekiliyordu: hicbir sey degismese de
+ * istek gidiyor, degisiklik ise gec gorunuyordu. Artik sunucu itiyor.
+ * Akis kurulamazsa (eski vekil, kapali ayar) eski yoklama moduna dusuyoruz —
+ * arayuz her durumda calisir kalir. */
+let akis: EventSource | null = null;
+let akisCanli = false;
+let akisHata = 0;
+
+function akisDurumu(canli: boolean): void {
+  if (akisCanli === canli) return;
+  akisCanli = canli;
+  const e = document.getElementById("canli");
+  if (e) {
+    e.className = "pill " + (canli ? "ok" : "idle");
+    e.textContent = canli ? C("● CANLI") : C("○ yoklama");
+    e.title = canli ? C("Sunucu değişiklikleri anında gönderiyor")
+                    : C("Canlı akış yok — belirli aralıklarla yenileniyor");
+  }
+  yoklamaAyarla();
+}
+
+/** Akis calisirken yoklama tamamen durur; yalnizca yedek olarak seyrek doner. */
+function yoklamaAyarla(): void {
   const base = ((S && S.settings && S.settings.ui_refresh_sec) || 5) * 1000;
-  const iv = running ? Math.min(base, 2000) : base;
   window.clearInterval(refTimer);
+  const iv = akisCanli ? 60000 : (running ? Math.min(base, 2000) : base);
   refTimer = window.setInterval(() => void refresh(), iv);
+}
+
+function akisBaslat(): void {
+  if (akis || typeof EventSource === "undefined") return;
+  if (S && S.settings && S.settings.sse_enabled === false) return;
+  try { akis = new EventSource("/api/events"); }
+  catch { akis = null; return; }
+
+  akis.addEventListener("open", () => { akisHata = 0; akisDurumu(true); });
+
+  akis.addEventListener("durum", (e: MessageEvent) => {
+    try {
+      const y = JSON.parse(e.data) as Status;
+      if (y.login) { location.reload(); return; }
+      // csrf yalnizca /api/status ile gelir; akis paketinde yoksa mevcudu koru
+      if (S && !y.csrf) y.csrf = S.csrf;
+      S = y; akisDurumu(true); render();
+    } catch { /* bozuk paket: bir sonraki tazeleme duzeltir */ }
+  });
+
+  akis.addEventListener("ilerleme", (e: MessageEvent) => {
+    try {
+      const m = JSON.parse(e.data) as Record<string, Progress>;
+      if (!S) return;
+      S.plans.forEach((p) => {
+        const g = m[p.id];
+        p.progress = g; p.running = Boolean(g);
+      });
+      running = S.plans.filter((p) => p.running).length;
+      render();
+    } catch { /* yok say */ }
+  });
+
+  akis.addEventListener("log", (e: MessageEvent) => {
+    try { logEkle((JSON.parse(e.data) as { satirlar: string[] }).satirlar || []); }
+    catch { /* yok say */ }
+  });
+
+  akis.addEventListener("kalp", () => akisDurumu(true));
+
+  akis.addEventListener("error", () => {
+    akisDurumu(false);
+    // EventSource kendi yeniden baglanir; ustuste basarisiz olursa vazgec
+    if (++akisHata >= 6 && akis) { akis.close(); akis = null; }
+  });
+}
+
+/** Akistan gelen satirlari log kutusuna ekler. Secili kaynaga gore suzulur,
+ *  kutu sonundaysa asagi kaydirilir (okurken zipladigi olmasin). */
+function logEkle(satirlar: string[]): void {
+  if (!satirlar.length) return;
+  const kutu = el("log");
+  const dipte = kutu.scrollHeight - kutu.scrollTop - kutu.clientHeight < 40;
+  const suz = satirlar.filter((x) => {
+    if (LOGSRC === "all") return true;
+    const m = /\|\s*\[([^\]]+)\]/.exec(x);
+    return LOGSRC === "system" ? !m : Boolean(m && m[1] === LOGSRC);
+  });
+  if (!suz.length) return;
+  kutu.textContent = ((kutu.textContent || "") + "\n" + suz.join("\n")).trim();
+  // Bellek sinirli kalsin: en fazla son 2000 satir tutulur
+  const t = (kutu.textContent || "").split("\n");
+  if (t.length > 2000) kutu.textContent = t.slice(-2000).join("\n");
+  if (dipte) kutu.scrollTop = kutu.scrollHeight;
 }
 
 async function act(d: string, pid: string): Promise<void> {
@@ -496,7 +597,7 @@ async function act(d: string, pid: string): Promise<void> {
     const j = await api("/api/action?do=" + d + "&plan=" + encodeURIComponent(pid), { method: "POST" });
     flash(j.msg || "tamam", j.ok);
   } catch { flash("hata", false); }
-  window.setTimeout(() => void refresh(), 900);
+  if (!akisCanli) window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid: string): Promise<void> {
   if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))) return;

@@ -67,6 +67,34 @@ class Ortam:
         from datetime import datetime, timedelta
         t = datetime.now() - timedelta(days=gun_once, hours=12)
         return self.dosya(f"vzdump-{misafir}-{t:%Y_%m_%d-%H_%M_%S}.{uzanti}")
+    def sunucu(self):
+        """Gercek HTTP sunucusunu rastgele portta baslatir.
+
+        Oturum/captcha yerine api_token kullanilir: testin konusu tasima
+        katmani, giris akisi degil. temizle() sunucuyu kapatir."""
+        import threading as _t
+        G = self.modul()
+        c = self.oku_cfg()
+        c["api_token"] = "test-token-123"
+        c["allow_networks"] = []            # 127.0.0.1 gecebilsin
+        self.yaz_cfg(c); G.cfg(force=True)
+        srv = G.ThreadingHTTPServer(("127.0.0.1", 0), G.H)
+        srv.daemon_threads = True
+        _t.Thread(target=srv.serve_forever, daemon=True).start()
+        self._srv = srv
+        taban = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        class Istemci:
+            G = None                 # sunucunun kullandigi modul ornegi (bkz. modul())
+            def istek(_s, yol, akis=False, zaman=5):
+                r = urllib.request.Request(taban + yol,
+                                           headers={"Authorization": "Bearer test-token-123"})
+                return urllib.request.urlopen(r, timeout=zaman)
+        # modul() her cagrida taze kopya uretiyor; sunucu ile test ayni ornegi
+        # kullanmazsa OLAY nesneleri farkli olur ve olaylar bulusmaz.
+        Istemci.G = G
+        return Istemci()
+
     def modul(self):
         os.environ["PVE_GDRIVE_CONF"] = self.cfg_yolu
         os.environ["MOCK_DB"] = self.db
@@ -81,6 +109,9 @@ class Ortam:
         return sorted(k.split("/")[-1] for k, v in d.get("files", {}).items()
                       if bool(v.get("trashed")) == copte)
     def temizle(self):
+        srv = getattr(self, "_srv", None)
+        if srv:
+            srv.shutdown(); srv.server_close(); self._srv = None
         shutil.rmtree(self.dizin, ignore_errors=True)
 
 def esit(a, b, mesaj=""):
@@ -587,6 +618,112 @@ def t_rapor():
         for bolum in ["HAFTALIK YEDEK RAPORU", "CALISMA", "DRIVE", "VM/CT BAZINDA", "UYARILAR"]:
             dogru(bolum in govde, f"'{bolum}' bolumu olmali")
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
+    finally: o.temizle()
+
+@test("olay yayini yavas istemciden etkilenmez", "canli")
+def t_olay_yayini():
+    o = Ortam()
+    try:
+        G = o.modul()
+        y = G.OlayYayini(kuyruk_max=3, abone_max=2)
+        a = y.abone_ol(); b = y.abone_ol()
+        dogru(a is not None and b is not None, "iki abone kabul edilmeli")
+        dogru(y.abone_ol() is None, "sinir asilinca yeni abone reddedilmeli")
+        for i in range(10): y.yayinla("t", {"i": i})
+        alinan = []
+        while True:
+            pk = y.bekle(a, 0.01)
+            if not pk: break
+            alinan.append(pk[1]["i"])
+        dogru(len(alinan) == 3, f"kuyruk sinirli olmali, {len(alinan)} geldi")
+        dogru(alinan == [7, 8, 9], f"en yeni olaylar kalmali, {alinan}")
+        dogru(y.bekle(b, 0.01) is not None, "diger abone etkilenmemeli")
+        y.ayril(a); y.ayril(b)
+        dogru(y.abone_sayisi() == 0, "ayrilan abone temizlenmeli")
+        dogru(y.bekle(a, 0.01) is None, "ayrilan abone icin bekle None donmeli")
+    finally: o.temizle()
+
+@test("izleyici degisikligi olaya cevirir, degismeyeni yollamaz", "canli")
+def t_izleyici():
+    o = Ortam()
+    try:
+        o.plan()
+        G = o.modul()
+        no = G.OLAY.abone_ol()
+        try:
+            durum = G._izleyici_turu({})          # ilk tur: yalnizca taban alinir
+            dogru(G.OLAY.bekle(no, 0.01) is None, "ilk turda olay yollanmamali")
+            durum2 = G._izleyici_turu(durum)
+            dogru(G.OLAY.bekle(no, 0.01) is None, "degisiklik yokken olay olmamali")
+            G.log("izleyici testi satiri")        # log dosyasi buyudu
+            G._izleyici_turu(durum2)
+            pk = G.OLAY.bekle(no, 0.01)
+            dogru(pk is not None and pk[0] == "log", f"log olayi beklenirdi: {pk}")
+            dogru(any("izleyici testi" in x for x in pk[1]["satirlar"]),
+                  "yeni satir olayda olmali")
+            durum3 = G._izleyici_turu(G._izleyici_turu({}))
+            G.put_pstate("p1", {"status": "basarili"})   # state.json degisti
+            G._izleyici_turu(durum3)
+            turler = []
+            while True:
+                pk = G.OLAY.bekle(no, 0.01)
+                if not pk: break
+                turler.append(pk[0])
+            dogru("durum" in turler, f"durum olayi beklenirdi: {turler}")
+        finally: G.OLAY.ayril(no)
+    finally: o.temizle()
+
+@test("canli akis ucu SSE bicimi dondurur", "canli")
+def t_sse_ucu():
+    o = Ortam()
+    try:
+        o.plan()
+        s = o.sunucu()
+        r = s.istek("/api/events", akis=True)
+        dogru(r.getheader("Content-Type", "").startswith("text/event-stream"),
+              f"content-type yanlis: {r.getheader('Content-Type')}")
+        dogru(r.getheader("X-Accel-Buffering") == "no", "vekil arabellegi kapatilmali")
+        ham = r.read(400).decode("utf-8", "replace")
+        dogru("retry:" in ham, "yeniden baglanma araligi bildirilmeli")
+        dogru("event: durum" in ham, "acilista tam durum yollanmali")
+        dogru('"plans"' in ham, "durum paketi planlari icermeli")
+        r.close()
+    finally: o.temizle()
+
+@test("degisiklik uctan uca akisa dusuyor", "canli")
+def t_sse_uctan_uca():
+    """Zincirin tamami: diskteki degisiklik -> izleyici -> yayin -> HTTP akisi."""
+    import threading as _t
+    o = Ortam()
+    try:
+        o.plan()
+        c = o.oku_cfg(); c["sse_watch_ms"] = 100; c["sse_ping_sec"] = 1; o.yaz_cfg(c)
+        s = o.sunucu()
+        G = s.G                       # sunucu ile ayni modul ornegi
+        G.cfg(force=True)
+        dur = _t.Event()
+        _t.Thread(target=G.izleyici_dongusu, args=(dur,), daemon=True).start()
+        r = s.istek("/api/events", akis=True, zaman=10)
+        try:
+            r.readline()                                  # retry satiri
+            basla = time.time()
+            while "event: durum" not in r.readline().decode("utf-8", "replace"):
+                dogru(time.time() - basla < 5, "acilis durumu gelmedi")
+            G.log("uctan uca test satiri")                # log dosyasi degisti
+            G.put_pstate("p1", {"status": "basarili", "summary": "uctan uca"})
+            gorulen, basla = set(), time.time()
+            while time.time() - basla < 6 and not {"log", "durum"} <= gorulen:
+                ln = r.readline().decode("utf-8", "replace")
+                if ln.startswith("event: "): gorulen.add(ln[7:].strip())
+            dogru("log" in gorulen, f"log olayi akisa dusmeliydi: {gorulen}")
+            dogru("durum" in gorulen, f"durum olayi akisa dusmeliydi: {gorulen}")
+        finally:
+            r.close(); dur.set()
+        # Abone kopunca kayit temizlenmeli, is parcacigi sizmasin
+        basla = time.time()
+        while G.OLAY.abone_sayisi() and time.time() - basla < 6: time.sleep(0.05)
+        dogru(G.OLAY.abone_sayisi() == 0,
+              "kopan abone temizlenmeli (ping kopmayi fark etmeli)")
     finally: o.temizle()
 
 @test("beni hatirla servis yeniden baslayinca yasar", "guvenlik")

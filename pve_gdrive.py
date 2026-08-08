@@ -93,6 +93,15 @@ GLOBAL_DEFAULTS = {
     "rclone_tail_lines": 40,    # rclone ciktisindan bellekte tutulacak son satir sayisi
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
+    # --- canli olay akisi (SSE) ---
+    "sse_enabled": True,        # kapatilirsa arayuz eski yoklama moduna doner
+    "sse_watch_ms": 1000,       # diskteki degisikligin ne siklikta taranacagi
+    "sse_heartbeat_sec": 20,    # ters vekil baglantiyi kesmesin diye bos sinyal
+    # Kopan baglanti ancak bir yazma denemesinde anlasilir. Kisa araliklarla
+    # yorum satiri yazilir (EventSource yok sayar) ki kapanan sekme birakilan
+    # is parcacigini ve akis kotasini uzun sure tutmasin.
+    "sse_ping_sec": 5,
+    "sse_max_clients": 16,      # es zamanli acik akis siniri (her biri bir is parcacigi)
     "purge_batch": 50,          # cop temizliginde tek rclone cagrisinda silinecek dosya sayisi
     "purge_timeout_min": 30,    # cop temizligi rclone cagrisi icin zaman asimi (dakika)
     "log_max_mb": 5,            # log dosyasi bu boyutu asinca dondurulur
@@ -433,6 +442,67 @@ def log(msg, plan=None):
       except Exception as e: yut("log", e)
       # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
       if not os.environ.get("PVE_GDRIVE_QUIET"): print(line, flush=True)
+
+
+# ---------- OLAY YAYINI (SSE) ----------
+# Arayuz onceden birkac saniyede bir /api/status cekiyordu: degisiklik ile
+# ekranda gorunmesi arasinda o kadar gecikme vardi ve hicbir sey olmasa bile
+# istek gidiyordu. Artik sunucu degisikligi kendisi itiyor.
+#
+# WebSocket yerine SSE: sunucu saf stdlib http.server, WebSocket el sikismasini
+# ve cerceve cozmeyi elle yazmak gerekirdi. Ihtiyac tek yonlu (sunucu -> tarayici),
+# EventSource kendiliginden yeniden baglaniyor ve ters vekilden sorunsuz geciyor.
+
+class OlayYayini:
+    """Abone basina sinirli kuyruk. Yavas bir istemci bellegi sisiremez:
+    kuyrugu dolan abonenin en eski olayi dusurulur."""
+
+    def __init__(self, kuyruk_max=200, abone_max=16):
+        self.kilit = threading.Lock()
+        self.aboneler = {}          # id -> {"q": deque, "olay": Event}
+        self.sira = 0
+        self.kuyruk_max = kuyruk_max
+        self.abone_max = abone_max
+
+    def abone_ol(self):
+        with self.kilit:
+            if len(self.aboneler) >= self.abone_max: return None
+            self.sira += 1
+            no = self.sira
+            self.aboneler[no] = {"q": deque(maxlen=self.kuyruk_max), "olay": threading.Event()}
+            return no
+
+    def ayril(self, no):
+        with self.kilit: self.aboneler.pop(no, None)
+
+    def yayinla(self, tur, veri):
+        paket = (tur, veri)
+        with self.kilit:
+            for a in self.aboneler.values():
+                a["q"].append(paket); a["olay"].set()
+
+    def bekle(self, no, zaman_asimi):
+        """Sirada olay varsa hemen, yoksa zaman_asimi kadar bekleyip dondurur."""
+        with self.kilit:
+            a = self.aboneler.get(no)
+            if not a: return None
+            if a["q"]: return a["q"].popleft()
+            a["olay"].clear()
+        a["olay"].wait(zaman_asimi)
+        with self.kilit:
+            a = self.aboneler.get(no)
+            if not a: return None
+            return a["q"].popleft() if a["q"] else None
+
+    def abone_sayisi(self):
+        with self.kilit: return len(self.aboneler)
+
+OLAY = OlayYayini()
+
+def olay_yolla(tur, veri):
+    """Yayin hicbir zaman cagiran isi bozmaz; hata yutulur."""
+    try: OLAY.yayinla(tur, veri)
+    except Exception as e: yut("olay_yolla", e)
 
 def tail_bytes(path, maxbytes=1024 * 1024):
     """Dosyanin sadece son maxbytes'ini okur - log buyuse de bellek sabit kalir."""
@@ -2547,6 +2617,8 @@ def public_status():
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
                           "quota_cache_min", "dil",
+                          "sse_enabled", "sse_watch_ms", "sse_heartbeat_sec", "sse_max_clients",
+                          "sse_ping_sec",
                           "remember_enabled", "remember_days", "session_ip_bind",
                           "session_timeout_min",
                           "log_file", "state_file")},
@@ -2568,6 +2640,54 @@ class H(BaseHTTPRequestHandler):
     sess = None
 
     def log_message(self, *a): pass
+
+    def _olay_akisi(self):
+        """SSE akisi. Baglanti acik kaldigi surece bu is parcacigini tutar;
+        bu yuzden es zamanli abone sayisi sinirli (sse_max_clients)."""
+        C = cfg()
+        if not C.get("sse_enabled", True):
+            self._json({"ok": False, "msg": "canli akis kapali"}, 503); return
+        OLAY.abone_max = int(C.get("sse_max_clients") or 16)
+        no = OLAY.abone_ol()
+        if no is None:
+            self._json({"ok": False, "msg": "canli akis dolu, biraz sonra dene"}, 503); return
+        kalp = max(1.0, float(C.get("sse_heartbeat_sec") or 20))
+        ping = max(0.5, min(float(C.get("sse_ping_sec") or 5), kalp))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            # nginx onunde arabellek akisi durdurur; bu basligi anliyor
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            # Tarayici kopunca kac ms sonra denesin
+            self._olay_yaz("retry", None, ham=f"retry: {int(kalp * 100)}\n\n")
+            self._olay_yaz("durum", public_status())
+            son = son_ping = time.time()
+            while True:
+                paket = OLAY.bekle(no, min(1.0, ping))
+                simdi = time.time()
+                if paket:
+                    self._olay_yaz(paket[0], paket[1]); son = son_ping = simdi
+                elif simdi - son >= kalp:
+                    self._olay_yaz("kalp", {"t": now_str()}); son = son_ping = simdi
+                elif simdi - son_ping >= ping:
+                    # SSE yorum satiri: istemci yok sayar, kopmus baglanti burada belli olur
+                    self._olay_yaz(None, None, ham=": ping\n\n"); son_ping = simdi
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass            # tarayici sekmeyi kapatti, olagan
+        except Exception as e:
+            yut("_olay_akisi", e)
+        finally:
+            OLAY.ayril(no)
+
+    def _olay_yaz(self, tur, veri, ham=None):
+        if ham is None:
+            ham = f"event: {tur}\ndata: {json.dumps(veri, ensure_ascii=False)}\n\n"
+        self.wfile.write(ham.encode("utf-8"))
+        self.wfile.flush()
 
     def _send(self, code, ctype, body, extra=None):
         if isinstance(body, str): body = body.encode()
@@ -2704,6 +2824,8 @@ class H(BaseHTTPRequestHandler):
             st["csrf"] = (self.sess or {}).get("csrf", "")
             st["user"] = (self.sess or {}).get("user", "")
             self._json(st)
+        elif p == "/api/events":
+            self._olay_akisi()
         elif p == "/api/log":
             src = q.get("src", ["all"])[0] or "all"
             self._send(200, "text/plain; charset=utf-8", "\n".join(read_log(src)))
@@ -2905,11 +3027,13 @@ def save_settings(data):
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
-    for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik"):
+    for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik",
+              "sse_enabled"):
         if k in data: C[k] = bool(data[k])
     if str(data.get("session_ip_bind", "")) in ("ip", "ag", "yok"):
         C["session_ip_bind"] = data["session_ip_bind"]
-    for k in ("remember_days", "session_timeout_min"):
+    for k in ("remember_days", "session_timeout_min", "sse_watch_ms",
+              "sse_heartbeat_sec", "sse_max_clients", "sse_ping_sec"):
         if k in data:
             try: C[k] = max(1, int(data[k]))
             except Exception as e: yut("save_settings", e)
@@ -2994,6 +3118,78 @@ def do_login(handler):
     handler._send(302, "text/html; charset=utf-8", "",
                   [handler._cookie(tok, omur_sn=omur), ("Location", "/")])
 
+def _izleyici_turu(onceki, yayin=True):
+    """Diskteki degisiklikleri olaya cevirir. Yedegi calistiran surec ayri
+    (pve-gdrive-tick), bu yuzden bellek uzerinden haberlesemiyoruz; tek ortak
+    nokta dosya sistemi. Butun tarayicilar yerine tek bir dongu bakiyor.
+
+    yayin=False iken taban cizgisi yine guncellenir ama olay uretilmez.
+    Taban yalnizca abone varken tutulsaydi, baglanma ile ilk tur arasinda olan
+    degisiklik sessizce tabana yazilir ve hicbir zaman bildirilmezdi."""
+    C = cfg()
+    yeni = dict(onceki)
+
+    # 1) durum: state.json ya da yapilandirma degistiyse tam durumu it
+    imza = []
+    for yol in (C.get("state_file"), CONFIG_PATH):
+        try: imza.append(os.stat(yol).st_mtime_ns)
+        except Exception: imza.append(0)
+    imza = tuple(imza)
+    if imza != onceki.get("imza"):
+        yeni["imza"] = imza
+        if yayin and onceki.get("imza") is not None:   # ilk turda yayin yapma
+            olay_yolla("durum", public_status())
+
+    # 2) ilerleme: calisan planlarin ilerleme dosyalari
+    ilerleme = {}
+    for pl in C.get("plans", []):
+        pr = get_progress(pl["id"])
+        if pr: ilerleme[pl["id"]] = pr
+    if ilerleme != onceki.get("ilerleme"):
+        yeni["ilerleme"] = ilerleme
+        if yayin and onceki.get("ilerleme") is not None:
+            olay_yolla("ilerleme", ilerleme)
+    # Calisma bitti: durum kesin degismistir, tazele
+    if yayin and onceki.get("ilerleme") and not ilerleme:
+        olay_yolla("durum", public_status())
+
+    # 3) log: dosyanin yalnizca yeni kismi okunur, tamami degil
+    lf = C.get("log_file")
+    try:
+        boyut = os.path.getsize(lf)
+    except Exception:
+        boyut = 0
+    kaldigi = onceki.get("log_ofset")
+    if kaldigi is None:
+        yeni["log_ofset"] = boyut                # acilista gecmisi tekrar yollama
+    elif boyut < kaldigi:
+        yeni["log_ofset"] = boyut                # log dondu (rotate)
+    elif boyut > kaldigi:
+        try:
+            with open(lf, "rb") as f:
+                f.seek(kaldigi)
+                ham = f.read(256 * 1024).decode("utf-8", "replace")
+            tam = ham.rsplit("\n", 1)
+            satirlar = [x for x in tam[0].split("\n") if x.strip()] if len(tam) > 1 else []
+            yeni["log_ofset"] = kaldigi + len(ham.encode()) - len(tam[-1].encode()) \
+                if len(tam) > 1 else kaldigi
+            if yayin and satirlar: olay_yolla("log", {"satirlar": satirlar[-200:]})
+        except Exception as e:
+            yut("izleyici_log", e); yeni["log_ofset"] = boyut
+    return yeni
+
+def izleyici_dongusu(dur):
+    aralik = max(0.2, float(cfg().get("sse_watch_ms") or 1000) / 1000.0)
+    durum = {}
+    while not dur.is_set():
+        try:
+            # Abone yokken de taban guncellenir (birkac stat cagrisi), ama
+            # public_status() hesaplanmaz ve olay uretilmez.
+            durum = _izleyici_turu(durum, yayin=bool(OLAY.abone_sayisi()))
+        except Exception as e:
+            yut("izleyici_dongusu", e)
+        dur.wait(aralik)
+
 def serve():
     global TLS_AKTIF
     C = cfg()
@@ -3011,6 +3207,10 @@ def serve():
     if ic_zamanlayici_acik():
         dur = threading.Event()
         threading.Thread(target=zamanlayici_dongusu, args=(dur,), daemon=True).start()
+    if cfg().get("sse_enabled", True):
+        threading.Thread(target=izleyici_dongusu, args=(threading.Event(),),
+                         daemon=True).start()
+        log(f"canli olay akisi acik (izleme {cfg().get('sse_watch_ms')} ms)")
     if TLS_AKTIF:
         b = cert_bilgisi() or {}
         log(f"TLS acik | sertifika: {b.get('konu')} | veren: {b.get('veren')} | bitis: {b.get('bitis')}")
@@ -3346,6 +3546,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         stroke-linecap="round" stroke-linejoin="round"/>
 </svg></span>
   <h1>Proxmox → Google Drive Yedek</h1>
+  <span class="pill idle" id="canli" title="Canlı akış durumu">○ yoklama</span>
   <span id="tlsrozet"></span>
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
@@ -4243,6 +4444,19 @@ const EN = {
     " hazır": " ready",
     "%) · çöp: ": "%) · trash: ",
     " · boş: ": " · free: ",
+    "● CANLI": "● LIVE",
+    "○ yoklama": "○ polling",
+    "Sunucu değişiklikleri anında gönderiyor": "The server pushes changes instantly",
+    "Canlı akış yok — belirli aralıklarla yenileniyor": "No live stream — refreshing on a timer",
+    "Zamanlama kapalı; dosyalara dokunulmaz.": "Scheduling is off; no file is touched.",
+    "Bu plan henüz hiç çalışmadı. İlk çalışma: ": "This plan has never run yet. First run: ",
+    "Son denemede iş yapılmadı — genelde vzdump hâlâ çalışıyordu. ": "The last attempt did no work — usually vzdump was still running. ",
+    "Sebep kartın altındaki özet satırında yazar. Sonraki turda tekrar denenir.": "The reason is in the summary line under the card. It retries on the next tick.",
+    "Canlı akış": "Live stream",
+    "Canlı akış (SSE)": "Live stream (SSE)",
+    "Diski tarama sıklığı (ms)": "Disk watch interval (ms)",
+    "Eş zamanlı canlı bağlantı sınırı": "Concurrent live connection limit",
+    "Oturum adres bağlama": "Session address binding",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -4969,16 +5183,26 @@ function vMails(id, optional) {
 /* ---------- plan kartlari ---------- */
 function pillOf(p) {
     const s = p.state || {};
+    const ip = (t) => ' title="' + esc(C(t)) + '"';
     if (p.running)
         return '<span class="pill run">● ÇALIŞIYOR</span>';
     if (!p.enabled)
-        return '<span class="pill off">KAPALI</span>';
+        return '<span class="pill off"' + ip("Zamanlama kapalı; dosyalara dokunulmaz.")
+            + ">KAPALI</span>";
+    // Hic calismamis plan "ATLANDI" gibi gorunmesin: ikisi ayri sey.
+    if (!s.last_run)
+        return '<span class="pill idle"'
+            + ip("Bu plan henüz hiç çalışmadı. İlk çalışma: " + (p.next_run || "-"))
+            + ">⏳ BEKLİYOR</span>";
     if (s.status === "basarili")
         return '<span class="pill ok">✔ BAŞARILI</span>';
     if (s.status === "HATA")
         return '<span class="pill err">✖ HATA</span>';
     if (s.status === "atlandi")
-        return '<span class="pill run">⏸ ATLANDI</span>';
+        return '<span class="pill run"'
+            + ip("Son denemede iş yapılmadı — genelde vzdump hâlâ çalışıyordu. "
+                + "Sebep kartın altındaki özet satırında yazar. Sonraki turda tekrar denenir.")
+            + ">⏸ ATLANDI</span>";
     return '<span class="pill idle">' + esc(s.status || "—").toUpperCase() + "</span>";
 }
 function progOf(p) {
@@ -5191,10 +5415,119 @@ async function refresh() {
     }
     render();
     void loadLog();
+    akisBaslat();
+    yoklamaAyarla();
+}
+/* ---------- canli olay akisi (SSE) ----------
+ * Once birkac saniyede bir /api/status cekiliyordu: hicbir sey degismese de
+ * istek gidiyor, degisiklik ise gec gorunuyordu. Artik sunucu itiyor.
+ * Akis kurulamazsa (eski vekil, kapali ayar) eski yoklama moduna dusuyoruz —
+ * arayuz her durumda calisir kalir. */
+let akis = null;
+let akisCanli = false;
+let akisHata = 0;
+function akisDurumu(canli) {
+    if (akisCanli === canli)
+        return;
+    akisCanli = canli;
+    const e = document.getElementById("canli");
+    if (e) {
+        e.className = "pill " + (canli ? "ok" : "idle");
+        e.textContent = canli ? C("● CANLI") : C("○ yoklama");
+        e.title = canli ? C("Sunucu değişiklikleri anında gönderiyor")
+            : C("Canlı akış yok — belirli aralıklarla yenileniyor");
+    }
+    yoklamaAyarla();
+}
+/** Akis calisirken yoklama tamamen durur; yalnizca yedek olarak seyrek doner. */
+function yoklamaAyarla() {
     const base = ((S && S.settings && S.settings.ui_refresh_sec) || 5) * 1000;
-    const iv = running ? Math.min(base, 2000) : base;
     window.clearInterval(refTimer);
+    const iv = akisCanli ? 60000 : (running ? Math.min(base, 2000) : base);
     refTimer = window.setInterval(() => void refresh(), iv);
+}
+function akisBaslat() {
+    if (akis || typeof EventSource === "undefined")
+        return;
+    if (S && S.settings && S.settings.sse_enabled === false)
+        return;
+    try {
+        akis = new EventSource("/api/events");
+    }
+    catch {
+        akis = null;
+        return;
+    }
+    akis.addEventListener("open", () => { akisHata = 0; akisDurumu(true); });
+    akis.addEventListener("durum", (e) => {
+        try {
+            const y = JSON.parse(e.data);
+            if (y.login) {
+                location.reload();
+                return;
+            }
+            // csrf yalnizca /api/status ile gelir; akis paketinde yoksa mevcudu koru
+            if (S && !y.csrf)
+                y.csrf = S.csrf;
+            S = y;
+            akisDurumu(true);
+            render();
+        }
+        catch { /* bozuk paket: bir sonraki tazeleme duzeltir */ }
+    });
+    akis.addEventListener("ilerleme", (e) => {
+        try {
+            const m = JSON.parse(e.data);
+            if (!S)
+                return;
+            S.plans.forEach((p) => {
+                const g = m[p.id];
+                p.progress = g;
+                p.running = Boolean(g);
+            });
+            running = S.plans.filter((p) => p.running).length;
+            render();
+        }
+        catch { /* yok say */ }
+    });
+    akis.addEventListener("log", (e) => {
+        try {
+            logEkle(JSON.parse(e.data).satirlar || []);
+        }
+        catch { /* yok say */ }
+    });
+    akis.addEventListener("kalp", () => akisDurumu(true));
+    akis.addEventListener("error", () => {
+        akisDurumu(false);
+        // EventSource kendi yeniden baglanir; ustuste basarisiz olursa vazgec
+        if (++akisHata >= 6 && akis) {
+            akis.close();
+            akis = null;
+        }
+    });
+}
+/** Akistan gelen satirlari log kutusuna ekler. Secili kaynaga gore suzulur,
+ *  kutu sonundaysa asagi kaydirilir (okurken zipladigi olmasin). */
+function logEkle(satirlar) {
+    if (!satirlar.length)
+        return;
+    const kutu = el("log");
+    const dipte = kutu.scrollHeight - kutu.scrollTop - kutu.clientHeight < 40;
+    const suz = satirlar.filter((x) => {
+        if (LOGSRC === "all")
+            return true;
+        const m = /\|\s*\[([^\]]+)\]/.exec(x);
+        return LOGSRC === "system" ? !m : Boolean(m && m[1] === LOGSRC);
+    });
+    if (!suz.length)
+        return;
+    kutu.textContent = ((kutu.textContent || "") + "\n" + suz.join("\n")).trim();
+    // Bellek sinirli kalsin: en fazla son 2000 satir tutulur
+    const t = (kutu.textContent || "").split("\n");
+    if (t.length > 2000)
+        kutu.textContent = t.slice(-2000).join("\n");
+    if (dipte)
+        kutu.scrollTop = kutu.scrollHeight;
 }
 async function act(d, pid) {
     flash(C("çalışıyor…"), true);
@@ -5205,7 +5538,8 @@ async function act(d, pid) {
     catch {
         flash("hata", false);
     }
-    window.setTimeout(() => void refresh(), 900);
+    if (!akisCanli)
+        window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid) {
     if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")))

@@ -99,6 +99,10 @@ interface Settings {
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;
   update_check: boolean; update_auto: boolean; update_url: string; update_backup_keep: number;
   allow_networks: string[];
+  sse_enabled?: boolean; sse_watch_ms?: number;
+  sse_heartbeat_sec?: number; sse_max_clients?: number;
+  remember_enabled?: boolean; remember_days?: number;
+  session_ip_bind?: "ip" | "ag" | "yok";
 }
 
 interface SmtpProfile {

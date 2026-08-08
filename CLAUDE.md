@@ -72,6 +72,31 @@ gerçek ve çoğu geri alınamaz.
   Cevap net "evet" değilse çalıştırma, sor.
 - Yıkıcı veya geri alınamaz bir adım gerekiyorsa önce ölç ve göster, sonra onay iste.
 
+### 6b. Dağıtımı doğrula — doğru dosyaya yazdığını varsayma
+
+Sunucuda birden fazla kopya olabilir. Hedef yolu elle yazma, **systemd biriminin
+`ExecStart`'ından oku**; doğrulamayı da çalışan sürecin `/proc/<pid>/cmdline`
+ile gerçekten açtığı dosyanın sha256'sı üzerinden yap.
+
+`./dagit.sh` bunu yapar; elle `scp` atma.
+
+(2026-08-08: bir gün boyunca `/usr/local/bin/pve-gdrive` dosyasına dağıtım
+yapıldı, servis ise `/usr/local/bin/pve_gdrive.py` çalıştırıyordu. Değişikliklerin
+hiçbiri canlıya geçmedi ama "dağıtıldı, doğrulandı" diye rapor edildi — çünkü
+doğrulama da aynı yanlış dosyayı okuyordu.)
+
+### 6c. Zamanlayıcı durumunu elle düzenleme
+
+`state.json` içindeki `last_run` alanı zamanlayıcının "bu slot işlendi mi"
+kararını verir. Onu boşaltmak, geçmiş bir slotu **gecikmiş** gösterir ve
+zamanlayıcı yedeği o anda başlatır.
+
+Durum alanlarını değiştirmeden önce sor: *"Bu değişiklik bir çalışmayı
+tetikler mi?"* Tetikliyorsa önce ürün sahibine söyle.
+
+(2026-08-08: rozeti düzeltmek için `last_run` boşaltıldı, 215 GB'lık yükleme
+gündüz 13:05'te kendiliğinden başladı.)
+
 ### 7. Linux'un imkânlarını kullan, kaynak tüketimini yönet
 
 Bu bir hipervizör üzerinde çalışıyor. Yedekleme işi, üstünde koşan VM ve CT'leri
@@ -127,6 +152,9 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [x] Proxmox arayüzünden erişim: Datacenter Notes linki ve nginx ters vekil (TLS)
 - [x] Bant genişliği plan başına: sabit, saatlik çizelge ve otomatik mod
 - [ ] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları
+- [x] Arayüzde canlı olay akışı (SSE): durum, ilerleme ve log anında düşer
+- [x] Sağ tık menüleri: plan, hesap, SMTP, log ve tablo satırları
+- [ ] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)
 
 ## Ortam
 
