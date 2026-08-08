@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.4.3"
+SURUM = "1.4.4"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -58,6 +58,9 @@ GLOBAL_DEFAULTS = {
     "ssl_cert": "/etc/pve/local/pve-ssl.pem",
     "ssl_key": "/etc/pve/local/pve-ssl.key",
     "cookie_secure": False,       # TLS acikken otomatik olarak zorlanir
+    # Lax | Strict | None. Strict en siki ama disaridan gelen baglantida
+    # oturumu "yokmus" gibi gosterir; varsayilan Lax.
+    "cookie_samesite": "Lax",
     "trust_proxy_header": False,  # X-Forwarded-For'a guvenilsin mi (nginx arkasinda true)
     # --- otomatik guncelleme ---
     "update_check": True,         # gunde bir yeni surum var mi diye bak
@@ -3015,6 +3018,7 @@ class GuvenlikDeposu:
     def __init__(self):
         self.kilit = threading.Lock()
         self.oturumlar = {}    # token -> {user, ip, created, last, csrf, kalici, bitis}
+        self._dusen = set()    # bilerek dusurulen kalici oturumlar (cikis / suresi doldu)
         self.captchalar = {}   # cid   -> {code, exp}
         self.hatalar = {}      # ip    -> {"n": int, "until": ts, "last": ts}
 
@@ -3022,6 +3026,7 @@ class GuvenlikDeposu:
         """Yalnizca testler icin: depoyu bosaltir."""
         with self.kilit:
             self.oturumlar.clear(); self.captchalar.clear(); self.hatalar.clear()
+            self._dusen = set()
 
     def kalicilari_yukle(self):
         """Servis yeniden baslarken 'beni hatirla' oturumlarini geri getirir.
@@ -3034,28 +3039,62 @@ class GuvenlikDeposu:
             return 0
         except Exception as e:
             yut("kalicilari_yukle", e); return 0
-        simdi = time.time(); n = 0
+        simdi = time.time(); n = suresi_dolmus = 0
         with self.kilit:
             for tok, v in (kayit.get("oturumlar") or {}).items():
-                if not isinstance(v, dict) or v.get("bitis", 0) <= simdi: continue
+                if not isinstance(v, dict): continue
+                if v.get("bitis", 0) <= simdi: suresi_dolmus += 1; continue
                 v["kalici"] = True
                 self.oturumlar[tok] = v; n += 1
+        if suresi_dolmus:
+            log(f"{suresi_dolmus} hatirlanan oturumun suresi dolmustu, alinmadi")
         return n
 
-    def kalicilari_yaz(self):
-        """Yalnizca kalici oturumlar diske gider; normal oturumlar bellekte kalir."""
+    def kalicilari_yaz(self, sebep=""):
+        """Kalici oturumlari diske yazar. DISKTEKILERLE BIRLESTIREREK.
+
+        Onceden yalnizca kendi belleginikini yaziyordu: dosyayi yuklememis
+        ikinci bir surec (tick, CLI, yeni acilan servis) yazdiginda oteki
+        oturumlari SILIYORDU. Olculdu: ikinci surec kalici oturum acinca
+        dosya 250 bayttan 243 bayta dustu, yani oncekinin yerine gecti.
+        Artik dosya kilit altinda okunup birlestiriliyor."""
+        yol = oturum_dosyasi()
         try:
             with self.kilit:
-                kayit = {t: v for t, v in self.oturumlar.items() if v.get("kalici")}
-            yol = oturum_dosyasi()
+                benim = {t: v for t, v in self.oturumlar.items() if v.get("kalici")}
+                dusenler = set(self._dusen)
+                self._dusen = set()
             os.makedirs(os.path.dirname(yol), exist_ok=True)
-            gecici = yol + ".tmp"
-            with open(gecici, "w", encoding="utf-8") as f:
-                json.dump({"oturumlar": kayit}, f)
-            os.chmod(gecici, 0o600)          # token dosyasi baskasina okunmasin
-            os.replace(gecici, yol)
+            simdi = time.time()
+            # Kilit dosyasi: iki surec ayni anda okuyup yazmasin
+            kilit_yolu = yol + ".lock"
+            with open(kilit_yolu, "a+") as kf:
+                fcntl.flock(kf, fcntl.LOCK_EX)
+                try:
+                    try:
+                        with open(yol, "r", encoding="utf-8") as f:
+                            diskte = json.load(f).get("oturumlar") or {}
+                    except FileNotFoundError:
+                        diskte = {}
+                    except Exception as e:
+                        yut("kalicilari_yaz_oku", e); diskte = {}
+                    birlesik = {t: v for t, v in diskte.items()
+                                if isinstance(v, dict)
+                                and v.get("bitis", 0) > simdi      # suresi dolmus gitsin
+                                and t not in dusenler}             # cikis yapan gitsin
+                    birlesik.update(benim)
+                    gecici = yol + ".tmp"
+                    with open(gecici, "w", encoding="utf-8") as f:
+                        json.dump({"oturumlar": birlesik}, f)
+                    os.chmod(gecici, 0o600)      # jeton dosyasi baskasina okunmasin
+                    os.replace(gecici, yol)
+                    log(f"oturum deposu yazildi: {len(birlesik)} kalici oturum"
+                        + (f" ({sebep})" if sebep else ""))
+                finally:
+                    fcntl.flock(kf, fcntl.LOCK_UN)
         except Exception as e:
-            yut("kalicilari_yaz", e)
+            # Sessiz yutma yok: hatirlama calismiyorsa sebebi logda gorunsun
+            log(f"UYARI: oturum deposu yazilamadi ({yol}): {e}")
 
 def oturum_dosyasi():
     return os.path.join(os.path.dirname(cfg().get("state_file",
@@ -3198,14 +3237,15 @@ def gc_sessions():
                   if (now > v.get("bitis", now + absmax))
                   or (not v.get("kalici") and (now - v["last"] > idle
                                                or now - v["created"] > absmax))]:
-            kalici_dustu = kalici_dustu or bool(SESSIONS.pop(t, {}).get("kalici"))
+            _d = SESSIONS.pop(t, {})
+            if _d.get("kalici"): kalici_dustu = True; DEPO._dusen.add(t)
         for c in [c for c, v in CAPTCHAS.items() if v["exp"] < now]:
             CAPTCHAS.pop(c, None)
         # bir saattir dokunulmamis ve kilitli olmayan deneme kayitlarini unut
         for i in [i for i, v in FAILS.items()
                   if v.get("until", 0) < now and now - v.get("last", 0) > 3600]:
             FAILS.pop(i, None)
-    if kalici_dustu: DEPO.kalicilari_yaz()
+    if kalici_dustu: DEPO.kalicilari_yaz("suresi doldu")
 
 def new_session(user, ip, kalici=False):
     """kalici=True ise oturum 'beni hatirla' omrunu alir ve cerez tarayici
@@ -3217,7 +3257,7 @@ def new_session(user, ip, kalici=False):
         SESSIONS[tok] = {"user": user, "ip": ip, "created": now, "last": now,
                          "csrf": secrets.token_urlsafe(24),
                          "kalici": bool(kalici), "bitis": now + omur}
-    if kalici: DEPO.kalicilari_yaz()
+    if kalici: DEPO.kalicilari_yaz("yeni giris")
     return tok
 
 def ayni_kaynak(eski, yeni, kip):
@@ -3318,7 +3358,8 @@ def public_status():
                           "log_tail_lines", "ui_refresh_sec", "rclone_timeout_min", "dump_regex",
                           "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
-                          "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
+                          "ssl_cert", "ssl_key", "cookie_secure", "cookie_samesite",
+                          "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep",
                           "update_izinli_hostlar", "update_sha256", "debug",
                           "quota_cache_min", "dil",
@@ -3418,7 +3459,14 @@ class H(BaseHTTPRequestHandler):
 
     def _cookie(self, tok, sil=False, omur_sn=None):
         C = cfg()
-        parts = [f"pgs={'' if sil else tok}", "Path=/", "HttpOnly", "SameSite=Strict"]
+        # SameSite: Strict, baska bir sayfadan (ornegin Proxmox arayuzundeki
+        # baglantidan) gelen ust duzey gezinmede cerezi GONDERMEZ - kullanici
+        # oturumu acik olmasina ragmen giris ekrani gorur ve "beni hatirla
+        # calismiyor" sanir. Lax bu gezinmede gonderir, CSRF'ye acik
+        # cross-site POST'ta gondermez; ustelik ayrica CSRF jetonu var.
+        ss = str(C.get("cookie_samesite") or "Lax")
+        if ss not in ("Lax", "Strict", "None"): ss = "Lax"
+        parts = [f"pgs={'' if sil else tok}", "Path=/", "HttpOnly", f"SameSite={ss}"]
         if sil: parts.append("Max-Age=0")
         elif omur_sn: parts.append(f"Max-Age={int(omur_sn)}")   # tarayici kapaninca silinmesin
         if C.get("cookie_secure") or TLS_AKTIF: parts.append("Secure")
@@ -3594,8 +3642,10 @@ class H(BaseHTTPRequestHandler):
         if path == "/logout":
             m = re.search(r"pgs=([A-Za-z0-9_\-]+)", self.headers.get("Cookie", "") or "")
             if m:
-                with _SEC_LOCK: dusen = SESSIONS.pop(m.group(1), None)
-                if dusen and dusen.get("kalici"): DEPO.kalicilari_yaz()
+                with _SEC_LOCK:
+                    dusen = SESSIONS.pop(m.group(1), None)
+                    if dusen and dusen.get("kalici"): DEPO._dusen.add(m.group(1))
+                if dusen and dusen.get("kalici"): DEPO.kalicilari_yaz("cikis")
             self._send(200, "application/json; charset=utf-8", '{"ok":true}', [self._cookie("", True)])
             return
         if not self._auth(need_csrf=True): return
@@ -3759,6 +3809,8 @@ def save_settings(data):
     if data.get("smtp_pass"): C["smtp_pass"] = str(data["smtp_pass"])
     if "allow_account_cleanup" in data: C["allow_account_cleanup"] = bool(data["allow_account_cleanup"])
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
+    if str(data.get("cookie_samesite", "")) in ("Lax", "Strict", "None"):
+        C["cookie_samesite"] = data["cookie_samesite"]
     for k in ("failure_mail_to", "failure_smtp_profile"):
         if k in data: C[k] = str(data[k] or "")
     for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik",
@@ -7871,6 +7923,25 @@ def main():
     elif cmd == "bildir":
         # systemd OnFailure= bunu cagirir: pve-gdrive.py bildir <birim>
         sys.exit(birim_bildir(sys.argv[2] if len(sys.argv) > 2 else "bilinmeyen"))
+    elif cmd == "oturumlar":
+        yol = oturum_dosyasi()
+        print(f"dosya: {yol}")
+        try:
+            kayit = json.load(open(yol)).get("oturumlar") or {}
+        except FileNotFoundError:
+            print("  dosya yok - hic kalici oturum acilmamis"); kayit = {}
+        except Exception as e:
+            print(f"  okunamadi: {e}"); kayit = {}
+        simdi = time.time()
+        for t, v in kayit.items():
+            kalan = (v.get("bitis", 0) - simdi) / 86400
+            print(f"  {t[:12]}…  kullanici={v.get('user')}  adres={v.get('ip')}  "
+                  f"kalan={kalan:.1f} gun  {'GECERLI' if kalan > 0 else 'SURESI DOLMUS'}")
+        if not kayit: print("  (bos)")
+        print(f"ayarlar: remember_enabled={cfg().get('remember_enabled')} "
+              f"gun={cfg().get('remember_days')} "
+              f"adres_baglama={cfg().get('session_ip_bind') or 'ip'} "
+              f"samesite={cfg().get('cookie_samesite') or 'Lax'}")
     elif cmd == "saglik":
         d, m2 = tick_sagligi()
         yas = tick_yasi_dk()

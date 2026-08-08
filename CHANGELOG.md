@@ -2,6 +2,45 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.4.4 — 2026-08-08
+
+### "Beni hatırla" — üç ayrı kusur
+
+Hâlâ çalışmadığı bildirildi. Uçtan uca ölçüldü ve üç şey bulundu.
+
+**1. İkinci bir süreç oturum dosyasını eziyordu.** `kalicilari_yaz()` yalnızca
+kendi belleğindekini yazıyordu; dosyayı hiç yüklememiş bir süreç (tick, CLI,
+yeni açılan servis) yazdığında diğer oturumları **siliyordu**. Ölçüldü: ikinci
+süreç kalıcı oturum açınca dosya 250 bayttan 243 bayta düştü — öncekinin yerine
+geçmişti. Artık dosya `flock` altında okunup **birleştiriliyor**; çıkış yapılan
+ve süresi dolan oturumlar birleştirmede geri dirilmiyor.
+
+**2. Yazma hataları sessizce yutuluyordu.** `yut()` ile susturulmuştu, yani
+hatırlama çalışmadığında logda hiçbir iz kalmıyordu. Artık her yazma
+`oturum deposu yazildi: N kalici oturum (sebep)` olarak, her başarısızlık
+`UYARI: oturum deposu yazilamadi` olarak loga düşüyor.
+
+**3. `SameSite=Strict`.** Strict, başka bir sayfadan gelen üst düzey gezinmede
+çerezi **göndermez** — Proxmox arayüzündeki bir bağlantıdan geldiğinde oturumun
+açık olmasına rağmen giriş ekranı görürsün. Varsayılan `Lax` oldu
+(`cookie_samesite` ile ayarlanabilir); CSRF'ye açık cross-site POST'ta yine
+gönderilmez, ayrıca zaten CSRF jetonu var.
+
+### Teşhis
+
+Yeni komut: `pve_gdrive.py oturumlar` — kayıtlı oturumları, kalan sürelerini ve
+ilgili ayarları (`remember_enabled`, `session_ip_bind`, `cookie_samesite`)
+gösterir.
+
+### Eksik olan test
+
+1.3.1'de yalnızca oturum **deposu** test edilmişti, giriş **akışı** değil. Artık
+gerçek HTTP sunucusuna "beni hatırla" ile giriş yapılıyor, `Set-Cookie` başlığı
+(Max-Age, HttpOnly, SameSite) doğrulanıyor, servis yeniden başlatılıyor ve
+**aynı çerezin hâlâ geçerli olduğu** ölçülüyor.
+
+Test: 81 → 83.
+
 ## 1.4.3 — 2026-08-08
 
 Güvenlik sertleştirmesi. "Bu betiği kimler değiştirebilir?" sorusu sorulunca

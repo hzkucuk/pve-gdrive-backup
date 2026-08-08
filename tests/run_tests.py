@@ -1446,6 +1446,85 @@ def t_hatirla_kalici():
         dogru(oct(os.stat(G.oturum_dosyasi()).st_mode)[-3:] == "600", "token dosyasi 600 olmali")
     finally: o.temizle()
 
+@test("ikinci surec oturum dosyasini ezmez", "guvenlik")
+def t_oturum_cok_surec():
+    """kalicilari_yaz() yalnizca kendi belleginikini yaziyordu: dosyayi
+    yuklememis ikinci bir surec (tick, CLI, yeni servis) yazdiginda oteki
+    oturumlari siliyordu. Olculdu: dosya 250 -> 243 bayt, oncekinin yerine gecti."""
+    o = Ortam()
+    try:
+        G1 = o.modul()
+        t1 = G1.new_session("admin", "10.0.0.1", kalici=True)
+        dogru(len(json.load(open(G1.oturum_dosyasi()))["oturumlar"]) == 1, "ilk oturum yazilmali")
+
+        G2 = o.modul()                      # dosyayi hic yuklememis ikinci surec
+        esit(len(G2.SESSIONS), 0, "ikinci surecin bellegi bos olmali")
+        t2 = G2.new_session("admin", "10.0.0.2", kalici=True)
+
+        diskte = json.load(open(G1.oturum_dosyasi()))["oturumlar"]
+        dogru(t1 in diskte, "BIRINCI surecin oturumu SILINMEMELI")
+        dogru(t2 in diskte, "ikinci surecin oturumu da yazilmali")
+        esit(len(diskte), 2, f"ikisi de durmali: {len(diskte)}")
+
+        # Cikis yapilan oturum birlestirme sirasinda GERI GELMEMELI
+        with G1._SEC_LOCK:
+            G1.SESSIONS.pop(t1, None); G1.DEPO._dusen.add(t1)
+        G1.DEPO.kalicilari_yaz("cikis")
+        diskte = json.load(open(G1.oturum_dosyasi()))["oturumlar"]
+        dogru(t1 not in diskte, "cikis yapilan oturum diriltilmemeli")
+        dogru(t2 in diskte, "digeri korunmali")
+    finally: o.temizle()
+
+@test("beni hatirla gercek HTTP akisinda yasiyor", "guvenlik")
+def t_hatirla_uctan_uca():
+    """1.3.1'de yalnizca depo test edilmisti, giris akisi degil.
+    Burada gercek sunucuya giris yapilir, servis yeniden baslatilir ve
+    AYNI CEREZ hala gecerli mi diye bakilir."""
+    import threading as _t, urllib.parse
+    o = Ortam()
+    try:
+        c = o.oku_cfg(); c["captcha_enabled"] = False; c["allow_networks"] = []
+        c["ui_user"] = "admin"; c["ui_pass"] = "sifre123"; o.yaz_cfg(c)
+        G = o.modul(); G.ensure_hashed_pw()
+        srv = G.ThreadingHTTPServer(("127.0.0.1", 0), G.H); srv.daemon_threads = True
+        _t.Thread(target=srv.serve_forever, daemon=True).start()
+        o._srv = srv
+        taban = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        class Yonlendirme(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a): return None
+        op = urllib.request.build_opener(Yonlendirme)
+        gov = urllib.parse.urlencode({"user": "admin", "pass": "sifre123",
+                                      "remember": "1"}).encode()
+        try:
+            op.open(urllib.request.Request(taban + "/login", data=gov,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}))
+            cerez = ""
+        except urllib.error.HTTPError as e:
+            cerez = e.headers.get("Set-Cookie", "")
+        dogru("pgs=" in cerez, f"oturum cerezi verilmeli: {cerez}")
+        dogru("Max-Age=" in cerez, "hatirlanan oturumda Max-Age olmali (tarayici kapaninca silinmesin)")
+        dogru("HttpOnly" in cerez, "cerez HttpOnly olmali")
+        # Strict, disaridan gelen gezinmede cerezi gondermez -> oturum yokmus gibi gorunur
+        dogru("SameSite=Lax" in cerez, f"SameSite Lax olmali: {cerez}")
+        tok = cerez.split("pgs=")[1].split(";")[0]
+
+        def kimim():
+            rq = urllib.request.Request(taban + "/api/status",
+                                        headers={"Cookie": "pgs=" + tok})
+            try:
+                with urllib.request.urlopen(rq, timeout=5) as x:
+                    return json.loads(x.read()).get("user")
+            except urllib.error.HTTPError as e:
+                return f"HTTP {e.code}"
+        esit(kimim(), "admin", "giristen hemen sonra oturum gecerli olmali")
+
+        G.DEPO.sifirla()                      # servis yeniden basladi
+        esit(kimim(), "HTTP 401", "bellek gercekten bosalmali")
+        esit(G.DEPO.kalicilari_yukle(), 1, "oturum geri yuklenmeli")
+        esit(kimim(), "admin", "YENIDEN BASLATMADAN SONRA AYNI CEREZ GECERLI OLMALI")
+    finally: o.temizle()
+
 @test("oturum adres baglama kipleri", "guvenlik")
 def t_ip_baglama():
     o = Ortam()
