@@ -21,6 +21,23 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
    - Plan hâlâ **kapalı**
    - Kaynak hazır: `/USB_4T_R1/yedek/dump` (2.8 TB boş)
 
+3. **`10.0.0.253` — vzdump 3 TB'lık mount point'i de alıyor.** CT 100
+   (urbackupserver) `mp0 = /urbackupdisk, backup=1, size=3000G`. Log doğruladı:
+   `including mount point mp0`. Üç sorun: (a) hedef `/USB_4T_R1/yedek/dump`
+   **aynı havuzda**, 2,8 TB boş — sığmayabilir, (b) aynı havuza yedek gerçek
+   yedek değil, (c) Google Drive kotası 2 TB, çok terabaytlık arşiv sığmaz.
+   Öneri: `pct set 100 -mp0 ...,backup=0` (UrBackup'ın veri diski zaten
+   başkalarının yedeği). Önce deneme yedeği alıp boyutu ölç.
+
+4. **`10.0.0.253` — Proxmox Notes linki yok.** Marmaradaki link bu sohbetin
+   başında `proxmox-link.sh` ile eklenmişti; yeni makinede hiç çalışmadı.
+   Çözüm: `/opt/pve-gdrive-backup/proxmox-link.sh` ya da 1.7.1+ sürümde
+   *Ayarlar → Bakım ve taşıma → Proxmox'a link ekle* (bu ikisine birden yazar).
+
+5. **Google hesabı Windows 11 makinesinden bağlanacak.** Win10 1809+/Win11'de
+   OpenSSH istemcisi kurulu gelir. Tünel o makinede açılacak, tarayıcı da orada
+   olacak. Ağ izin listesi kontrol edilsin: `pve-gdrive aglar`.
+
 ## Bilinen durumlar
 
 - **VPN aynı anda tek tarafa bağlanıyor.** Biri erişilebilirken öteki değil.
@@ -29,6 +46,12 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 - `192.168.2.252` üzerinde SSH root **parola ile açık** (`PermitRootLogin yes`).
   Kullanıcıya söylendi, karar onun. Benim anahtarım
   (`pve-gdrive-claude-20260807`) hâlâ ekli — iş bitince silinmesi önerildi.
+
+## Doğrulanmamış
+
+- **Otomatik güncelleme gerçek koşulda hiç denenmedi.** `10.0.0.253` üzerinde
+  arayüzden güncelleme yapılıp yapılmadığı bilinmiyor. Yapıldıysa sonucu sor:
+  bu, güncelleme yolunun ilk saha sınavı olacaktı.
 
 ## Bugün yapılanlar (1.3.1 → 1.7.4, 12 sürüm)
 
