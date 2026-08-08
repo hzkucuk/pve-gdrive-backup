@@ -1175,7 +1175,7 @@ interface Depo {
   name: string; type: string; content: string; kapali: boolean;
   kok_yol: string; path: string; exists: boolean; dumps: number;
   yedek_alabilir: boolean; neden: string; duzeltme: string; pool?: string;
-  analiz?: YolAnaliz; dump_yok?: boolean; dugumler?: string[];
+  analiz?: YolAnaliz; dump_yok?: boolean; dugumler?: string[]; cozuldu?: string;
 }
 interface YolAnaliz {
   yol: string; var: boolean; yazilabilir: boolean; fstype: string;
@@ -1229,7 +1229,11 @@ async function loadStorages(): Promise<void> {
             ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
               + '\',\'icerik\')">' + C("Yedek içeriğini aç") + "</button>"
             : "";
-          return "<li><b>" + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
+          // Cozulmus olan bilgi olarak kalir ama dugmesiz ve soluk:
+          // "yedek alani olustur" isi bitmisken gurultu yapiyordu.
+          const isaret = x.cozuldu ? "✅ " : "";
+          return '<li' + (x.cozuldu ? ' style="opacity:.65"' : "") + "><b>"
+            + isaret + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
             + ")</span> — " + esc(x.neden) + dugme + "</li>";
         }).join("") + "</ul></div>";
   }

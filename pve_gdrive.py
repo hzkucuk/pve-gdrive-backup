@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.7.3"
+SURUM = "1.7.4"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -3000,6 +3000,38 @@ def zfs_havuzlari():
         out.append({"ad": p[0], "bos_h": p[1], "yol": p[2]})
     return out
 
+_ZFS_MP_ONBELLEK = {"zaman": 0.0, "veri": None}
+
+def _zfs_mountpointler():
+    """dataset -> baglama noktasi. Kisa sureli onbellek: pve_storages her
+    arayuz acilisinda cagriliyor, her seferinde zfs calistirmak israf."""
+    simdi = time.time()
+    if _ZFS_MP_ONBELLEK["veri"] is not None and simdi - _ZFS_MP_ONBELLEK["zaman"] < 60:
+        return _ZFS_MP_ONBELLEK["veri"]
+    veri = {}
+    for z in zfs_havuzlari():
+        veri[z["ad"]] = z["yol"]
+    _ZFS_MP_ONBELLEK.update(zaman=simdi, veri=veri)
+    return veri
+
+def _havuzda_yedek_deposu(havuz, ham_depolar):
+    """Bu ZFS havuzunun uzerinde yedek alabilen bir dizin deposu var mi?
+    Varsa adini doner. Boylece 'yedek alani olustur' onerisi, is zaten
+    yapilmisken tekrar gosterilmez."""
+    mps = _zfs_mountpointler()
+    kokler = [y for ds, y in mps.items()
+              if (ds == havuz or ds.startswith(havuz + "/")) and y]
+    if not kokler: return ""
+    for d in ham_depolar:
+        if d["type"] not in YEDEK_ALABILEN_TIPLER: continue
+        if "backup" not in (d.get("content") or ""): continue
+        yol = d.get("path")
+        if not yol: continue
+        y = os.path.abspath(yol)
+        if any(y == k or y.startswith(k.rstrip("/") + "/") for k in kokler):
+            return d["name"]
+    return ""
+
 def pve_storages(hepsi=True):
     """Proxmox depolari. hepsi=True ise yedek alamayanlar da SEBEBIYLE dondurulur.
 
@@ -3051,8 +3083,16 @@ def pve_storages(hepsi=True):
             kayit["neden"] = YEDEK_ALAMAYAN_SEBEP.get(
                 tip, f"'{tip}' tipi yedek dosyasi tutamaz")
             if tip == "zfspool":
-                kayit["duzeltme"] = "dataset"      # dataset + dizin deposu olustur
-                kayit["pool"] = st.get("pool") or st["name"]
+                havuz = st.get("pool") or st["name"]
+                kayit["pool"] = havuz
+                # Bu havuzda ZATEN yedek alan bir dizin deposu var mi?
+                # Varsa "olustur" dugmesi gostermek gurultu; is bitmis.
+                mevcut = _havuzda_yedek_deposu(havuz, ham)
+                if mevcut:
+                    kayit["cozuldu"] = mevcut
+                    kayit["neden"] += f" Bu havuzda '{mevcut}' deposu zaten yedek aliyor."
+                else:
+                    kayit["duzeltme"] = "dataset"
         elif not icerik_uygun:
             kayit["neden"] = "depo tanimli ama icerik listesinde 'backup' yok"
             kayit["duzeltme"] = "icerik"           # pvesm set ... --content ...,backup
@@ -5105,7 +5145,8 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="errmsg" id="err-src"></div>
         <div class="hint" id="e-srchint"></div>
         <div id="e-srcanaliz" style="margin-top:4px"></div><div id="e-stor" class="hint"></div>
-        <div class="eg">Depo <code>local</code> → <code>/var/lib/vz/dump</code> · Depo <code>Usb1Tb</code> → <code>/mnt/pve/Usb1Tb/dump</code></div></div></div>
+        <div class="eg">Depo yolları <code>&lt;depo-yolu&gt;/dump</code> biçimindedir.
+          Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
 </div>
 <div class="wstep" data-step="3" style="display:none">
@@ -7938,7 +7979,11 @@ async function loadStorages() {
                         ? ' <button class="sm" type="button" onclick="depoDuzelt(\'' + esc(x.name)
                             + '\',\'icerik\')">' + C("Yedek içeriğini aç") + "</button>"
                         : "";
-                return "<li><b>" + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
+                // Cozulmus olan bilgi olarak kalir ama dugmesiz ve soluk:
+                // "yedek alani olustur" isi bitmisken gurultu yapiyordu.
+                const isaret = x.cozuldu ? "✅ " : "";
+                return '<li' + (x.cozuldu ? ' style="opacity:.65"' : "") + "><b>"
+                    + isaret + esc(x.name) + "</b> <span class=\"small\">(" + esc(x.type)
                     + ")</span> — " + esc(x.neden) + dugme + "</li>";
             }).join("") + "</ul></div>";
     }

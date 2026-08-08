@@ -1215,6 +1215,55 @@ def _boru_ve_tty_ile_kos(betik, saniye=6):
     os.close(usta)
     return cikti.decode("utf-8", "replace"), sonuc
 
+@test("cozulmus havuzda 'olustur' onerisi tekrar cikmaz", "depolar")
+def t_havuz_cozuldu():
+    """Kullanici ZFS havuzunda yedek alanini olusturmustu; arayuz yine
+    'Yedek alani olustur' dugmesi gosteriyordu. Is bitmisken oneri gurultu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        mp = os.path.join(o.dizin, "HAVUZ", "yedek"); os.makedirs(mp)
+        cfgd = os.path.join(o.dizin, "pve"); os.makedirs(cfgd, exist_ok=True)
+        sahte = os.path.join(cfgd, "storage.cfg")
+        import builtins
+        asil = builtins.open
+        def sahte_open(yol, *a, **k):
+            if yol == "/etc/pve/storage.cfg": yol = sahte
+            return asil(yol, *a, **k)
+        o.yamala(builtins, "open", sahte_open)
+        o.yamala(G, "zfs_havuzlari",
+                 lambda: [{"ad": "HAVUZ", "yol": os.path.join(o.dizin, "HAVUZ")},
+                          {"ad": "HAVUZ/yedek", "yol": mp}])
+        G._ZFS_MP_ONBELLEK.update(zaman=0, veri=None)
+
+        # 1) Havuz var, uzerinde yedek deposu YOK -> oneri cikmali
+        asil(sahte, "w").write("zfspool: HAVUZ\n\tpool HAVUZ\n\tcontent images\n")
+        d = {x["name"]: x for x in G.pve_storages()}
+        esit(d["HAVUZ"]["duzeltme"], "dataset", "cozulmemisken oneri cikmali")
+        dogru(not d["HAVUZ"].get("cozuldu"), "cozuldu isareti olmamali")
+
+        # 2) Ayni havuzda yedek alan dizin deposu VAR -> oneri cikmamali
+        G._ZFS_MP_ONBELLEK.update(zaman=0, veri=None)
+        asil(sahte, "w").write("zfspool: HAVUZ\n\tpool HAVUZ\n\tcontent images\n\n"
+                               "dir: havuz-yedek\n\tpath " + mp + "\n\tcontent backup\n")
+        d = {x["name"]: x for x in G.pve_storages()}
+        esit(d["HAVUZ"]["duzeltme"], "", "is bitmisken oneri cikmamali")
+        esit(d["HAVUZ"]["cozuldu"], "havuz-yedek", "hangi deponun cozdugu yazilmali")
+        dogru("zaten" in d["HAVUZ"]["neden"], f"sebep guncellenmeli: {d['HAVUZ']['neden']}")
+        dogru(d["havuz-yedek"]["yedek_alabilir"], "olusturulan depo kullanilabilir olmali")
+
+        # 3) BASKA havuzdaki depo bu havuzu cozmus sayilmamali
+        G._ZFS_MP_ONBELLEK.update(zaman=0, veri=None)
+        baska = os.path.join(o.dizin, "BASKA"); os.makedirs(baska, exist_ok=True)
+        o.yamala(G, "zfs_havuzlari",
+                 lambda: [{"ad": "HAVUZ", "yol": os.path.join(o.dizin, "HAVUZ")},
+                          {"ad": "BASKA", "yol": baska}])
+        asil(sahte, "w").write("zfspool: HAVUZ\n\tpool HAVUZ\n\tcontent images\n\n"
+                               "dir: baska-yedek\n\tpath " + baska + "\n\tcontent backup\n")
+        d = {x["name"]: x for x in G.pve_storages()}
+        esit(d["HAVUZ"]["duzeltme"], "dataset", "baska havuzdaki depo bunu cozmez")
+    finally: o.temizle()
+
 @test("gozat kokleri ortamdan turer", "depolar")
 def t_gezinti_kokleri():
     """ZFS havuzu /USB_4T_R1 gibi KOKTE bagli oldugunda sabit kok listesinin

@@ -2,6 +2,23 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.7.4 — 2026-08-08
+
+### Bitmiş işin önerisi kaldırıldı
+
+ZFS havuzunda yedek alanı oluşturulduktan **sonra** bile *"Yedek alanı oluştur"*
+düğmesi duruyordu. Öneri, kendi işinin yapıldığını bilmiyordu.
+
+Artık havuzun bağlama noktası altında yedek alabilen bir dizin deposu varsa
+düğme çıkmıyor; satır soluk ve `✅` ile *"Bu havuzda 'usb4t-yedek' deposu zaten
+yedek alıyor"* diyor. Başka bir havuzdaki depo bunu çözmüş sayılmaz.
+
+### Bu makinede olmayan depo örneği
+
+Kaynak alanının altındaki ipucu `Usb1Tb` diye sabit bir depo adı yazıyordu —
+ilk sunucudan kalma, ikinci makinede öyle bir depo yok. Yerine biçim açıklaması
+kondu; gerçek depolar zaten üstteki listede tıklanabilir duruyor.
+
 ## 1.7.3 — 2026-08-08
 
 ### Gözat penceresi ZFS klasörünü göremiyordu
