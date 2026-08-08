@@ -154,7 +154,8 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [ ] Linux kaynak yönetimi: nice/ionice, systemd kaynak denetimleri, rclone bellek ayarları
 - [x] Arayüzde canlı olay akışı (SSE): durum, ilerleme ve log anında düşer
 - [x] Sağ tık menüleri: plan, hesap, SMTP, log ve tablo satırları
-- [ ] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)
+- [x] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)
+- [ ] Geri yükleme tatbikatı: indir + sha256 doğrula, sonucu haftalık rapora yaz
 
 ## Ortam
 

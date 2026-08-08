@@ -112,6 +112,34 @@
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
         <div class="eg" id="eg-td">Çöpte bekleme süresi.</div></div></div>
   </fieldset>
+  <fieldset><legend>Host yapılandırması</legend>
+    <div class="eg" style="margin-bottom:8px">vzdump yalnızca <b>disk</b> yedeği alır.
+      Host çökerse elinde diskler olur ama onları nereye geri yükleyeceğini anlatan
+      hiçbir şey olmaz: depo tanımları, ağ yapılandırması, hangi CT hangi köprüde…
+      Bu arşiv onu kapatır ve <b>~25 KB</b> yer kaplar.</div>
+    <div class="frm">
+      <label for="e-hc">Yapılandırmayı da yedekle</label>
+      <div><label class="chk"><input type="checkbox" id="e-hc"> <span>Açık</span></label>
+        <div class="eg">Her çalışmada tarihli bir arşiv: <code>/etc/pve</code>,
+          <code>/etc/network/interfaces</code>, <code>/etc/fstab</code>, apt kaynakları.</div></div>
+      <label for="e-hcj">pvesh JSON görüntüsü</label>
+      <div><label class="chk"><input type="checkbox" id="e-hcj"> <span>Açık</span></label>
+        <div class="eg">Proxmox REST ağacının okunabilir anlık görüntüsü. Geri yükleme
+          aracı değil; "ne vardı, ne değişti" sorusunu gözle cevaplamak için.</div></div>
+      <label for="e-hck">Saklanacak arşiv (adet)</label>
+      <div><input type="number" min="0" max="999" id="e-hck">
+        <div class="errmsg" id="err-hck"></div>
+        <div class="eg">Arşivler küçük olduğu için gün kuralından bağımsız bir tabanı var.
+          Gün sınırını aşanlar bu sayının altına düşmedikçe silinmez.</div></div>
+    </div>
+    <div class="eg" style="margin-top:8px;border-left:3px solid #d29922;padding-left:9px">
+      <b>Özel anahtarlar alınmaz.</b> <code>/etc/pve/priv/</code> içi varsayılan olarak
+      dışarıdadır; yalnızca <code>authorized_keys</code> ve <code>known_hosts</code>
+      (açık anahtar listeleri) girer. Küme CA anahtarı ve <code>authkey.key</code>
+      şifresiz Drive'a çıkmaz — tek düğümlü kurulumda bunlar geri yüklemede yeniden
+      üretilir. Ayrıntı: <b>docs/GERİ-YÜKLEME.md</b>
+    </div>
+  </fieldset>
 </div>
 <div class="wstep" data-step="5" style="display:none">
   <div class="wbaslik"><b>5. Zamanlama</b> <span class="small">Ne zaman çalışsın, çakışma nasıl önlensin</span></div>

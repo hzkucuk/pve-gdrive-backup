@@ -687,6 +687,10 @@ function wOzet(): void {
   h += wSatir("Kaynak", val("e-src"));
   h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
   h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
+  h += wSatir(C("Host yapılandırması"), chk("e-hc")
+    ? C("yedekleniyor · son ") + val("e-hck") + C(" arşiv saklanır")
+      + (chk("e-hcj") ? C(" · JSON görüntü dahil") : "")
+    : C("yedeklenmiyor"), !chk("e-hc"));
   h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
   h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
   h += wSatir(C("vzdump koruması"), chk("e-wv")
@@ -827,6 +831,7 @@ function openEditor(pid: string | null): void {
     mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
     wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
     skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
+    host_config_enabled: true, host_config_json: true, host_config_keep_count: 30,
     report_day: 1, report_at: "09:00", report_days: 7, report_stale_days: 2,
     report_quota_warn: 90, report_mail_to: "",
   };
@@ -1397,6 +1402,11 @@ function planMenusu(kap: HTMLElement): MenuOge[] {
     { simge: "📋", etiket: "Kaynak klasörü kopyala", is: () => panoyaYaz(p.src_dir, C("kaynak")) },
     { simge: "📋", etiket: "Hedefi kopyala", is: () => panoyaYaz(p.remote, C("hedef")) },
     { simge: "📄", etiket: "Bu planın loglarını göster", is: () => setLog(p.id) },
+    { simge: "🧩", etiket: "Yapılandırmayı şimdi yedekle",
+      pasif: p.running || !p.host_config_enabled,
+      ipucu: p.host_config_enabled ? "/etc/pve, ağ ve depo tanımları — ~25 KB"
+                                   : "bu planda yapılandırma yedeği kapalı",
+      is: () => act("hostconf", p.id) },
     { ayrac: true },
     { simge: "🗑", etiket: "Planı sil", tehlike: true, is: () => delPlan(p.id) },
   ];

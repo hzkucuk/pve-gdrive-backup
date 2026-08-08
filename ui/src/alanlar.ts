@@ -35,6 +35,10 @@ const PLAN_ALANLARI: Alan[] = [
   { id: "e-kd", anahtar: "keep_days",        tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },
   { id: "e-kc", anahtar: "keep_count",       tip: "sayi", adim: 4, min: 0, max: 999,  mesaj: C("0-999 arası adet") },
   { id: "e-td", anahtar: "drive_trash_days", tip: "sayi", adim: 4, min: 0, max: 365,  mesaj: C("0-365 arası gün") },
+  { id: "e-hc",  anahtar: "host_config_enabled",    tip: "onay", adim: 0 },
+  { id: "e-hcj", anahtar: "host_config_json",       tip: "onay", adim: 0 },
+  { id: "e-hck", anahtar: "host_config_keep_count", tip: "sayi", adim: 4, min: 0, max: 999,
+    mesaj: C("0-999 arası adet") },
   // 5. Zamanlama ve cakisma
   { id: "e-runat", anahtar: "run_at",           tip: "saat", adim: 5, mesaj: C("SS:DD biçiminde saat (ör. 03:00)") },
   { id: "e-wv",    anahtar: "wait_for_vzdump",  tip: "onay", adim: 0 },

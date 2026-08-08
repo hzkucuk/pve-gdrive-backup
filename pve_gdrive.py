@@ -19,7 +19,8 @@ Komutlar:
   python3 pve_gdrive.py ice-aktar         # stdin'den ayar yukler
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
-import hashlib, secrets, random, ssl, ipaddress, shutil, urllib.request, html as _html
+import hashlib, secrets, random, ssl, ipaddress, shutil, tempfile, io
+import urllib.request, html as _html
 from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -93,6 +94,39 @@ GLOBAL_DEFAULTS = {
     "rclone_tail_lines": 40,    # rclone ciktisindan bellekte tutulacak son satir sayisi
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
+    # --- host yapilandirma yedegi ---
+    # vzdump diskleri alir, host yapilandirmasini almaz. Bu kucuk arsiv
+    # "diskleri nereye geri yukleyecegim" sorusunun cevabidir.
+    "host_config_enabled": True,
+    "host_config_paths": [
+        "/etc/pve",                 # storage.cfg, user.cfg, VM/CT tanimlari, guvenlik duvari
+        "/etc/network/interfaces",  # ag yapilandirmasi /etc/pve'de DEGIL
+        "/etc/hosts", "/etc/resolv.conf",
+        "/etc/fstab",               # /mnt/pve/... baglamalari burada
+        "/etc/vzdump.conf",
+        "/etc/apt/sources.list", "/etc/apt/sources.list.d",
+        "/etc/systemd/system/pve-gdrive-ui.service",
+        "/etc/systemd/system/pve-gdrive-tick.timer",
+    ],
+    # Ozel anahtarlar Drive'a cikmaz. authorized_keys/known_hosts ACIK anahtar
+    # dosyalaridir; sizmalari erisim vermez, geri yuklemede SSH'i kurtarir.
+    "host_config_exclude": [
+        "*.key", "*.pem", "*.srl", "shadow.cfg", "*.pyc", "__pycache__/*",
+        "etc/pve/local/*",          # nodes/<ad> dizinine sembolik baglanti
+        # pmxcfs'in urettigi calisma-zamani dosyalari: yapilandirma degil,
+        # her acilista yeniden olusur. Arsivde gurultu yapmasinlar.
+        ".vmlist", ".rrd", ".members", ".clusterlog", ".debug", ".version",
+    ],
+    # priv/ varsayilan olarak tamamen disarida; yalnizca bunlar gecer.
+    # Ikisi de ACIK anahtar dosyasidir, sizmalari erisim vermez.
+    "host_config_priv_allow": ["authorized_keys", "known_hosts"],
+    "host_config_json": True,       # pvesh ile REST agacinin okunabilir goruntusu
+    "host_config_keep_count": 30,   # arsivler kucuk, gun sinirindan bagimsiz taban
+    "host_config_pvesh": [
+        "/version", "/cluster/resources", "/cluster/options", "/cluster/backup",
+        "/storage", "/nodes/{node}/network", "/nodes/{node}/status",
+        "/nodes/{node}/disks/list", "/access/users", "/access/roles", "/access/acl",
+    ],
     # --- canli olay akisi (SSE) ---
     "sse_enabled": True,        # kapatilirsa arayuz eski yoklama moduna doner
     "sse_watch_ms": 1000,       # diskteki degisikligin ne siklikta taranacagi
@@ -112,6 +146,9 @@ GLOBAL_DEFAULTS = {
 
 # Her planin kendi ayarlari - GUN cinsinden olan her sey burada, parametrik
 PLAN_DEFAULTS = {
+    # Host yapilandirma yedegi: plan bazinda kapatilabilir, yollari/dislama
+    # listesi verilmezse GLOBAL_DEFAULTS'taki liste kullanilir (bkz. hostconf_ayar).
+    "host_config_enabled": True, "host_config_json": True, "host_config_keep_count": 30,
     "id": "",
     "name": "Yeni plan",
     "enabled": True,
@@ -238,6 +275,14 @@ def save_cfg(c):
 
 def norm_plan(p):
     q = dict(PLAN_DEFAULTS); q.update(p or {})
+    q["host_config_enabled"] = bool(q.get("host_config_enabled",
+                                          GLOBAL_DEFAULTS["host_config_enabled"]))
+    q["host_config_json"] = bool(q.get("host_config_json", GLOBAL_DEFAULTS["host_config_json"]))
+    try: q["host_config_keep_count"] = max(0, int(q.get("host_config_keep_count")
+                                                  or GLOBAL_DEFAULTS["host_config_keep_count"]))
+    except Exception: q["host_config_keep_count"] = GLOBAL_DEFAULTS["host_config_keep_count"]
+    for k in ("host_config_paths", "host_config_exclude"):
+        if k in q and not isinstance(q[k], list): q.pop(k)
     q["id"] = str(q.get("id") or "").strip() or slug(q.get("name") or "plan")
     for k in ("keep_days", "keep_count", "transfers", "checkers"):
         try: q[k] = max(0, int(q[k]))
@@ -443,6 +488,188 @@ def log(msg, plan=None):
       # Test kosumunda konsolu kirletmesin; servis ve CLI'da normal calisir.
       if not os.environ.get("PVE_GDRIVE_QUIET"): print(line, flush=True)
 
+
+# ---------- HOST YAPILANDIRMA YEDEGI ----------
+# vzdump yalnizca disk yedegi alir. Host olursa elinde diskler olur ama onlari
+# NEREYE geri yukleyecegini anlatan hicbir sey olmaz: storage.cfg yok, ag
+# yapilandirmasi yok, hangi CT hangi koprude belli degil. /etc/pve 37 KB;
+# gunluk 53 GB'in yaninda bedava.
+#
+# Ozel anahtarlar disarida birakilir (varsayilan): /etc/pve/priv altindaki
+# kume CA anahtari ve authkey.key sifresiz Drive'a cikmamali. authorized_keys
+# ve known_hosts ACIK anahtar dosyalaridir, sizmasi erisim vermez ve geri
+# yuklemede SSH erisimini kurtarir - bu yuzden dahildir.
+
+RE_HOSTCONF = re.compile(r"^pve-config-(.+?)-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})"
+                         r"\.(tar\.gz|json)$")
+
+def hostconf_ayar(p, anahtar):
+    """Plan degeri yoksa genel varsayilana duser."""
+    v = p.get(anahtar)
+    if v in (None, "", []): return GLOBAL_DEFAULTS.get(anahtar)
+    return v
+
+def _hostconf_dahil(rel, disla, priv_izin):
+    """Dislama kurali iki katmanli.
+
+    1) priv/ ICI VARSAYILAN OLARAK YASAK. Yalnizca acikca izin verilen dosyalar
+       (acik anahtar listeleri) gecer. Boylece Proxmox yarin oraya yeni bir sir
+       koyarsa kural guncellenmese bile disarida kalir - guvenlikte varsayilan
+       "izin ver" olmamali.
+    2) Ayrica desen listesi uygulanir; desenler yolun herhangi bir sonekiyle
+       eslesebilir, boylece kok dizin farkli olsa da kural tutar.
+    """
+    parcalar = rel.split("/")
+    if "priv" in parcalar:
+        return os.path.basename(rel) in priv_izin and parcalar[-2:-1] == ["priv"]
+    ad = os.path.basename(rel)
+    for k in disla:
+        if fnmatch.fnmatch(ad, k) or fnmatch.fnmatch(rel, k) or fnmatch.fnmatch(rel, "*/" + k):
+            return False
+    return True
+
+def hostconf_dosyalari(p):
+    """Arsive girecek (mutlak_yol, arsiv_ici_yol) ciftleri. Okunamayan atlanir."""
+    disla = hostconf_ayar(p, "host_config_exclude") or []
+    priv_izin = set(hostconf_ayar(p, "host_config_priv_allow") or [])
+    cikti, atlanan = [], []
+    for kok in hostconf_ayar(p, "host_config_paths") or []:
+        if not os.path.exists(kok): continue
+        if os.path.isfile(kok):
+            rel = kok.lstrip("/")
+            if _hostconf_dahil(rel, disla, priv_izin): cikti.append((kok, rel))
+            else: atlanan.append(rel)
+            continue
+        for dizin, altlar, adlar in os.walk(kok):
+            # priv dizinine girmeyi engelleme: icinde izinli acik anahtar olabilir
+            tutulan = []
+            for d in altlar:
+                tam_d = os.path.join(dizin, d)
+                if d == "priv" or _hostconf_dahil(os.path.join(tam_d, "x").lstrip("/"),
+                                                  disla, priv_izin):
+                    tutulan.append(d)
+                else:
+                    # Atlanan dizin de rapora girsin: arsivi acan kisi neyin
+                    # bilerek disarida birakildigini gormeli.
+                    atlanan.append(tam_d.lstrip("/") + "/  (dizin)")
+            altlar[:] = tutulan
+            for ad in adlar:
+                tam = os.path.join(dizin, ad); rel = tam.lstrip("/")
+                if not os.path.isfile(tam): continue
+                if not _hostconf_dahil(rel, disla, priv_izin): atlanan.append(rel); continue
+                cikti.append((tam, rel))
+    return sorted(cikti), sorted(atlanan)
+
+def hostconf_json(p):
+    """pvesh ile REST agacinin anlik goruntusu. Geri yukleme araci degil;
+    'ne vardi, ne degisti' sorusunu gozle cevaplamak icin."""
+    if not shutil.which("pvesh"): return None
+    dugum = os.uname().nodename
+    cikti = {"_uretim": now_str(), "_dugum": dugum, "_surum_araci": SURUM}
+    for uc in hostconf_ayar(p, "host_config_pvesh") or []:
+        yol = uc.replace("{node}", dugum)
+        try:
+            r = subprocess.run(["pvesh", "get", yol, "--output-format", "json"],
+                               capture_output=True, text=True, timeout=30)
+            cikti[yol] = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() \
+                         else {"_hata": (r.stderr or "bos yanit").strip()[:200]}
+        except Exception as e:
+            cikti[yol] = {"_hata": str(e)[:200]}
+    return cikti
+
+def hostconf_uret(p, hedef_dizin):
+    """Yapilandirma arsivini ve JSON goruntusunu uretir. Uretilen yollari doner."""
+    import tarfile
+    dugum = os.uname().nodename
+    damga = datetime.now().strftime(DT_FMT)
+    uretilen = []
+
+    dosyalar, atlanan = hostconf_dosyalari(p)
+    if dosyalar:
+        tar_yol = os.path.join(hedef_dizin, f"pve-config-{dugum}-{damga}.tar.gz")
+        with tarfile.open(tar_yol, "w:gz") as t:
+            for tam, rel in dosyalar:
+                try: t.add(tam, arcname=rel, recursive=False)
+                except Exception as e: yut("hostconf_tar", e)
+            # Neyin neden disarida kaldigi arsivin icinde yazili olsun
+            not_metni = ("Bu arsiv pve-gdrive-backup tarafindan uretildi.\n"
+                         f"Uretim: {now_str()}  Dugum: {dugum}\n"
+                         f"Dosya sayisi: {len(dosyalar)}\n\n"
+                         "DISARIDA BIRAKILANLAR (ozel anahtarlar bilerek alinmaz):\n"
+                         + ("".join(f"  {x}\n" for x in atlanan) or "  yok\n")
+                         + "\nGeri yukleme icin: docs/GERI-YUKLEME.md\n")
+            bilgi = tarfile.TarInfo("OKUBENI.txt")
+            ham = not_metni.encode("utf-8")
+            bilgi.size = len(ham); bilgi.mtime = int(time.time())
+            t.addfile(bilgi, io.BytesIO(ham))
+        os.chmod(tar_yol, 0o600)
+        uretilen.append(tar_yol)
+
+    if hostconf_ayar(p, "host_config_json"):
+        veri = hostconf_json(p)
+        if veri is not None:
+            js_yol = os.path.join(hedef_dizin, f"pve-config-{dugum}-{damga}.json")
+            with open(js_yol, "w", encoding="utf-8") as f:
+                json.dump(veri, f, ensure_ascii=False, indent=1)
+            os.chmod(js_yol, 0o600)
+            uretilen.append(js_yol)
+    return uretilen, len(dosyalar), atlanan
+
+def hostconf_yukle(p):
+    """Yapilandirmayi uretip Drive'a yukler. (yuklenen, dosya_sayisi, hata) doner.
+    Bu adimin hatasi asla yedeklemeyi durdurmaz - ek bir guvence, on kosul degil."""
+    if not p.get("host_config_enabled", GLOBAL_DEFAULTS["host_config_enabled"]):
+        return 0, 0, ""
+    gecici = tempfile.mkdtemp(prefix="pgd-conf-", dir=os.path.dirname(cfg()["state_file"]))
+    try:
+        uretilen, n, atlanan = hostconf_uret(p, gecici)
+        if not uretilen:
+            return 0, 0, "yapilandirma dosyasi bulunamadi"
+        yuklendi = 0
+        for yol in uretilen:
+            ad = os.path.basename(yol)
+            rc, _, e = rclone(["copyto", yol, f"{p['remote']}/{ad}"])
+            if rc == 0:
+                yuklendi += 1
+                log(f"host yapilandirmasi yuklendi: {ad} ({n} dosya, "
+                    f"{os.path.getsize(yol)} bayt)", p["id"])
+            else:
+                log(f"host yapilandirmasi yuklenemedi {ad}: {(e or '').strip()[:200]}", p["id"])
+        if atlanan:
+            log(f"yapilandirmada {len(atlanan)} gizli dosya bilerek atlandi", p["id"])
+        return yuklendi, n, ""
+    except Exception as e:
+        log(f"host yapilandirma yedegi HATA: {e}", p["id"])
+        return 0, 0, str(e)
+    finally:
+        shutil.rmtree(gecici, ignore_errors=True)
+
+def hostconf_prune(p, files=None):
+    """Yapilandirma arsivleri vzdump kalibina uymaz, collect_sets onlari gormez.
+    Kendi saklama kurallari var: gun siniri ayni, taban ayri (kucukler, cok tutulur)."""
+    keep_days = int(p["keep_days"])
+    taban = int(hostconf_ayar(p, "host_config_keep_count") or 0)
+    cutoff = time.time() - keep_days * 86400
+    kayitlar = []
+    for f in (lsjson(p["remote"]) if files is None else files):
+        if f.get("IsDir"): continue
+        m = RE_HOSTCONF.match(f.get("Name", ""))
+        if not m: continue
+        try: epoch = datetime.strptime(m.group(2), DT_FMT).timestamp()
+        except Exception: continue
+        kayitlar.append({"name": f["Name"], "epoch": epoch, "size": f.get("Size", 0)})
+    kayitlar.sort(key=lambda x: x["epoch"], reverse=True)
+    tasinan = 0
+    for i, k in enumerate(kayitlar):
+        if i < taban: continue
+        if k["epoch"] >= cutoff: continue
+        rc, _, e = rclone(["deletefile", f"{p['remote']}/{k['name']}"])
+        if rc == 0:
+            tasinan += 1
+            log(f"eski yapilandirma copune tasindi: {k['name']}", p["id"])
+        else:
+            log(f"yapilandirma silinemedi {k['name']}: {(e or '').strip()[:120]}", p["id"])
+    return tasinan
 
 # ---------- OLAY YAYINI (SSE) ----------
 # Arayuz onceden birkac saniyede bir /api/status cekiyordu: degisiklik ile
@@ -1673,6 +1900,10 @@ def build_run_mail(p, status, summary, snap, detay):
     if detay.get("yarim"):
         L += [f"  ! Yazilmakta olan {len(detay['yarim'])} dosya atlandi: "
               + ", ".join(detay["yarim"][:5]), ""]
+    if detay.get("konf"):
+        L += [f"  Host yapilandirmasi: {detay.get('konf_n', 0)} dosya arsivlendi ve yuklendi", ""]
+    elif p.get("host_config_enabled", GLOBAL_DEFAULTS["host_config_enabled"]):
+        L += ["  ! Host yapilandirmasi bu calismada yedeklenemedi.", ""]
     L += ["YAPILANDIRMA",
           f"  Kaynak       : {p['src_dir']}",
           f"  Hedef        : {p['remote']}"] + _bolum_saklama(p) + [
@@ -1764,16 +1995,19 @@ def _asama_retention(p, pid, ok):
     set_progress(pid, {"phase": "retention",
                        "phase_label": "Eski yedekler çöpe taşınıyor", "pct": 100})
     moved = do_prune(p, files)
+    moved += hostconf_prune(p, files)      # arsivler vzdump kalibina uymaz, ayri kural
     set_progress(pid, {"phase": "cop", "phase_label": "Çöp kutusu temizleniyor"})
     purged = do_purge_trash(p)
     return moved, purged, False
 
-def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim):
+def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
+                 konf=0, konf_n=0):
     set_progress(pid, {"phase": "ozet", "phase_label": "Durum güncelleniyor"})
     snap = update_snapshot(p)
     dur = int(time.time() - started)
     status = "basarili" if ok else "HATA"
     summary = (f"yuklenen:{uploaded} | copene:{moved} | kalici-silinen:{purged} | sure:{dur}s"
+               + (f" | yapilandirma:{konf_n} dosya" if konf else "")
                + (" | RETENTION ATLANDI" if atlandi else ""))
     log("OZET: " + status + " | " + summary, pid)
     patch = {"last_run": now_str(), "status": status, "summary": summary,
@@ -1784,7 +2018,8 @@ def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi,
     put_pstate(pid, patch)
     maybe_report(p, status, summary, snap,
                  {"trigger": trigger, "dur": dur, "uploaded": uploaded, "moved": moved,
-                  "purged": purged, "skipped": atlandi, "yarim": yarim})
+                  "purged": purged, "skipped": atlandi, "yarim": yarim,
+                  "konf": konf, "konf_n": konf_n})
 
 def _asama_hata(p, pid, e):
     log(f"BEKLENMEDIK HATA: {e}", pid)
@@ -1818,8 +2053,12 @@ def do_run(pid, trigger="zamanlanmis"):
         if not wait_for_vzdump(p):
             _asama_atlandi(p, pid, trigger); return
         ok, uploaded, yarim = _asama_kopyala(p, pid)
+        set_progress(pid, {"phase": "yapilandirma",
+                           "phase_label": "Host yapılandırması yedekleniyor"})
+        konf, konf_n, _ = hostconf_yukle(p)
         moved, purged, atlandi = _asama_retention(p, pid, ok)
-        _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim)
+        _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
+                     konf, konf_n)
     except Exception as e:
         _asama_hata(p, pid, e)
     finally:
@@ -3054,7 +3293,8 @@ def save_settings(data):
 
 def run_action(do, pid):
     p = get_plan(pid)
-    if do in ("backup", "prune", "purgetrash", "refresh", "testmail", "report") and not p:
+    if do in ("backup", "prune", "purgetrash", "refresh", "testmail", "report",
+              "hostconf") and not p:
         return {"ok": False, "msg": "plan bulunamadi"}
     if do == "backup":
         if is_running(pid): return {"ok": False, "msg": "bu plan zaten calisiyor"}
@@ -3079,6 +3319,14 @@ def run_action(do, pid):
             log(f"manuel rapor HATA: {e}", pid)
             return {"ok": False, "msg": f"rapor gonderilemedi: {e}"}
         return {"ok": ok, "msg": "rapor gonderildi" if ok else "rapor HATA (loga bak)"}
+    if do == "hostconf":
+        if is_running(pid): return {"ok": False, "msg": "yedek calisirken yapilamaz"}
+        if not p.get("host_config_enabled", GLOBAL_DEFAULTS["host_config_enabled"]):
+            return {"ok": False, "msg": "bu planda yapilandirma yedegi kapali"}
+        y, n, hata = hostconf_yukle(p)
+        if hata: return {"ok": False, "msg": f"yapilandirma yedegi HATA: {hata}"}
+        return {"ok": bool(y), "msg": f"{n} yapilandirma dosyasi arsivlendi ve yuklendi"
+                if y else "yapilandirma yuklenemedi (loga bak)"}
     if do == "testmail":
         nr = next_run(p)
         ok = send_mail(p.get("mail_to", ""), f"[Proxmox Yedek] TEST - {p['name']}",
@@ -3649,6 +3897,34 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
         <div class="eg" id="eg-td">Çöpte bekleme süresi.</div></div></div>
+  </fieldset>
+  <fieldset><legend>Host yapılandırması</legend>
+    <div class="eg" style="margin-bottom:8px">vzdump yalnızca <b>disk</b> yedeği alır.
+      Host çökerse elinde diskler olur ama onları nereye geri yükleyeceğini anlatan
+      hiçbir şey olmaz: depo tanımları, ağ yapılandırması, hangi CT hangi köprüde…
+      Bu arşiv onu kapatır ve <b>~25 KB</b> yer kaplar.</div>
+    <div class="frm">
+      <label for="e-hc">Yapılandırmayı da yedekle</label>
+      <div><label class="chk"><input type="checkbox" id="e-hc"> <span>Açık</span></label>
+        <div class="eg">Her çalışmada tarihli bir arşiv: <code>/etc/pve</code>,
+          <code>/etc/network/interfaces</code>, <code>/etc/fstab</code>, apt kaynakları.</div></div>
+      <label for="e-hcj">pvesh JSON görüntüsü</label>
+      <div><label class="chk"><input type="checkbox" id="e-hcj"> <span>Açık</span></label>
+        <div class="eg">Proxmox REST ağacının okunabilir anlık görüntüsü. Geri yükleme
+          aracı değil; "ne vardı, ne değişti" sorusunu gözle cevaplamak için.</div></div>
+      <label for="e-hck">Saklanacak arşiv (adet)</label>
+      <div><input type="number" min="0" max="999" id="e-hck">
+        <div class="errmsg" id="err-hck"></div>
+        <div class="eg">Arşivler küçük olduğu için gün kuralından bağımsız bir tabanı var.
+          Gün sınırını aşanlar bu sayının altına düşmedikçe silinmez.</div></div>
+    </div>
+    <div class="eg" style="margin-top:8px;border-left:3px solid #d29922;padding-left:9px">
+      <b>Özel anahtarlar alınmaz.</b> <code>/etc/pve/priv/</code> içi varsayılan olarak
+      dışarıdadır; yalnızca <code>authorized_keys</code> ve <code>known_hosts</code>
+      (açık anahtar listeleri) girer. Küme CA anahtarı ve <code>authkey.key</code>
+      şifresiz Drive'a çıkmaz — tek düğümlü kurulumda bunlar geri yüklemede yeniden
+      üretilir. Ayrıntı: <b>docs/GERİ-YÜKLEME.md</b>
+    </div>
   </fieldset>
 </div>
 <div class="wstep" data-step="5" style="display:none">
@@ -4457,6 +4733,16 @@ const EN = {
     "Diski tarama sıklığı (ms)": "Disk watch interval (ms)",
     "Eş zamanlı canlı bağlantı sınırı": "Concurrent live connection limit",
     "Oturum adres bağlama": "Session address binding",
+    "Host yapılandırması": "Host configuration",
+    "yedekleniyor · son ": "backed up · keeping last ",
+    " arşiv saklanır": " archives",
+    " · JSON görüntü dahil": " · JSON snapshot included",
+    "yedeklenmiyor": "not backed up",
+    "Yapılandırmayı da yedekle": "Back up host configuration",
+    "pvesh JSON görüntüsü": "pvesh JSON snapshot",
+    "Saklanacak arşiv (adet)": "Archives to keep",
+    "Yapılandırma arşivini indir": "Download configuration archive",
+    "Yapılandırmayı şimdi yedekle": "Back up configuration now",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -5630,6 +5916,10 @@ function wOzet() {
     h += wSatir("Kaynak", val("e-src"));
     h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
     h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
+    h += wSatir(C("Host yapılandırması"), chk("e-hc")
+        ? C("yedekleniyor · son ") + val("e-hck") + C(" arşiv saklanır")
+            + (chk("e-hcj") ? C(" · JSON görüntü dahil") : "")
+        : C("yedeklenmiyor"), !chk("e-hc"));
     h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
     h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
     h += wSatir(C("vzdump koruması"), chk("e-wv")
@@ -5776,6 +6066,7 @@ function openEditor(pid) {
         mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
         wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
         skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
+        host_config_enabled: true, host_config_json: true, host_config_keep_count: 30,
         report_day: 1, report_at: "09:00", report_days: 7, report_stale_days: 2,
         report_quota_warn: 90, report_mail_to: "",
     };
@@ -6467,6 +6758,11 @@ function planMenusu(kap) {
         { simge: "📋", etiket: "Kaynak klasörü kopyala", is: () => panoyaYaz(p.src_dir, C("kaynak")) },
         { simge: "📋", etiket: "Hedefi kopyala", is: () => panoyaYaz(p.remote, C("hedef")) },
         { simge: "📄", etiket: "Bu planın loglarını göster", is: () => setLog(p.id) },
+        { simge: "🧩", etiket: "Yapılandırmayı şimdi yedekle",
+            pasif: p.running || !p.host_config_enabled,
+            ipucu: p.host_config_enabled ? "/etc/pve, ağ ve depo tanımları — ~25 KB"
+                : "bu planda yapılandırma yedeği kapalı",
+            is: () => act("hostconf", p.id) },
         { ayrac: true },
         { simge: "🗑", etiket: "Planı sil", tehlike: true, is: () => delPlan(p.id) },
     ];
@@ -6612,6 +6908,10 @@ const PLAN_ALANLARI = [
     { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },
     { id: "e-kc", anahtar: "keep_count", tip: "sayi", adim: 4, min: 0, max: 999, mesaj: C("0-999 arası adet") },
     { id: "e-td", anahtar: "drive_trash_days", tip: "sayi", adim: 4, min: 0, max: 365, mesaj: C("0-365 arası gün") },
+    { id: "e-hc", anahtar: "host_config_enabled", tip: "onay", adim: 0 },
+    { id: "e-hcj", anahtar: "host_config_json", tip: "onay", adim: 0 },
+    { id: "e-hck", anahtar: "host_config_keep_count", tip: "sayi", adim: 4, min: 0, max: 999,
+        mesaj: C("0-999 arası adet") },
     // 5. Zamanlama ve cakisma
     { id: "e-runat", anahtar: "run_at", tip: "saat", adim: 5, mesaj: C("SS:DD biçiminde saat (ör. 03:00)") },
     { id: "e-wv", anahtar: "wait_for_vzdump", tip: "onay", adim: 0 },

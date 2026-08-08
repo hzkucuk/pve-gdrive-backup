@@ -102,6 +102,16 @@ class Ortam:
         sp = importlib.util.spec_from_file_location("pgd_" + str(id(self)), BETIK)
         m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
         return m
+    def drive_ekle(self, ad, boyut=1000, remote="gdrive:hedef"):
+        """Sahte Drive'a hazir dosya koyar: silme/saklama testleri bir sey bulsun."""
+        try:
+            with open(self.db) as f: d = json.load(f)
+        except Exception: d = {}
+        d.setdefault("files", {}); d.setdefault("remotes", {"gdrive": "drive"})
+        d["files"][f"{remote}/{ad}"] = {"remote": remote, "size": boyut,
+                                        "mtime": int(time.time()), "trashed": False}
+        with open(self.db, "w") as f: json.dump(d, f)
+
     def drive(self, copte=False):
         try:
             with open(self.db) as f: d = json.load(f)
@@ -618,6 +628,87 @@ def t_rapor():
         for bolum in ["HAFTALIK YEDEK RAPORU", "CALISMA", "DRIVE", "VM/CT BAZINDA", "UYARILAR"]:
             dogru(bolum in govde, f"'{bolum}' bolumu olmali")
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
+    finally: o.temizle()
+
+@test("host yapilandirma arsivi ozel anahtarlari almaz", "yapilandirma")
+def t_hostconf_gizli():
+    """Kume CA anahtari ve authkey.key sifresiz Drive'a cikmamali.
+    authorized_keys ise ACIK anahtar dosyasi: dahil olmali, yoksa geri
+    yuklemede SSH erisimi kaybolur."""
+    o = Ortam()
+    try:
+        import tarfile
+        sahte = os.path.join(o.dizin, "etc", "pve")
+        os.makedirs(os.path.join(sahte, "priv", "acme"))
+        os.makedirs(os.path.join(sahte, "lxc"))
+        yaz = lambda yol, ic: open(yol, "w").write(ic)
+        yaz(os.path.join(sahte, "storage.cfg"), "dir: local\n")
+        yaz(os.path.join(sahte, "lxc", "100.conf"), "arch: amd64\n")
+        yaz(os.path.join(sahte, "priv", "pve-root-ca.key"), "GIZLI-CA-ANAHTARI")
+        yaz(os.path.join(sahte, "priv", "authkey.key"), "GIZLI-TICKET-ANAHTARI")
+        yaz(os.path.join(sahte, "priv", "authorized_keys"), "ssh-ed25519 AAAA acik")
+        yaz(os.path.join(sahte, "priv", "shadow.cfg"), "kullanici:$5$hash")
+        yaz(os.path.join(sahte, "priv", "acme", "account.json"), "{}")
+        p = o.plan(host_config_paths=[sahte], host_config_json=False)
+        G = o.modul()
+        hedef = os.path.join(o.dizin, "cikti"); os.makedirs(hedef)
+        uretilen, n, atlanan = G.hostconf_uret(G.get_plan("p1"), hedef)
+        dogru(len(uretilen) == 1 and uretilen[0].endswith(".tar.gz"), f"arsiv: {uretilen}")
+        with tarfile.open(uretilen[0]) as t:
+            adlar = t.getnames()
+            govde = t.extractfile("OKUBENI.txt").read().decode()
+        var = lambda parca: any(parca in a for a in adlar)
+        dogru(var("storage.cfg"), "storage.cfg alinmali")
+        dogru(var("lxc/100.conf"), "CT tanimi alinmali")
+        dogru(var("authorized_keys"), "acik anahtar listesi alinmali")
+        for gizli in ("pve-root-ca.key", "authkey.key", "shadow.cfg", "account.json"):
+            dogru(not var(gizli), f"{gizli} arsive GIRMEMELI")
+        # Icerik duzeyinde de dogrula: ad eslesmesi yetmez
+        with tarfile.open(uretilen[0]) as t:
+            hepsi = b"".join(t.extractfile(a).read() for a in adlar
+                             if t.getmember(a).isfile())
+        dogru(b"GIZLI-CA-ANAHTARI" not in hepsi, "CA anahtarinin icerigi sizmamali")
+        dogru(b"GIZLI-TICKET-ANAHTARI" not in hepsi, "ticket anahtari sizmamali")
+        dogru("pve-root-ca.key" in govde, "atlananlar OKUBENI'de listelenmeli")
+        dogru(oct(os.stat(uretilen[0]).st_mode)[-3:] == "600", "arsiv 600 olmali")
+        dogru(len(atlanan) >= 4, f"atlanan sayisi: {atlanan}")
+    finally: o.temizle()
+
+@test("yapilandirma arsivleri kendi saklama kuralina uyar", "yapilandirma")
+def t_hostconf_saklama():
+    o = Ortam()
+    try:
+        o.plan(keep_days=3, host_config_keep_count=2)
+        G = o.modul()
+        from datetime import datetime, timedelta
+        adlar = []
+        for gun in (0, 1, 2, 5, 9, 20):        # 5,9,20 gun onceki uc dosya eski
+            t = datetime.now() - timedelta(days=gun, hours=1)
+            adlar.append(f"pve-config-pve-{t:%Y_%m_%d-%H_%M_%S}.tar.gz")
+        for a in adlar: o.drive_ekle(a)
+        files = [{"Name": a, "Size": 1000, "IsDir": False} for a in adlar]
+        files.append({"Name": "vzdump-qemu-100-2020_01_01-00_00_00.vma.zst",
+                      "Size": 5, "IsDir": False})
+        o.drive_ekle("vzdump-qemu-100-2020_01_01-00_00_00.vma.zst", 5)
+        n = G.hostconf_prune(G.get_plan("p1"), files)
+        dogru(n == 3, f"3 eski arsiv silinmeliydi, {n} silindi")
+        kalan = [x for x in o.drive() if x.startswith("pve-config-")]
+        dogru(len(kalan) == 3, f"3 arsiv kalmaliydi, kalan: {kalan}")
+        dogru("vzdump-qemu-100-2020_01_01-00_00_00.vma.zst" in o.drive(),
+              "vzdump dosyasina dokunulmamali")
+        dogru(G.RE_HOSTCONF.match(adlar[0]), "kalip kendi adiyla eslesmeli")
+        dogru(not G.RE_HOSTCONF.match("vzdump-qemu-100-2020_01_01-00_00_00.vma.zst"),
+              "vzdump dosyasi yapilandirma sanilmamali")
+    finally: o.temizle()
+
+@test("yapilandirma yedegi kapaliyken hicbir sey uretmez", "yapilandirma")
+def t_hostconf_kapali():
+    o = Ortam()
+    try:
+        o.plan(host_config_enabled=False)
+        G = o.modul()
+        y, n, hata = G.hostconf_yukle(G.get_plan("p1"))
+        dogru((y, n, hata) == (0, 0, ""), f"kapaliyken sessiz kalmali: {(y, n, hata)}")
     finally: o.temizle()
 
 @test("olay yayini yavas istemciden etkilenmez", "canli")

@@ -74,6 +74,7 @@ interface Plan {
   skip_patterns: string[];
   prune_on_failure: boolean;
   weekly_report: boolean;
+  host_config_enabled: boolean; host_config_json: boolean; host_config_keep_count: number;
   report_day: number;
   report_at: string;
   report_days: number;
