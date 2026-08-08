@@ -193,6 +193,14 @@ betik her çalışmada gerçekten yok sayıldığını doğrular ve sayılmıyor
 kopyalamadan durur. Repoda kalmasını istediğin görsel `docs/gorseller/` altına
 **elle** kopyalanır — neyin yayınlandığı her zaman bilinçli bir karar olsun.
 
+### 11. Testlerde sır biçimli sabit kullanma
+
+Sahte bile olsa gerçek bir sırra **benzeyen** dizi kaynakta durmasın. GitHub'ın
+sır tarayıcısı biçime bakar, içeriğe değil: uydurma bir Telegram jetonu için
+alarm açtı ve gerçek bir sızıntıymış gibi göründü. Böyle bir fikstürü parçadan
+kur (`"0" * 9 + ":" + "x" * 35`) — doğrulama düzenli ifadesiyle eşleşir ama
+hiçbir gerçek sırra benzemez.
+
 ## Ortam
 
 - Proxmox host: `192.168.2.252`, PVE 8.4.19, SSH anahtarı `~/.ssh/pve_gdrive_key` (root)

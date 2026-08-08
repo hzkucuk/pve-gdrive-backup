@@ -856,7 +856,11 @@ def t_telegram():
     o = Ortam()
     try:
         G = o.modul()
-        JETON = "123456789:AABBccddEEffgghhIIjjkkLLmmnnOOppQQ"
+        # Jeton bicimli bir dizi KAYNAKTA DURMASIN: GitHub'in sir tarayicisi
+        # bicime bakip uyari uretiyor (2026-08-08'de tam bu oldu, sahte jeton
+        # icin "Telegram Bot Token" alarmi acildi). Parcadan kurulur; RE_TG_TOKEN
+        # ile eslesir ama hicbir gercek jetona benzemez.
+        JETON = "0" * 9 + ":" + "x" * 35
         c = G.cfg(); c["telegram_enabled"] = True; c["telegram_token"] = JETON
         c["telegram_chat_id"] = "555"; G.save_cfg(c)
 
@@ -924,7 +928,11 @@ def t_telegram_jeton_korunur():
     o = Ortam()
     try:
         G = o.modul()
-        JETON = "123456789:AABBccddEEffgghhIIjjkkLLmmnnOOppQQ"
+        # Jeton bicimli bir dizi KAYNAKTA DURMASIN: GitHub'in sir tarayicisi
+        # bicime bakip uyari uretiyor (2026-08-08'de tam bu oldu, sahte jeton
+        # icin "Telegram Bot Token" alarmi acildi). Parcadan kurulur; RE_TG_TOKEN
+        # ile eslesir ama hicbir gercek jetona benzemez.
+        JETON = "0" * 9 + ":" + "x" * 35
         c = G.cfg(); c["telegram_token"] = JETON; G.save_cfg(c)
         G.save_settings({"telegram_enabled": True, "telegram_chat_id": "42"})
         esit(G.cfg(force=True)["telegram_token"], JETON, "bos gonderimde jeton korunmali")
