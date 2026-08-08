@@ -28,6 +28,32 @@ if [ ! -t 0 ]; then
   fi
 fi
 
+# Ilk satir HEMEN basilir: kurulum sessizce asili kalirsa nerede takildigi
+# belli olsun. (Ilk denemede curl'de takilip ekrana hicbir sey yazmamisti.)
+bilgi "pve-gdrive-backup kurulumu basliyor"
+
+# Dis dunyaya erisim var mi? Yoksa curl zaman asimi olmadan dakikalarca asilir.
+bilgi "internet erisimi kontrol ediliyor"
+if ! curl -fsS --connect-timeout 8 --max-time 20 -o /dev/null \
+     "https://raw.githubusercontent.com/" 2>/dev/null; then
+  echo
+  renk "31;1" "HATA: https://raw.githubusercontent.com adresine ulasilamiyor."
+  echo "Kontrol et:"
+  echo "  ping -c2 1.1.1.1        # ag var mi"
+  echo "  ping -c2 github.com     # DNS calisiyor mu"
+  echo "  cat /etc/resolv.conf    # DNS sunucusu tanimli mi"
+  echo "  curl -v --max-time 10 https://raw.githubusercontent.com/  # ayrintili hata"
+  echo
+  echo "Vekil sunucu arkasindaysan:"
+  echo "  export https_proxy=http://vekil:3128 && curl -fsSL .../kur.sh | bash"
+  echo
+  echo "Internetsiz kurulum: arsivi baska bir makinede indirip kopyala:"
+  echo "  curl -fsSLO $REPO/archive/refs/heads/$DAL.tar.gz"
+  echo "  scp $DAL.tar.gz root@bu-host:/tmp/ && tar xzf /tmp/$DAL.tar.gz -C /opt"
+  echo "  cd /opt/pve-gdrive-backup-$DAL && ./install.sh"
+  exit 1
+fi
+
 bilgi "bagimliliklar kontrol ediliyor"
 eksik=()
 command -v rclone >/dev/null || eksik+=(rclone)
@@ -36,8 +62,10 @@ command -v curl >/dev/null || command -v wget >/dev/null || eksik+=(curl)
 if [ ${#eksik[@]} -gt 0 ]; then
   bilgi "kuruluyor: ${eksik[*]}"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq "${eksik[@]}" >/dev/null || hata "paketler kurulamadi: ${eksik[*]}"
+  apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update -qq \
+    || bilgi "apt update basarisiz, kurulu paketlerle devam ediliyor"
+  apt-get install -y -qq "${eksik[@]}" >/dev/null \
+    || hata "paketler kurulamadi: ${eksik[*]} (apt kaynaklarini kontrol et)"
 fi
 command -v rclone >/dev/null || hata "rclone kurulamadi"
 
@@ -46,9 +74,11 @@ gecici="$(mktemp -d)"
 trap 'rm -rf "$gecici"' EXIT
 url="$REPO/archive/refs/heads/${DAL}.tar.gz"
 if command -v curl >/dev/null; then
-  curl -fsSL "$url" | tar xz -C "$gecici" || hata "indirilemedi: $url"
+  curl -fsSL --connect-timeout 15 --max-time 180 "$url" | tar xz -C "$gecici" \
+    || hata "indirilemedi: $url"
 else
-  wget -qO- "$url" | tar xz -C "$gecici" || hata "indirilemedi: $url"
+  wget -q --timeout=15 --tries=2 -O- "$url" | tar xz -C "$gecici" \
+    || hata "indirilemedi: $url"
 fi
 kaynak="$(find "$gecici" -maxdepth 1 -type d -name 'pve-gdrive-backup-*' | head -1)"
 [ -n "$kaynak" ] || hata "arsiv beklenen bicimde degil"

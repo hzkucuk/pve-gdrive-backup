@@ -1155,6 +1155,30 @@ def t_bakim_arayuzu():
         dogru("ui_pass" not in (d.get("ayarlar") or {}), "arayuz sifresi asla cikmamali")
     finally: o.temizle()
 
+@test("tek satirlik kurulum sessizce asilmaz", "kurulum")
+def t_kur_zaman_asimi():
+    """Kurulum ilk denemede curl'de takilip ekrana HICBIR SEY yazmadan asili
+    kalmisti. Ag komutlarinin hepsinde zaman asimi olmali ve ilk satir hemen
+    basilmali ki nerede takildigi anlasilsin."""
+    k = open(os.path.join(KOK, "kur.sh")).read()
+    # Her GERCEK curl/wget cagrisinda zaman asimi olmali.
+    # \s satir sonunu da yutuyor; [ \t]* kullan ve echo icindeki ornekleri atla.
+    for satir in k.split("\n"):
+        ilk = satir.strip()
+        if not ilk.startswith(("curl ", "wget ")): continue
+        dogru("timeout" in ilk or " -m " in ilk,
+              f"zaman asimi yok: {ilk[:70]}")
+    dogru("connect-timeout" in k, "baglanti zaman asimi olmali")
+    # Erisim kontrolu ve yol gosteren hata mesaji
+    dogru("internet erisimi kontrol ediliyor" in k, "erisim onceden kontrol edilmeli")
+    for ipucu in ("resolv.conf", "https_proxy", "ping"):
+        dogru(ipucu in k, f"hata mesaji '{ipucu}' ipucunu vermeli")
+    # Ilk bilgi satiri ag islerinden ONCE gelmeli
+    dogru(k.index("kurulumu basliyor") < k.index("curl -fsS --connect-timeout"),
+          "ilk satir ag isinden once basilmali")
+    # apt de sonsuza kadar beklememeli
+    dogru("Acquire::http::Timeout" in k, "apt zaman asimi olmali")
+
 @test("kurulum ciktisindaki komutlar gercekten var", "kurulum")
 def t_kurulum_komutlari():
     """Kurulum sonunda tavsiye edilen komut yoksa kullanici ilk denemede
