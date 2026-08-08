@@ -1190,6 +1190,39 @@ def _boru_ve_tty_ile_kos(betik, saniye=6):
     os.close(usta)
     return cikti.decode("utf-8", "replace"), sonuc
 
+@test("kurulum sihirbazi ekranda GORUNUR", "kurulum")
+def t_sihirbaz_gorunur():
+    """install.sh sihirbazi $( ) icinde calistirip son satirdaki JSON'u alir.
+    $( ) stdout'u yakalar; sihirbazin sorulari da stdout'a gidince ekrana
+    HICBIR SEY cikmiyordu ve kullanici goremedigi soruyu cevaplamaya
+    calisiyordu. Arayuz stderr'e, yalnizca sonuc JSON'u stdout'a gitmeli."""
+    o = Ortam()
+    try:
+        b = os.path.join(o.dizin, "bin"); os.makedirs(b, exist_ok=True)
+        with open(os.path.join(b, "rclone"), "w") as f:
+            f.write("#!/bin/sh\necho 'rclone v1.60.1'\n")
+        os.chmod(os.path.join(b, "rclone"), 0o755)
+        r = subprocess.run([sys.executable, os.path.join(KOK, "kurulum.py")],
+                           input="1\n" + "\n" * 60, capture_output=True, text=True,
+                           timeout=30,
+                           env={**os.environ, "PVE_GDRIVE_CONF": o.cfg_yolu,
+                                "PATH": b + os.pathsep + os.environ["PATH"]})
+        gorunen = [x for x in r.stderr.split("\n") if x.strip()]
+        dogru(len(gorunen) > 5, f"sihirbaz ekranda gorunmeli, {len(gorunen)} satir cikti")
+        dogru(any("Dil" in x or "Language" in x for x in gorunen),
+              "ilk soru ekranda olmali")
+        # stdout YALNIZCA JSON tasimali; UI oraya sizmamali
+        for satir in r.stdout.split("\n"):
+            if not satir.strip(): continue
+            dogru(satir.lstrip().startswith("{"),
+                  f"stdout'a arayuz metni sizmis: {satir[:60]!r}")
+        # Kaynakta ayrim acikca kurulu mu
+        kay = open(os.path.join(KOK, "kurulum.py")).read()
+        dogru("SONUC_AKISI" in kay and "sys.stdout = sys.stderr" in kay,
+              "arayuz stderr'e yonlendirilmeli")
+        dogru("file=SONUC_AKISI" in kay, "sonuc JSON'u gercek stdout'a gitmeli")
+    finally: o.temizle()
+
 @test("kur.sh boru + terminal ile asili kalmaz", "kurulum")
 def t_kur_boru_tty():
     """GERCEK hata buydu: 'curl | bash' derken bash betigi STDIN'den okur.

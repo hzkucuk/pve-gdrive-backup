@@ -11,6 +11,14 @@ No dependencies. Measures the environment, proposes defaults, changes nothing un
 """
 import json, os, re, secrets, subprocess, sys
 
+# install.sh bu betigi $( ) icinde calistirip SON SATIRDAKI JSON'u alir.
+# $( ) stdout'u yakalar; sihirbazin sorulari da stdout'a gidince ekrana
+# HICBIR SEY cikmiyor ve kullanici goremedigi bir soruyu cevaplamaya
+# calisiyordu (Proxmox web konsolunda tam olarak bu yasandi).
+# Cozum: tum arayuz stderr'e, yalnizca sonuc JSON'u gercek stdout'a.
+SONUC_AKISI = sys.stdout
+sys.stdout = sys.stderr          # print() ve input() istemi artik ekranda
+
 CONF = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 R = "\033[0m"; B = "\033[1m"; Y = "\033[33m"; G = "\033[32m"; C = "\033[36m"; K = "\033[31m"
 GB = 1024 ** 3
@@ -347,8 +355,10 @@ def main():
                     "enabled": False, "src_dir": src, "remote": "gdrive:proxmox-yedek",
                     "keep_days": gun, "keep_count": taban, "drive_trash_days": cop,
                     "run_at": saat, "wait_for_vzdump": True, "vzdump_wait_min": bekle}]}
+    # Yalnizca bu satir gercek stdout'a gider; install.sh bunu okur.
     print(json.dumps({"_kip": "yaz", "_conf": c, "_sifre": sifre if uretildi else "",
-                      "_dil": L}, ensure_ascii=False))
+                      "_dil": L}, ensure_ascii=False), file=SONUC_AKISI)
+    SONUC_AKISI.flush()
 
 if __name__ == "__main__":
     main()
