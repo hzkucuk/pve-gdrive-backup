@@ -103,6 +103,14 @@ const EN: Record<string, string> = {
 
   /* --- otomatik bant genişliği --- */
   "Otomatik bant genişliği": "Automatic bandwidth", "Otomatik mod": "Automatic mode",
+  // Otomatik mod acikken hiz alanlarinin kilitlendigini anlatan not
+  "Otomatik mod açık.": "Automatic mode is on.",
+  "Hız sınırı ve saatlik çizelge devre dışı — sınırı araç kendisi belirliyor.":
+    "Speed limit and hourly schedule are disabled — the tool sets the limit itself.",
+  "Elle değer girmek için aşağıdaki": "To enter a value manually, clear the",
+  "kutusunun işaretini kaldır.": "checkbox below.",
+  "Otomatik mod açıkken bu alan kullanılmaz.":
+    "This field is unused while automatic mode is on.",
   "Hat kapasitesi": "Link capacity", "Diğerlerine ayrılan": "Reserved for others",
   "Alt sınır": "Lower bound", "Üst sınır": "Upper bound", "Ağ arayüzü": "Network interface",
   "Ölçüm aralığı (sn)": "Measure interval (s)", "Yumuşatma (0-1)": "Smoothing (0-1)",

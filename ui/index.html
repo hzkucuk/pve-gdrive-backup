@@ -76,6 +76,18 @@
         <div class="eg">Depo yolları <code>&lt;depo-yolu&gt;/dump</code> biçimindedir.
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
+  <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="btns" style="margin-bottom:8px">
+      <button class="sm" onclick="kaynakListeYukle()">📄 Dosyaları listele</button>
+      <button class="sm" id="ksl-yenile" onclick="kaynakListeYukle(true)" style="display:none">↻ Yenile</button>
+    </div>
+    <div id="ksl-ozet" class="small"></div>
+    <div id="ksl-liste" class="ksl-sar"></div>
+    <div class="eg">Yükleme kararını rclone verir: <b>atlanacak desenler</b> ve
+      <b>en az yaş</b> alanları belirler. Saklama kararı ayrıdır ve dosya adı kalıbına
+      (<code>dump_regex</code>) bakar. Kalıba uymayan bir dosya <b>yüklenir ama hiç
+      silinmez</b> — Drive'da birikir. Liste bu ikisini ayrı ayrı gösterir.</div>
+  </fieldset>
 </div>
 <div class="wstep" data-step="3" style="display:none">
   <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
@@ -172,6 +184,13 @@
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
       <div><div class="wd" id="e-wd"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
+    <div class="f"><label class="tip" title="Planlı saatten önceki bu kadar saat içinde başarılı bir yedek bittiyse o günkü çalışma atlanır.">Soğuma süresi (saat)</label>
+      <div><input type="number" min="0" max="168" step="1" id="e-cool"><div class="errmsg" id="err-cool"></div>
+        <div class="eg">Elle yedek aldıktan kısa süre sonra zamanlayıcının aynı işi
+          tekrarlamasını önler. <b>6</b> iyi bir değer · <code>0</code> = kapalı.<br>
+          O günkü slot <b>atlanır</b>, ertelenmez — yedek gündüz kendiliğinden başlamaz.
+          Yalnızca <b>başarılı</b> koşu sayılır: hata veya durdurma sonrası plan saatinde
+          yeniden denenir. Elle başlatmayı hiç etkilemez.</div></div></div>
   </fieldset>
   <fieldset><legend>Proxmox ile çakışma koruması</legend>
     <div class="f"><label class="tip" title="Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.">vzdump'ı bekle</label>
@@ -193,6 +212,9 @@
 <div class="wstep" data-step="6" style="display:none">
   <div class="wbaslik"><b>6. Aktarım</b> <span class="small">Hız ve kaynak kullanımı</span></div>
   <fieldset><legend>Aktarım</legend>
+    <div class="kilit" id="bw-kilit" style="display:none">🔒 <b>Otomatik mod açık.</b>
+      <span>Hız sınırı ve saatlik çizelge devre dışı — sınırı araç kendisi belirliyor.</span>
+      <span>Elle değer girmek için aşağıdaki <b>Otomatik mod</b> kutusunun işaretini kaldır.</span></div>
     <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
         <div class="eg"><code>30M</code> = 30 MB/sn · <code>2M</code> yavaş hat için · <code>off</code> = sınırsız</div></div></div>
@@ -200,7 +222,7 @@
       <div><input id="e-bwsch" placeholder="08:00,2M 19:00,30M 23:00,off"><div class="errmsg" id="err-bwsch"></div>
         <div class="eg">Mesaide hattı boğma, gece hızlan: <code>08:00,2M 19:00,10M 23:00,off</code><br>
           Her giriş <b>o saatten itibaren</b> geçerli olur. Boş bırakırsan sabit sınır kullanılır.</div>
-        <div class="btns" style="margin-top:6px">
+        <div class="btns" id="bwsch-onayar" style="margin-top:6px">
           <button class="sm" onclick="bwPreset('')">Çizelgesiz</button>
           <button class="sm" onclick="bwPreset('08:00,2M 19:00,10M 23:00,off')">Mesai dostu</button>
           <button class="sm" onclick="bwPreset('00:00,off 07:00,1M 23:00,off')">Sadece gece</button>

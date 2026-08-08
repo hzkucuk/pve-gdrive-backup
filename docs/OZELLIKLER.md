@@ -192,6 +192,10 @@ jetonu ister. Yanıtlarda `X-Frame-Options`, `X-Content-Type-Options`, `Referrer
 | `stats_interval_sec` | `5` | İlerleme bildirim sıklığı |
 | `purge_batch` | `50` | Çöp temizliğinde tek çağrıda silinecek dosya |
 | `purge_timeout_min` | `30` | Çöp temizliği zaman aşımı |
+| `kaynak_liste_limit` | `500` | Kaynak dosya listesinde arayüze gönderilen azami satır |
+| `cooldown_hours` (plan) | `6` | Başarılı koşudan sonra planlı slotun atlanma penceresi (saat) |
+| `durdur_kontrol_sn` | `2` | Durdurma isteğinin yoklanma sıklığı |
+| `durdur_bekle_sn` | `10` | rclone'a nazik sonlandırma için tanınan süre |
 
 rclone çıktısı satır satır okunur ve yalnızca son N satır tutulur — 200.000 satırlık çıktıda
 ölçülen bellek artışı 0.05 MB (tümünü yakalayan yöntemde 39 MB).
@@ -202,6 +206,61 @@ rclone çıktısı satır satır okunur ve yalnızca son N satır tutulur — 20
 |---|---|---|
 | `browse_roots` | `/var/lib/vz`, `/mnt/pve`, `/mnt`, `/srv` | Klasör seçici bu köklerin dışına çıkamaz |
 | `dump_regex` | vzdump kalıbı | Grup 1=set, 2=tip, 3=id, 4=tarih |
+
+### Soğuma süresi (`cooldown_hours`)
+
+Planlı saatten **önceki** bu kadar saat içinde **başarılı** bir koşu bittiyse o günkü
+çalışma atlanır. Varsayılan **6 saat**, `0` = kapalı. Plan başına ayarlanır
+(sihirbaz → *5. Zamanlama*).
+
+Elle yedek aldıktan kısa süre sonra zamanlayıcının aynı işi tekrarlamasını —
+ve retention'ı yeniden çalıştırmasını — önler. **Elle başlatmayı hiç etkilemez;**
+yalnızca zamanlayıcı bakar.
+
+Slot **atlanır, ertelenmez.** Erteleme seçilseydi 02:10'da biten elle bir yedekten
+sonra plan 08:10'da kendiliğinden başlardı — yani gündüz, hipervizör iş başındayken.
+Bu projede tam olarak bu yaşandı (215 GB'lik yükleme 13:05'te başladı). Atlanan slot
+ertesi gün normal saatinde döner.
+
+Yalnızca `basarili` durumu slotu tüketir: `HATA` veya `durduruldu` sonrası plan
+saatinde yeniden denenir — aksi hâlde tek bir aksaklık yedeksiz bir gün yaratırdı.
+
+### Çalışan yedeği durdurma
+
+Plan sağ tık menüsünde **⏹ Yedeklemeyi durdur**, plan kartında ise çalışırken
+**⏹ Durdur** düğmesi çıkar. `⏸ Planı duraklat` ile karıştırılmamalı — o yalnızca
+zamanlayıcıyı kapatır, süren yedeğe dokunmaz.
+
+Durdurma sinyalle değil **dosya bayrağıyla** yapılır: manuel yedek ayrı bir süreçte,
+zamanlanmış yedek servisin kendi sürecinde çalışabilir; `killpg` servisi de öldürürdü.
+Koşan taraf bayrağı `durdur_kontrol_sn` sıklığında yoklar, görünce rclone'a önce
+`SIGTERM` yollar, `durdur_bekle_sn` içinde çıkmazsa `SIGKILL` uygular.
+
+Durdurulan koşuda:
+
+- **Hiçbir yedek silinmez.** `prune_on_failure` açık olsa bile retention çalışmaz —
+  kullanıcının "dur" demesi "eskileri sil" anlamına gelemez. Drive listelemesi bile yapılmaz.
+- Durum `durduruldu` yazılır; bu `HATA` değildir, hata maili gitmez
+  (bildirim `notify_skipped` anahtarına bağlıdır).
+- `last_run` yazıldığı için zamanlayıcı yedeği birkaç dakika sonra kendiliğinden
+  yeniden başlatmaz; bir sonraki planlı saatte normal şekilde denenir.
+
+### Klasördeki dosyalar
+
+Plan sihirbazının **2. Kaynak** adımında `📄 Dosyaları listele` klasörde gerçekte ne
+olduğunu satır satır gösterir. Yükleme ve saklama kararlarının **ayrı kümeler** olduğunu
+görünür kılar:
+
+| Rozet | Anlamı |
+|---|---|
+| `yüklenir` | rclone yükleyecek, `dump_regex`'e uyduğu için gün kuralı da işleyecek |
+| `atlanır` | `skip_patterns` desenine uyuyor, hiç yüklenmez |
+| `bekler` | `min_age_min`'den yeni; bu turda alınmaz, sonraki turda alınır |
+| `saklama dışı` | **Yüklenir ama hiç silinmez** — `dump_regex`'e uymadığı için `do_prune` onu görmez, Drive'da birikir |
+
+`atlanır` etiketi tahmin değil: aynı kararı gerçek rclone'un `--exclude` bayrağıyla
+karşılaştıran bir test var (`atlanacak desen tahmini gercek rclone ile ayni`).
+Desen `/`, `{}` veya `**` içeriyorsa arayüz kesin konuşmaz, `belirsiz` der.
 | `allow_account_cleanup` | `false` | Aşağıya bak |
 | `smtp_profiles` | `[]` | Gönderici profilleri |
 

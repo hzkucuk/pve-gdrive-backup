@@ -2,6 +2,67 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.8.0 — 2026-08-09
+
+### Çalışan yedeği durdurma
+
+Sağ tık menüsünde yalnızca *"Planı duraklat"* vardı ve o sadece zamanlayıcıyı
+kapatıyor — süren bir yüklemeye dokunmuyordu. 215 GB'lik bir aktarım başladıysa
+arayüzden kesmenin **hiçbir yolu yoktu**.
+
+Artık **⏹ Yedeklemeyi durdur** var (sağ tık + çalışırken plan kartında düğme).
+Sinyal değil dosya bayrağı kullanılır: manuel yedek ayrı süreçte, zamanlanmış
+yedek servisin kendi sürecinde koşabiliyor; `killpg` servisi de öldürürdü.
+
+**Durdurulan koşuda hiçbir yedek silinmez** — `prune_on_failure` açık olsa bile
+retention hiç çalışmaz, Drive listelemesi bile yapılmaz. Durum `durduruldu`
+yazılır; bu `HATA` değildir, hata maili gitmez.
+
+*Nasıl doğrulandı:* gerçek rclone ile yerel ölçüm — çıkış kodu 143 (nazik
+SIGTERM), 3/3 koşuda hedefte **yarım dosya kalmadı**. Tepki süresi bileşenlerine
+ayrıldı: `(0…durdur_kontrol_sn) + ~0,5 sn rclone çıkışı`, varsayılanla en kötü
+~2,5 sn. Silme koruması testi kontrol içeriyor: `durduruldu=False` yapıldığında
+aynı ayarla silme **gerçekleşiyor**, yani test korumayı ölçüyor.
+
+### Soğuma süresi (`cooldown_hours`, varsayılan 6 saat)
+
+Elle yedek aldıktan kısa süre sonra zamanlayıcı aynı işi tekrarlıyor ve
+retention'ı yeniden çalıştırıyordu. Planlı saatten önceki 6 saat içinde
+**başarılı** bir koşu bittiyse o günkü slot artık atlanıyor.
+
+Slot **atlanır, ertelenmez**: erteleme olsaydı 02:10'da biten elle bir yedekten
+sonra plan 08:10'da kendiliğinden başlardı — gündüz, hipervizör iş başındayken.
+Yalnızca `basarili` slotu tüketir; `HATA`/`durduruldu` sonrası plan saatinde
+yeniden denenir.
+
+*Nasıl doğrulandı:* `is_due` için 8 senaryo ölçüldü — soğuma içi/dışı, hata,
+durdurma, gün boyu tekrar kontrolü, ertesi gün dönüşü, `0` = kapalı.
+
+### Kilitli alan kilitli göründüğünü söylemiyordu
+
+Otomatik mod açıkken *"Hız sınırı"* ve *"Saatlik çizelge"* `disabled` yapılıyordu
+ama stil sayfasında **tek bir `:disabled` kuralı yoktu**; üstelik `input{...}`
+açık `background`/`color` verdiği için tarayıcının kendi soluk görünümü de
+eziliyordu. Alan tamamen normal görünüp yazıyı sessizce reddediyordu.
+
+Aynı kökten üç kusur daha vardı: çalışırken `disabled` olan *▶ Yedekle* butonu,
+ilk satırdaki *↑* butonu, ve kilitli alana değer yazan çizelge ön ayar butonları.
+Genel kural dördünü birden kapsıyor. Ayrıca kilidin **nedenini** söyleyen bir not
+eklendi.
+
+*Nasıl doğrulandı:* test eski kodla koşturuldu ve düştü (`'input:disabled' kurali
+olmali`). Chrome headless ile önce/sonra ekran görüntüsü alındı.
+
+### Kaynak klasördeki dosyalar listelenebiliyor
+
+*2. Kaynak* adımında `📄 Dosyaları listele`. Asıl bulgu: yükleme ve saklama
+**ayrı kümeler**. `dump_regex`'e uymayan bir dosya yüklenir ama `do_prune` onu
+hiç görmez — Drive'da sonsuza kadar birikir. Liste bunu `saklama dışı` diye
+işaretliyor.
+
+*Nasıl doğrulandı:* `atlanır` etiketi tahmin değil — gerçek rclone `--exclude`
+ile karşılaştırıldı, yerel 1.75.0 ve üretim 1.60.1'de 48/48 uyum.
+
 ## 1.7.4 — 2026-08-08
 
 ### Bitmiş işin önerisi kaldırıldı

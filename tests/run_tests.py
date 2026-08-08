@@ -9,7 +9,7 @@ pve-gdrive-backup test paketi.
 Gercek Drive'a veya gercek bir Proxmox'a dokunmaz: rclone ve pgrep sahte
 surumlerle degistirilir (tests/mock/). Her test kendi gecici dizininde calisir.
 """
-import os, re, sys, json, time, shutil, tempfile, subprocess, importlib.util, base64, urllib.request, urllib.error
+import os, re, sys, json, time, fcntl, shutil, tempfile, subprocess, importlib.util, base64, urllib.request, urllib.error, urllib.parse
 
 os.environ.setdefault("PVE_GDRIVE_QUIET", "1")   # log satirlari test ciktisini bogmasin
 KOK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2401,6 +2401,339 @@ def t_saklama_ipucu():
         dogru("14 gün + günlük yedek" not in G.HTML, "sabit 14 gun ornegi kalmamali")
         for parca in ["eg-kd", "eg-kc", "eg-td", "saklamaIpucu"]:
             dogru(parca in G.HTML, f"'{parca}' bulunmali")
+    finally: o.temizle()
+
+@test("devre disi kontrolun gorunur karsiligi var", "arayuz")
+def t_disabled_gorunur():
+    """Sinif: bir kontrol JS ile kilitlenip CSS'te hicbir karsiligi olmayinca
+    kullaniciya normal gorunur ve girdiyi sessizce reddeder. Bant genisligi
+    "Hiz siniri" alani boyleydi: otomatik mod acikken disabled yapiliyordu ama
+    stil sayfasinda tek bir :disabled kurali yoktu; ustelik `input{...}` acik
+    background/color verdigi icin tarayicinin kendi soluk gorunumu de eziliyordu.
+    Kural genel oldugu icin sonradan kilitlenen kontroller de kapsanir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        stil = re.search(r"<style>(.*?)</style>", G.HTML, re.S)
+        dogru(stil is not None, "gomulu arayuzde <style> blogu olmali")
+        css = stil.group(1)
+
+        # 1) Kilitli kontrolun gorunumu degismeli
+        for kural in ["input:disabled", "select:disabled", "textarea:disabled"]:
+            dogru(kural in css, f"'{kural}' kurali olmali")
+        dogru("button:disabled" in css or "button[disabled]" in css,
+              "devre disi buton icin kural olmali")
+        dogru("not-allowed" in css, "kilitli kontrolde imlec de kilidi anlatmali")
+
+        # 2) Kilit, hata cercevesini bastirmali: .bad'den SONRA tanimlanmis olmali
+        #    (esit ozgulluk -> sonra gelen kazanir).
+        i_bad, i_dis = css.find("input.bad"), css.find("input:disabled")
+        dogru(0 <= i_bad < i_dis, "input:disabled kurali input.bad'den sonra gelmeli")
+
+        # 3) Kilidin NEDENI de soylenmeli, salt soluklastirma yeterli degil
+        for parca in ["bw-kilit", "Otomatik mod açık.", "işaretini kaldır",
+                      "kilitle(", 'kilitle("e-bw"']:
+            dogru(parca in G.HTML, f"'{parca}' gomulu arayuzde bulunmali")
+
+        # 4) Kilitli alana deger yazan on ayar butonlari da kapanmali
+        dogru("bwsch-onayar" in G.HTML, "cizelge on ayar butonlari kimliklenmis olmali")
+        dogru(re.search(r'bwsch-onayar"\)\.querySelectorAll\("button"\)', G.HTML),
+              "on ayar butonlari otomatik modda devre disi birakilmali")
+    finally: o.temizle()
+
+@test("kaynak listesi dosyanin basina ne gelecegini soyler", "kaynak")
+def t_kaynak_liste():
+    """Sayilar degil dosyalar: yukleme secimi (skip_patterns + min_age) ile
+    saklama secimi (dump_regex) AYRI kumelerdir. Desene uymayan dosya yuklenir
+    ama do_prune onu hicbir zaman silmez -- liste bunu ayirt etmeli."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        p = o.plan(skip_patterns=["*.dat"], min_age_min=10)
+        G.load_cfg()
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst", 4096, yas_sn=7200)
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.dat", 512, yas_sn=7200)
+        o.dosya("notlar.txt", 128, yas_sn=7200)          # kaliba uymaz
+        o.dosya("taze.vma.zst", 256, yas_sn=60)          # min_age'den yeni
+        r = G.kaynak_dosyalar(o.dump, p)
+        dogru(r["ok"], "listeleme basarili olmali")
+        d = {x["ad"]: x for x in r["dosyalar"]}
+        dogru(len(d) == 4, f"4 dosya beklenir, {len(d)} geldi")
+
+        dogru(d["vzdump-qemu-100-2026_08_08-03_00_00.vma.zst"]["durum"] == "yuklenir",
+              "taninan yedek yuklenir olmali")
+        dogru(d["vzdump-qemu-100-2026_08_08-03_00_00.vma.dat"]["durum"] == "atlanir",
+              "*.dat deseni atlanmali")
+        dogru(d["taze.vma.zst"]["durum"] == "bekler", "min_age'den yeni dosya beklemeli")
+
+        # Asil ayrim: yuklenir ama saklama disi
+        nt = d["notlar.txt"]
+        dogru(nt["durum"] == "yuklenir", "kaliba uymayan dosya yine de yuklenir")
+        dogru(not nt["dump"] and not nt["konf"], "notlar.txt saklama kumesinde olmamali")
+        dogru("SAKLAMA DISI" in nt["neden"], f"saklama disi uyarisi olmali: {nt['neden']}")
+        dogru(r["saklama_disi"] == 1, f"saklama disi sayaci 1 olmali, {r['saklama_disi']}")
+        dogru(r["yuklenecek"] == 2, f"yuklenecek 2 olmali, {r['yuklenecek']}")
+
+        # Saklama iddiasi olculur: do_prune gercekten notlar.txt'ye dokunmuyor mu?
+        setler = G.collect_sets([{"Name": a, "Size": 1} for a in d])
+        adlar = {f["name"] for st in setler.values() for f in st["files"]}
+        dogru("notlar.txt" not in adlar, "collect_sets kaliba uymayani almamali")
+    finally: o.temizle()
+
+@test("kaynak listesi ucu gercek HTTP uzerinden calisir", "kaynak")
+def t_kaynak_liste_ucu():
+    """Birim testi yonlendirmeyi kanitlamaz: uc gercekten bagli mi, JSON donuyor
+    mu, kok disi istek reddediliyor mu -- gercek sunucuya sorulur."""
+    o = Ortam()
+    try:
+        o.plan(skip_patterns=["*.dat"], min_age_min=0)
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst", 2048, yas_sn=7200)
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.dat", 64, yas_sn=7200)
+        o.dosya("notlar.txt", 32, yas_sn=7200)
+        c = o.oku_cfg(); c["browse_roots"] = [o.dizin]; o.yaz_cfg(c)
+        ist = o.sunucu()
+        yol = ("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+               + "&plan=p1&skip=" + urllib.parse.quote("*.dat") + "&mage=0")
+        j = json.load(ist.istek(yol))
+        dogru(j["ok"], f"uc basarili donmeli: {j}")
+        d = {x["ad"]: x["durum"] for x in j["dosyalar"]}
+        dogru(d.get("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst") == "yuklenir",
+              f"yedek dosyasi yuklenir olmali: {d}")
+        dogru(d.get("vzdump-qemu-100-2026_08_08-03_00_00.vma.dat") == "atlanir",
+              f"*.dat atlanmali: {d}")
+        dogru(j["saklama_disi"] == 1, f"notlar.txt saklama disi sayilmali: {j['saklama_disi']}")
+
+        # Kok disi bir yol istenirse liste degil, acik bir ret donmeli
+        r = json.load(ist.istek("/api/kaynak-dosyalar?src=" + urllib.parse.quote("/etc")))
+        dogru(not r["ok"] and "kok" in r["hata"].replace("ö", "o"),
+              f"kok disi yol reddedilmeli: {r}")
+    finally: o.temizle()
+
+@test("kaynak listesi limiti parametrik ve bellegi sinirlar", "kaynak")
+def t_kaynak_liste_limit():
+    o = Ortam()
+    try:
+        G = o.modul()
+        p = o.plan()
+        G.load_cfg()
+        for i in range(25): o.dosya(f"vzdump-qemu-{100+i}-2026_08_08-03_00_00.vma.zst", 64)
+        r = G.kaynak_dosyalar(o.dump, p, limit=10)
+        dogru(len(r["dosyalar"]) == 10, f"limit 10 olmali, {len(r['dosyalar'])} geldi")
+        dogru(r["kirpildi"], "kirpildi bayragi kalkmali")
+        dogru(r["toplam_dosya"] == 25, f"toplam yine 25 raporlanmali, {r['toplam_dosya']}")
+        # Limit config'ten de gelmeli (sabit kodlanmis olmamali)
+        c = o.oku_cfg(); c["kaynak_liste_limit"] = 3; o.yaz_cfg(c); G.load_cfg()
+        dogru(len(G.kaynak_dosyalar(o.dump, p)["dosyalar"]) == 3, "limit config'ten okunmali")
+    finally: o.temizle()
+
+@test("kaynak listesi gezinti koklerinin disina cikmaz", "kaynak")
+def t_kaynak_liste_kok():
+    o = Ortam()
+    try:
+        G = o.modul(); G.load_cfg()
+        dogru(G.kok_icinde_mi(o.dump), "kendi dizini kok icinde sayilmali")
+        for disari in ("/etc", "/", o.dizin + "/../..", "/root"):
+            dogru(not G.kok_icinde_mi(disari), f"{disari} kok disi sayilmali")
+    finally: o.temizle()
+
+@test("atlanacak desen tahmini gercek rclone ile ayni", "kaynak")
+def t_desen_rclone_uyumu():
+    """Arayuz 'bu dosya atlanir' diye yaziyor; karari rclone veriyor. Ikisi
+    ayrisirsa arayuz yalan soyler. Gercek rclone varsa karsilastirilir.
+
+    Not: Ortam PATH'e sahte rclone koyar; olcum GERCEK ikiliyle yapilmali,
+    yoksa mock'un kurali olculur, urununki degil."""
+    gercek = None
+    for aday in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone", "/usr/bin/rclone"):
+        if os.path.exists(aday): gercek = aday; break
+    if not gercek:
+        print("      (gercek rclone yok, karsilastirma atlandi)")
+        return
+    o = Ortam()
+    try:
+        G = o.modul()
+        adlar = ["vzdump-qemu-100-2026_08_08-03_00_00.vma.zst",
+                 "vzdump-qemu-100-2026_08_08-03_00_00.vma.dat",
+                 "notlar.txt", "gecici.tmp", "yarim.part", "arsiv.tar.gz"]
+        kaynak = os.path.join(o.dizin, "dk"); hedef = os.path.join(o.dizin, "dh")
+        os.makedirs(kaynak, exist_ok=True)
+        for a in adlar:
+            with open(os.path.join(kaynak, a), "wb") as f: f.write(b"x" * 16)
+        for desenler in ([], ["*.dat"], ["*.tmp"], ["*.dat", "*.tmp", "*.part"], ["*.log"]):
+            shutil.rmtree(hedef, ignore_errors=True); os.makedirs(hedef)
+            args = [gercek, "copy", kaynak, hedef, "-q"]
+            for d in desenler: args += ["--exclude", d]
+            subprocess.run(args, check=True)
+            kopyalanan = set(os.listdir(hedef))
+            for a in adlar:
+                tahmin = bool(G._desen_uyar(a, desenler)[0])
+                dogru(tahmin == (a not in kopyalanan),
+                      f"desen {desenler} / {a}: tahmin={tahmin} rclone={a not in kopyalanan}")
+    finally: o.temizle()
+
+@test("DURDURULAN KOSUDA HICBIR YEDEK SILINMEZ", "durdur")
+def t_durdur_silmez():
+    """Projenin en onemli kurali, durdurma yolundan gecen hali.
+
+    Kullanici 'dur' dedi diye eskiler silinemez: yukleme tanim geregi yarim
+    kaldi. prune_on_failure ACIK olsa bile silme yapilmamali -- normalde o bayrak
+    'basarisiz olsa da sil' demek, ama durdurmayi kullanici istedi ve bu
+    'eskileri sil' anlamina gelmez."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        p = o.plan(prune_on_failure=True)     # en tehlikeli ayar acik
+        G.load_cfg()
+        silinenler = []
+        o.yamala(G, "do_prune", lambda *a, **k: silinenler.append("prune") or 0)
+        o.yamala(G, "do_purge_trash", lambda *a, **k: silinenler.append("purge") or 0)
+        o.yamala(G, "hostconf_prune", lambda *a, **k: silinenler.append("hostconf") or 0)
+        o.yamala(G, "lsjson_ok", lambda *a, **k: (True, []))
+
+        moved, purged, atlandi = G._asama_retention(p, "p1", ok=False, durduruldu=True)
+        dogru(atlandi, "durdurulan kosuda retention atlanmali")
+        dogru(moved == 0 and purged == 0, f"hicbir sey silinmemeli: {moved}/{purged}")
+        dogru(not silinenler, f"silme fonksiyonu HIC cagrilmamali, cagrilan: {silinenler}")
+
+        # Karsilastirma: durdurma yokken ayni ayar SILER (test gercekten olcuyor mu?)
+        silinenler.clear()
+        G._asama_retention(p, "p1", ok=False, durduruldu=False)
+        dogru(silinenler, "kontrol: durdurma olmadan prune_on_failure ile silme beklenir")
+    finally: o.temizle()
+
+@test("durdurma istegi rclone'u sonlandirir", "durdur")
+def t_durdur_rclone():
+    """Bayrak konunca gercekten sonlaniyor mu, yoksa kosu sonuna kadar mi
+    devam ediyor? Uzun surecek gercek bir alt surec baslatilip olculur."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        c = o.oku_cfg(); c["durdur_kontrol_sn"] = 0.5; o.yaz_cfg(c); G.cfg(force=True)
+        G.durdur_temizle("p1")
+        # rclone yerine uzun uyuyan gercek bir alt surec. Yamadan ONCE yakalanir,
+        # yoksa yama kendini cagirir.
+        gercek_popen = G.subprocess.Popen
+        o.yamala(G.subprocess, "Popen", lambda a, **k: gercek_popen(
+            [sys.executable, "-c", "import time;time.sleep(30)"], **k))
+        def gecikmeli_dur():
+            time.sleep(1.0); G.durdur_iste("p1")
+        import threading as _t
+        _t.Thread(target=gecikmeli_dur, daemon=True).start()
+        t0 = time.time()
+        rc, tail = G.rclone_stream(["copy", "a", "b"],
+                                   iptal=lambda: G.durdur_isteniyor("p1"))
+        gecen = time.time() - t0
+        dogru(gecen < 15, f"durdurma 15 sn icinde gerceklesmeli, {gecen:.1f} sn surdu")
+        dogru(any("kullanici istegiyle durduruldu" in x for x in tail),
+              f"cikti durdurmayi belirtmeli: {tail[-3:]}")
+        dogru(rc != 0, f"durdurulan kosu basarili donmemeli (rc={rc})")
+    finally:
+        G.durdur_temizle("p1"); o.temizle()
+
+@test("durdurma ucu ve durum akisi", "durdur")
+def t_durdur_ucu():
+    o = Ortam()
+    try:
+        G = o.modul(); o.plan(); G.load_cfg()
+        G.durdur_temizle("p1")
+        # Calismayan planda durdurma reddedilmeli
+        r = G.run_action("stop", "p1")
+        dogru(not r["ok"] and "calismiyor" in r["msg"], f"calismayan plan: {r}")
+        dogru(not G.durdur_isteniyor("p1"), "reddedilen istek bayrak birakmamali")
+
+        # Kilit tutulurken (yani kosu surerken) durdurma kabul edilmeli
+        kilit = open(G.lock_path("p1"), "a+")
+        fcntl.flock(kilit, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = G.run_action("stop", "p1")
+        dogru(r["ok"], f"calisan planda durdurma kabul edilmeli: {r}")
+        dogru(G.durdur_isteniyor("p1"), "bayrak konmali")
+        r2 = G.run_action("stop", "p1")
+        dogru(r2["ok"] and "zaten" in r2["msg"], f"ikinci istek anlamli donmeli: {r2}")
+        fcntl.flock(kilit, fcntl.LOCK_UN); kilit.close()
+
+        # Bayrak yeni kosuyu dogar dogmaz oldurmemeli: do_run basta temizler
+        G.do_run("p1", trigger="manuel")
+        st = G.pstate(G.read_state(), "p1")
+        dogru(st["status"] == "basarili",
+              f"eski bayrak yeni kosuyu etkilememeli, durum: {st['status']}")
+        dogru(not G.durdur_isteniyor("p1"), "kosu sonunda bayrak temizlenmeli")
+    finally:
+        G.durdur_temizle("p1"); o.temizle()
+
+@test("durdurma hata sayilmaz, hata maili gitmez", "durdur")
+def t_durdur_bildirim():
+    """Kullanicinin kendi bastigi dugme 'HATA' bildirimi uretirse guven kaybolur."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        p = o.plan(notify_failure=True, notify_skipped=False, notify_success=False)
+        G.load_cfg()
+        dogru(not G.notify_wanted(p, "durduruldu"),
+              "durdurmada bildirim notify_skipped'e bagli olmali, notify_failure'a degil")
+        p2 = dict(p, notify_skipped=True)
+        dogru(G.notify_wanted(p2, "durduruldu"),
+              "notify_skipped acikken durdurma bildirimi istenebilmeli")
+        dogru(G.notify_wanted(p, "HATA"), "kontrol: gercek hata yine bildirilmeli")
+    finally: o.temizle()
+
+@test("soguma suresi: basarili kosudan sonra slot atlanir", "soguma")
+def t_soguma():
+    from datetime import datetime, timedelta
+    """Elle yedek alindiktan kisa sure sonra zamanlayici ayni isi tekrarlamasin.
+    Onemli ayrinti: slot ERTELENMEZ, ATLANIR -- yoksa yedek gunduz kendiliginden
+    baslardi (bu projede tam olarak bu yasandi)."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        o.plan(run_at="03:00", cooldown_hours=6)
+        G.load_cfg()
+        p = G.get_plan("p1")
+        gun = datetime.now().replace(hour=3, minute=0, second=0, microsecond=0)
+
+        def durum(bitis, st="basarili"):
+            return {"last_run": bitis.strftime(G.TS_FMT), "status": st}
+
+        # 02:10'da basarili bitti -> 03:00 slotu atlanir
+        dogru(not G.is_due(p, durum(gun - timedelta(minutes=50)), ref=gun + timedelta(minutes=5)),
+              "soguma icindeki basarili kosu slotu tuketmeli")
+        # ...ve gun boyu atlanmis kalir, sonradan kendiliginden baslamaz
+        for saat in (8, 13, 20):
+            dogru(not G.is_due(p, durum(gun - timedelta(minutes=50)),
+                               ref=gun.replace(hour=saat)),
+                  f"saat {saat}:00'da kendiliginden baslamamali (erteleme degil, atlama)")
+        # 7 saat once bitti -> sogumanin disinda, calisir
+        dogru(G.is_due(p, durum(gun - timedelta(hours=7)), ref=gun + timedelta(minutes=5)),
+              "soguma disindaki kosu slotu tuketmemeli")
+        # HATA ile bittiyse sogumaya girmez: aksaklik yedeksiz gun yaratmasin
+        dogru(G.is_due(p, durum(gun - timedelta(minutes=50), "HATA"), ref=gun + timedelta(minutes=5)),
+              "hatali kosu sonrasi plan saatinde yeniden denenmeli")
+        dogru(G.is_due(p, durum(gun - timedelta(minutes=50), "durduruldu"), ref=gun + timedelta(minutes=5)),
+              "durdurulan kosu sonrasi plan saatinde yeniden denenmeli")
+        # Ertesi gun normal saatinde doner
+        dogru(G.is_due(p, durum(gun - timedelta(minutes=50)),
+                       ref=gun + timedelta(days=1, minutes=5)),
+              "ertesi gun normal calismali")
+
+        # 0 = kapali (eski davranis birebir korunur)
+        o.plan(run_at="03:00", cooldown_hours=0); G.load_cfg()
+        dogru(G.is_due(G.get_plan("p1"), durum(gun - timedelta(minutes=50)),
+                       ref=gun + timedelta(minutes=5)),
+              "soguma kapaliyken eski davranis surmeli")
+    finally: o.temizle()
+
+@test("soguma suresi parametrik ve sinirli", "soguma")
+def t_soguma_parametrik():
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru(G.PLAN_DEFAULTS["cooldown_hours"] == 6, "varsayilan 6 saat olmali")
+        for giren, beklenen in ((3, 3.0), ("12", 12.0), (-5, 0.0), (9999, 168.0), ("abc", 6)):
+            q = G.norm_plan({"id": "x", "name": "x", "src_dir": "/tmp",
+                             "remote": "g:h", "cooldown_hours": giren})
+            dogru(q["cooldown_hours"] == beklenen,
+                  f"{giren!r} -> {q['cooldown_hours']}, beklenen {beklenen}")
+        dogru('id="e-cool"' in G.HTML, "arayuzde alan olmali")
+        dogru("cooldown_hours" in G.HTML, "arayuz alani plan anahtarina baglanmali")
     finally: o.temizle()
 
 # ============================ KOSUCU ============================

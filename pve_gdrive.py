@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.7.4"
+SURUM = "1.8.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -113,6 +113,11 @@ GLOBAL_DEFAULTS = {
     "rclone_tail_lines": 40,    # rclone ciktisindan bellekte tutulacak son satir sayisi
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
+    "durdur_kontrol_sn": 2,     # durdurma istegi bu sikligla yoklanir
+    "durdur_bekle_sn": 10,      # rclone nazik sonlandirmaya bu kadar sure taninir
+    # Kaynak klasor listesi: arayuze gonderilecek azami satir. Dump klasorunde
+    # binlerce dosya olabilir; hepsini JSON'a cevirmek bellegi ve hatti bosuna yer.
+    "kaynak_liste_limit": 500,
     # --- servis izleme ---
     # --- telegram ---
     "telegram_enabled": False,
@@ -197,6 +202,11 @@ PLAN_DEFAULTS = {
     "keep_count": 3,          # VM/CT basina her kosulda korunacak en yeni set (gun sinirindan bagimsiz)
     "drive_trash_days": 1,    # Google cop kutusunda bekleyecegi gun sayisi
     "run_at": "03:00",        # gunun saati
+    # Basarili bir kosudan sonra bu kadar saat icindeki PLANLI slot atlanir.
+    # Elle yedek alindiktan kisa sure sonra zamanlayicinin ayni isi tekrar
+    # yapmasini (ve retention'i yeniden calistirmasini) onler. 0 = kapali.
+    # Elle baslatmayi HIC etkilemez; yalnizca zamanlayici bakar.
+    "cooldown_hours": 6,
     "weekdays": [],           # bos = her gun, yoksa 1=Pzt .. 7=Paz
     "bwlimit": "30M",         # sabit sinir; "off" = sinirsiz
     "bwlimit_schedule": "",   # saat cizelgesi, or. "08:00,2M 19:00,30M 23:00,off"
@@ -385,6 +395,8 @@ def norm_plan(p):
     for k in ("report_days", "report_stale_days", "report_quota_warn"):
         try: q[k] = max(0, int(q[k]))
         except Exception: q[k] = PLAN_DEFAULTS[k]
+    try: q["cooldown_hours"] = max(0.0, min(168.0, float(q.get("cooldown_hours", 6))))
+    except (TypeError, ValueError): q["cooldown_hours"] = 6
     for k in ("vzdump_wait_min", "min_age_min"):
         try: q[k] = max(0.0, float(q[k]))
         except Exception: q[k] = PLAN_DEFAULTS[k]
@@ -1132,9 +1144,13 @@ def _var_mi(ad):
                               for d in os.environ.get("PATH", "/usr/bin:/bin").split(":") if d)
     return _ONEK_CACHE[ad]
 
-def rclone_stream(args, timeout=None, on_line=None, onek=None):
+def rclone_stream(args, timeout=None, on_line=None, onek=None, iptal=None):
     """Uzun ciktili komutlar (copy) icin. Cikti satir satir okunur ve yalnizca son
-    rclone_tail_lines satiri bellekte tutulur; binlerce dosyada bile RAM sabit kalir."""
+    rclone_tail_lines satiri bellekte tutulur; binlerce dosyada bile RAM sabit kalir.
+
+    iptal: periyodik cagrilan bir yuklem. True donerse rclone once nazikce
+    (SIGTERM) sonra sertce sonlandirilir. Cikti satirini beklemeden calisir,
+    boylece hicbir sey yazdirmayan bir aktarim da durdurulabilir."""
     n = max(1, int(cfg().get("rclone_tail_lines") or 40))
     try:
         pr = subprocess.Popen(list(onek or []) + ["rclone"] + args, stdout=subprocess.PIPE,
@@ -1146,6 +1162,26 @@ def rclone_stream(args, timeout=None, on_line=None, onek=None):
     killer = threading.Timer(timeout, pr.kill) if timeout else None
     if killer:
         killer.daemon = True; killer.start()
+    iptal_dur = threading.Event(); iptal_oldu = {"evet": False}
+    def iptal_bekcisi():
+        aralik = max(0.5, float(cfg().get("durdur_kontrol_sn") or 2))
+        while not iptal_dur.wait(aralik):
+            try:
+                if not iptal(): continue
+            except Exception as e:
+                yut("iptal_bekcisi", e); continue
+            iptal_oldu["evet"] = True
+            try:
+                pr.terminate()                    # once nazikce: rclone kendini toplasin
+                for _ in range(int(max(1, float(cfg().get("durdur_bekle_sn") or 10)) * 2)):
+                    if pr.poll() is not None: break
+                    time.sleep(0.5)
+                if pr.poll() is None: pr.kill()    # toplanmadiysa sertce
+            except Exception as e: yut("iptal_bekcisi", e)
+            return
+    bekci = None
+    if iptal:
+        bekci = threading.Thread(target=iptal_bekcisi, daemon=True); bekci.start()
     try:
         for line in pr.stdout:
             line = line.rstrip()
@@ -1156,9 +1192,14 @@ def rclone_stream(args, timeout=None, on_line=None, onek=None):
         pr.wait()
     finally:
         if killer: killer.cancel()
+        iptal_dur.set()
+        if bekci: bekci.join(timeout=2)
         try: pr.stdout.close()
         except Exception as e: yut("rclone_stream", e)
-    if pr.returncode and pr.returncode < 0: buf.append("zaman asimi: rclone durduruldu")
+    if iptal_oldu["evet"]:
+        buf.append("kullanici istegiyle durduruldu")
+    elif pr.returncode and pr.returncode < 0:
+        buf.append("zaman asimi: rclone durduruldu")
     return pr.returncode, list(buf)
 
 def lsjson_ok(path, extra=None):
@@ -1186,6 +1227,31 @@ def is_running(pid):
     except Exception as e:
         yut("is_running", e)
         return False
+
+# ---------- DURDURMA ISTEGI ----------
+# Calisan yedek AYRI bir surecte olabilir (manuel: Popen ile; zamanlanmis: servisin
+# kendi surecinde). Bu yuzden sinyal/killpg kullanilmaz -- servisi de oldurebilir.
+# Yerine dosya bayragi konur, kosan taraf onu gorup rclone'u kendisi sonlandirir.
+def durdur_yolu(pid): return os.path.join(LOCK_DIR, f"pve-gdrive-{slug(pid)}.durdur")
+
+def durdur_iste(pid):
+    try:
+        with open(durdur_yolu(pid), "w") as f: f.write(now_str())
+        return True
+    except Exception as e:
+        yut("durdur_iste", e); return False
+
+def durdur_isteniyor(pid):
+    try: return os.path.exists(durdur_yolu(pid))
+    except Exception as e:
+        yut("durdur_isteniyor", e); return False
+
+def durdur_temizle(pid):
+    """Bayrak her kosunun basinda ve sonunda silinir: eski bir istek yeni kosuyu
+    dogar dogmaz oldurmesin."""
+    try: os.remove(durdur_yolu(pid))
+    except FileNotFoundError: pass
+    except Exception as e: yut("durdur_temizle", e)
 
 # ---------- PROXMOX YEDEGI ILE CAKISMA ----------
 def vzdump_lock_held():
@@ -1277,7 +1343,18 @@ def next_run(p, ref=None):
     return None
 
 def is_due(p, s, ref=None):
-    """Bugunun planlanan saati gectiyse ve o saatten sonra hic calismadiysa vakti gelmistir."""
+    """Bugunun planlanan saati gectiyse ve o saatten sonra hic calismadiysa vakti gelmistir.
+
+    cooldown_hours: planli saatten ONCEKI bu kadar saat icinde BASARILI bir kosu
+    bitmisse slot tuketilmis sayilir ve bugun bir daha calisilmaz.
+
+    Neden "tuketilmis" de "ertelenmis" degil: erteleme secilseydi 02:10'da biten
+    elle bir yedekten sonra plan 08:10'da kendiliginden baslardi -- yani gunduz,
+    hipervizor is basindayken. Bu projede tam olarak bu yasandi (215 GB'lik
+    yukleme 13:05'te basladi). Atlanan slot ertesi gun normal saatinde doner.
+
+    Yalnizca BASARILI kosu slotu tuketir: hata veya durdurma sonrasi plan
+    saatinde yeniden denenmelidir, yoksa bir aksaklik yedeksiz gun yaratir."""
     if not p.get("enabled", True): return False
     hh, mm = _hhmm(p); wd = p.get("weekdays") or []
     now = ref or datetime.now()
@@ -1287,7 +1364,12 @@ def is_due(p, s, ref=None):
     lr = s.get("last_run")
     if lr:
         try:
-            if datetime.strptime(lr, TS_FMT) >= sched: return False
+            son = datetime.strptime(lr, TS_FMT)
+            if son >= sched: return False
+            cd = float(p.get("cooldown_hours") or 0)
+            if cd > 0 and s.get("status") == "basarili" \
+               and son >= sched - timedelta(hours=cd):
+                return False
         except Exception as e: yut("is_due", e)
     return True
 
@@ -1430,6 +1512,88 @@ def kaynak_analiz(src_dir):
                 [{"ad": k, "toplam": v, "set_basina": v / set_sayisi,
                   "pay": round(v / toplam * 100, 1)} for k, v in misafir.items()],
                 key=lambda x: -x["toplam"])}
+
+def _desen_uyar(ad, desenler):
+    """Dosya adi skip_patterns desenlerinden birine uyuyor mu?
+
+    rclone --exclude'un tam dilbilgisi degil, yaygin kullanilan kabuk kalibinin
+    (`*.dat`, `*.tmp`) karsiligi. Ikisinin ayni sonucu verdigi gercek rclone ile
+    olculur (bkz. tests: "atlanacak desen tahmini rclone ile ayni").
+    Farklilasabilecek yerde arayuz kesin konusmasin diye yalnizca bu kalip
+    desteklenir; digerlerinde 'belirsiz' donulur."""
+    for d in desenler or []:
+        d = str(d).strip()
+        if not d: continue
+        # rclone deseni '/' iceriyorsa yol kuralidir; dosya adiyla karsilastirmak yanlis olur
+        if "/" in d or "{" in d or "**" in d: return None, d
+        if fnmatch.fnmatch(ad, d): return True, d
+    return False, ""
+
+def kok_icinde_mi(yol):
+    """Gezginle ayni sinir: verilen yol browse_roots altinda mi?
+    Listeleme ucu de dosya adi sizdirir, gezginle ayni kurala tabi olmali."""
+    try: p = os.path.abspath(yol or "")
+    except Exception as e:
+        yut("kok_icinde_mi", e); return False
+    return any(p == r or p.startswith(r + os.sep) for r in gezinti_kokleri())
+
+def kaynak_dosyalar(src_dir, p=None, limit=None):
+    """Kaynak klasordeki dosyalari, her birinin basina ne gelecegiyle listeler.
+
+    "Klasorde ne var" sorusunun yaninda "bu dosya neden yedeklenmiyor" ve
+    "bu dosya neden Drive'da birikiyor" sorularini da dosya duzeyinde cevaplar:
+    yukleme secimini rclone yapar (skip_patterns + min_age), saklamayi ise
+    dump_regex'e uyan setler belirler. Ikisi ayri kumedir ve fark onemlidir --
+    desene uymayan bir dosya yuklenir ama do_prune onu hicbir zaman silmez."""
+    p = p or {}
+    lim = int(limit or cfg().get("kaynak_liste_limit") or 500)
+    try:
+        adlar = os.listdir(src_dir)
+    except Exception as e:
+        yut("kaynak_dosyalar", e)
+        return {"ok": False, "hata": f"klasor okunamadi: {src_dir}"}
+    re_d = dump_re()
+    desenler = p.get("skip_patterns") or []
+    min_age = float(p.get("min_age_min") or 0)
+    simdi = time.time()
+    kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0
+    for ad in adlar:
+        yol = os.path.join(src_dir, ad)
+        try:
+            if not os.path.isfile(yol): continue
+            stt = os.stat(yol)
+        except Exception as e:
+            yut("kaynak_dosyalar", e); continue
+        boyut, mtime = stt.st_size, stt.st_mtime
+        toplam += boyut
+        yas_dk = (simdi - mtime) / 60.0
+        uyar, desen = _desen_uyar(ad, desenler)
+        dump = bool(re_d.match(ad)); konf = bool(RE_HOSTCONF.match(ad))
+        if uyar is None:
+            durum, neden = "belirsiz", f"desen elle degerlendirilmeli: {desen}"
+        elif uyar:
+            durum, neden = "atlanir", f"desen: {desen}"
+        elif min_age > 0 and yas_dk < min_age:
+            durum, neden = "bekler", f"{int(min_age)} dk'dan yeni ({int(yas_dk)} dk)"
+        else:
+            durum = "yuklenir"
+            yuklenecek += 1
+            if dump: neden = "saklama: gun kurali"
+            elif konf: neden = "saklama: yapilandirma kurali"
+            else:
+                neden = "SAKLAMA DISI - yuklenir ama silinmez"
+                saklama_disi += 1
+        # Metin degil VERI gonderilir: arayuz cumleyi kendi dilinde kurar.
+        # neden yalnizca API/gunluk icin ASCII ozet olarak kalir.
+        kayitlar.append({"ad": ad, "boyut": boyut, "mtime": int(mtime),
+                         "yas_dk": int(yas_dk), "durum": durum, "neden": neden,
+                         "desen": desen or "", "min_age": int(min_age),
+                         "dump": dump, "konf": konf})
+    kayitlar.sort(key=lambda k: -k["mtime"])
+    return {"ok": True, "toplam_dosya": len(kayitlar), "toplam_boyut": toplam,
+            "yuklenecek": yuklenecek, "saklama_disi": saklama_disi,
+            "limit": lim, "kirpildi": len(kayitlar) > lim,
+            "dosyalar": kayitlar[:lim]}
 
 def saklama_projeksiyon(analiz, kota, keep_days, drive_trash_days=1):
     """Verilen saklama suresi icin gereken alan ve kotaya orani.
@@ -1639,7 +1803,9 @@ def do_copy(p):
         isciler.append(threading.Thread(target=bw_auto_izle, args=(p, port, dur), daemon=True))
     for t in isciler: t.start()
     try:
-        rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line, onek=kaynak_oneki(p))
+        rc, tail = rclone_stream(args, timeout=tmo, on_line=on_line,
+                                 onek=kaynak_oneki(p),
+                                 iptal=lambda: durdur_isteniyor(p["id"]))
     finally:
         dur.set()
         for t in isciler: t.join(timeout=5)
@@ -2294,8 +2460,11 @@ def tg_metin(baslik, satirlar, durum=None):
             f"<pre>{govde}</pre>")
 
 def notify_wanted(p, status):
+    # "durduruldu" ariza degil, kullanicinin kendi karari: hata bildirimine
+    # dusmemeli. Atlanan kosuyla ayni anahtari kullanir.
     return bool(p.get({"basarili": "notify_success", "HATA": "notify_failure",
-                       "atlandi": "notify_skipped"}.get(status, "notify_failure"), False))
+                       "atlandi": "notify_skipped",
+                       "durduruldu": "notify_skipped"}.get(status, "notify_failure"), False))
 
 def maybe_report(p, status, summary, snap, detay=None):
     if not notify_wanted(p, status):
@@ -2445,14 +2614,21 @@ def _asama_kopyala(p, pid):
             f"silme yapilmayacak", pid)
     return False, 0, yarim, None, denemeler
 
-def _retention_calissin_mi(p, ok, listed, pid):
+def _retention_calissin_mi(p, ok, listed, pid, durduruldu=False):
     """PROJENIN EN ONEMLI GUVENLIK KURALI.
 
     Yukleme basarisizsa veya Drive listelenemiyorsa HICBIR SEY SILINMEZ. Aksi halde
     yeni yedek Drive'a cikmadan eskiler silinir ve hem yerelde hem Drive'da yedeksiz
     kalinabilir. prune_on_failure yalnizca kullanici bilerek actiysa bunu gevsetir,
     o durumda bile Drive listelenebiliyor olmasi sarttir.
+
+    Kullanici durdurdusa yukleme TANIM GEREGI yarim kalmistir; bu durumda
+    prune_on_failure acik olsa bile silme yapilmaz. Kullanicinin "dur" demesi
+    "eskileri sil" anlamina gelemez.
     """
+    if durduruldu:
+        log("kullanici durdurdu -> retention ATLANDI, hicbir yedek silinmedi", pid)
+        return False, "kullanici durdurdu"
     if ok and listed: return True, ""
     sebep = "yukleme basarisiz" if not ok else "Drive listelenemedi"
     if p.get("prune_on_failure") and listed:
@@ -2461,8 +2637,12 @@ def _retention_calissin_mi(p, ok, listed, pid):
     log(f"{sebep} -> retention ATLANDI, hicbir yedek silinmedi", pid)
     return False, sebep
 
-def _asama_retention(p, pid, ok):
+def _asama_retention(p, pid, ok, durduruldu=False):
     """(cope_tasinan, kalici_silinen, retention_atlandi_mi)"""
+    if durduruldu:
+        # Listeleme bile yapilmaz: durdurulan kosuda Drive'a hic dokunulmaz.
+        _retention_calissin_mi(p, ok, True, pid, durduruldu=True)
+        return 0, 0, True
     set_progress(pid, {"phase": "listeleme", "phase_label": "Drive listeleniyor"})
     listed, files = lsjson_ok(p["remote"])
     calissin, _ = _retention_calissin_mi(p, ok, listed, pid)
@@ -2476,11 +2656,13 @@ def _asama_retention(p, pid, ok):
     return moved, purged, False
 
 def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
-                 konf=0, konf_n=0, aktif=None, denemeler=None):
+                 konf=0, konf_n=0, aktif=None, denemeler=None, durduruldu=False):
     set_progress(pid, {"phase": "ozet", "phase_label": "Durum güncelleniyor"})
     snap = update_snapshot(p)
     dur = int(time.time() - started)
-    status = "basarili" if ok else "HATA"
+    # Durdurma HATA degildir: kullanici bilerek yapti. Ayri durum olmasi onemli --
+    # hata bildirimi gitmesin ve rapor bunu arizaymis gibi saymasin.
+    status = "durduruldu" if durduruldu else ("basarili" if ok else "HATA")
     denemeler = denemeler or []
     yedege_dustu = bool(aktif and denemeler and denemeler[0]["hedef"] != aktif)
     summary = (f"yuklenen:{uploaded} | copene:{moved} | kalici-silinen:{purged} | sure:{dur}s"
@@ -2521,6 +2703,8 @@ def do_run(pid, trigger="zamanlanmis"):
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         log("zaten calisan bir yedek var, cikiliyor", pid); return
+    # Onceki kosudan kalmis bir "dur" istegi yeni kosuyu dogar dogmaz oldurmesin.
+    durdur_temizle(pid)
     started = time.time()
     put_pstate(pid, {"status": "calisiyor"})
     set_progress(pid, {"phase": "hazirlik", "phase_label": "Hazırlanıyor", "started": started,
@@ -2533,19 +2717,24 @@ def do_run(pid, trigger="zamanlanmis"):
         if not wait_for_vzdump(p):
             _asama_atlandi(p, pid, trigger); return
         ok, uploaded, yarim, aktif, denemeler = _asama_kopyala(p, pid)
+        durduruldu = durdur_isteniyor(pid)
+        if durduruldu:
+            ok = False                 # yarim yukleme basarili sayilamaz
+            log("yedekleme kullanici istegiyle durduruldu", pid)
         # Bundan sonraki HER SEY yalnizca basarili hedefe uygulanir.
         # aktif None ise hicbiri calismadi: silme yapan asamalar zaten atlanir.
         ph = plan_hedefle(p, aktif) if aktif else p
         set_progress(pid, {"phase": "yapilandirma",
                            "phase_label": "Host yapılandırması yedekleniyor"})
         konf, konf_n, _ = hostconf_yukle(ph) if ok else (0, 0, "")
-        moved, purged, atlandi = _asama_retention(ph, pid, ok)
+        moved, purged, atlandi = _asama_retention(ph, pid, ok, durduruldu=durduruldu)
         _asama_bitir(ph, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
-                     konf, konf_n, aktif, denemeler)
+                     konf, konf_n, aktif, denemeler, durduruldu=durduruldu)
     except Exception as e:
         _asama_hata(p, pid, e)
     finally:
         clear_progress(pid)
+        durdur_temizle(pid)
         fcntl.flock(lock, fcntl.LOCK_UN); lock.close()
 
 def do_tick():
@@ -4155,6 +4344,18 @@ class H(BaseHTTPRequestHandler):
             self._json({"storages": pve_storages(), "zfs": zfs_havuzlari()})
         elif p == "/api/yol-analiz":
             self._json(yol_analiz(unquote(q.get("path", [""])[0])))
+        elif p == "/api/kaynak-dosyalar":
+            src = unquote(q.get("src", [""])[0])
+            plan = get_plan(q.get("plan", [""])[0]) or {}
+            # Plan kaydedilmeden de bakilabilsin: alanlar sorgudan gelebilir.
+            if q.get("skip"): plan = dict(plan, skip_patterns=unquote(q["skip"][0]).split())
+            if q.get("mage"): plan = dict(plan, min_age_min=q["mage"][0])
+            if not src:
+                self._json({"ok": False, "hata": "kaynak klasor secilmedi"})
+            elif not kok_icinde_mi(src):
+                self._json({"ok": False, "hata": "bu klasor gezinti kokleri disinda"})
+            else:
+                self._json(kaynak_dosyalar(src, plan))
         else:
             self._send(404, "text/plain; charset=utf-8", "yok")
 
@@ -4427,8 +4628,16 @@ def save_settings(data):
 def run_action(do, pid):
     p = get_plan(pid)
     if do in ("backup", "prune", "purgetrash", "refresh", "testmail", "report",
-              "hostconf") and not p:
+              "hostconf", "stop") and not p:
         return {"ok": False, "msg": "plan bulunamadi"}
+    if do == "stop":
+        if not is_running(pid): return {"ok": False, "msg": "bu plan calismiyor"}
+        if durdur_isteniyor(pid):
+            return {"ok": True, "msg": "durdurma istegi zaten verildi, bekleniyor"}
+        durdur_iste(pid)
+        log("durdurma istendi (arayuzden)", pid)
+        return {"ok": True, "msg": "durduruluyor - rclone sonlandiriliyor, "
+                                   "hicbir yedek silinmeyecek"}
     if do == "backup":
         if is_running(pid): return {"ok": False, "msg": "bu plan zaten calisiyor"}
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "run", "--plan", pid,
@@ -4912,6 +5121,10 @@ button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:8
 button:hover{background:#2d333b}
 button.primary{background:#238636;border-color:#2ea043}button.primary:hover{background:#2ea043}
 button.warn{background:#8a2b2b;border-color:#b03636}
+/* Calisan yedegi durduran dugme: yikici degil ama geri donusu olmayan bir
+   kesinti, sıradan dugmeden ayrilmali. */
+button.tehlike{background:#7a2530;border-color:#a83a45;color:#ffe1e4}
+button.tehlike:hover{background:#a83a45}
 button.sm{padding:4px 9px;font-size:12px}
 .btns{display:flex;gap:6px;flex-wrap:wrap}
 .plans{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin-bottom:18px}
@@ -4948,7 +5161,34 @@ legend{font-size:12px;color:#8b97a5;padding:0 6px}
 input,select,textarea{width:100%;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:7px;padding:7px 9px;font:13px/1.4 inherit}
 input:focus,select:focus,textarea:focus{outline:none;border-color:#58a6ff}
 input.bad,select.bad,textarea.bad{border-color:#f85149;background:#1d1113}
+/* Devre disi kontroller. Yukaridaki kural tum girdilere acik background/color
+   verdigi icin tarayicinin kendi soluk gorunumu eziliyordu: kilitli alan normal
+   gorunup yaziyi sessizce reddediyordu. .bad'den SONRA gelir, kilit her zaman
+   hata cercevesini bastirir. */
+input:disabled,select:disabled,textarea:disabled,
+input.bad:disabled,select.bad:disabled{background:#0b0e13;color:#6b7684;
+  border-color:#242a33;border-style:dashed;cursor:not-allowed}
+input:disabled::placeholder,textarea:disabled::placeholder{color:#454f5c}
+button:disabled,button[disabled]{opacity:.4;cursor:not-allowed;filter:grayscale(1)}
+/* Bir alanin neden kilitlendigini soyleyen not. Kilit gorunur olmali ama
+   kullanici nasil acacagini da bilmeli. */
+.kilit{font-size:12px;color:#e8c07d;background:#221b0f;border:1px solid #4a3a1a;
+  border-radius:7px;padding:7px 9px;margin-bottom:10px;line-height:1.5}
+.kilit b{color:#ffd98a}
 input[type=checkbox]{width:auto}
+/* Kaynak klasor dosya listesi. Uzun olabilir: kendi icinde kaydirilir ki
+   sihirbaz adimi sayfayi asmasin. */
+.ksl-sar{max-height:320px;overflow:auto;margin-top:6px}
+.ksl-sar table{width:100%;border-collapse:collapse}
+.ksl-sar td{padding:3px 6px;border-bottom:1px solid #1b2027;vertical-align:top;
+  font-size:12px;word-break:break-all}
+.ksl-sar td:nth-child(3){white-space:nowrap;color:#9fb4c9;text-align:right}
+.ksl-r{display:inline-block;min-width:74px;text-align:center;padding:1px 6px;
+  border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
+.ksl-yukle{background:#12291a;color:#7ee2a8;border:1px solid #1f4a2f}
+.ksl-atla{background:#2a2118;color:#e8c07d;border:1px solid #4a3a1a}
+.ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
+.ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .hint{font-size:11px;color:#6e7c8c;margin-top:4px;line-height:1.45}
 .hint b{color:#9fb4c9}
 .eg{font-size:11px;color:#7d8fa3;background:#0f151d;border-left:2px solid #2d3d50;padding:5px 8px;margin-top:5px;border-radius:0 6px 6px 0}
@@ -5148,6 +5388,18 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="eg">Depo yolları <code>&lt;depo-yolu&gt;/dump</code> biçimindedir.
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
+  <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="btns" style="margin-bottom:8px">
+      <button class="sm" onclick="kaynakListeYukle()">📄 Dosyaları listele</button>
+      <button class="sm" id="ksl-yenile" onclick="kaynakListeYukle(true)" style="display:none">↻ Yenile</button>
+    </div>
+    <div id="ksl-ozet" class="small"></div>
+    <div id="ksl-liste" class="ksl-sar"></div>
+    <div class="eg">Yükleme kararını rclone verir: <b>atlanacak desenler</b> ve
+      <b>en az yaş</b> alanları belirler. Saklama kararı ayrıdır ve dosya adı kalıbına
+      (<code>dump_regex</code>) bakar. Kalıba uymayan bir dosya <b>yüklenir ama hiç
+      silinmez</b> — Drive'da birikir. Liste bu ikisini ayrı ayrı gösterir.</div>
+  </fieldset>
 </div>
 <div class="wstep" data-step="3" style="display:none">
   <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
@@ -5244,6 +5496,13 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
       <div><div class="wd" id="e-wd"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
+    <div class="f"><label class="tip" title="Planlı saatten önceki bu kadar saat içinde başarılı bir yedek bittiyse o günkü çalışma atlanır.">Soğuma süresi (saat)</label>
+      <div><input type="number" min="0" max="168" step="1" id="e-cool"><div class="errmsg" id="err-cool"></div>
+        <div class="eg">Elle yedek aldıktan kısa süre sonra zamanlayıcının aynı işi
+          tekrarlamasını önler. <b>6</b> iyi bir değer · <code>0</code> = kapalı.<br>
+          O günkü slot <b>atlanır</b>, ertelenmez — yedek gündüz kendiliğinden başlamaz.
+          Yalnızca <b>başarılı</b> koşu sayılır: hata veya durdurma sonrası plan saatinde
+          yeniden denenir. Elle başlatmayı hiç etkilemez.</div></div></div>
   </fieldset>
   <fieldset><legend>Proxmox ile çakışma koruması</legend>
     <div class="f"><label class="tip" title="Proxmox'un kendi yedeği çalışırken yüklemeye başlanmaz. Kilit dosyası, süreç ve yazılan dosyalar kontrol edilir.">vzdump'ı bekle</label>
@@ -5265,6 +5524,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 <div class="wstep" data-step="6" style="display:none">
   <div class="wbaslik"><b>6. Aktarım</b> <span class="small">Hız ve kaynak kullanımı</span></div>
   <fieldset><legend>Aktarım</legend>
+    <div class="kilit" id="bw-kilit" style="display:none">🔒 <b>Otomatik mod açık.</b>
+      <span>Hız sınırı ve saatlik çizelge devre dışı — sınırı araç kendisi belirliyor.</span>
+      <span>Elle değer girmek için aşağıdaki <b>Otomatik mod</b> kutusunun işaretini kaldır.</span></div>
     <div class="f"><label class="tip" title="Sabit yükleme hız sınırı. Çizelge doluysa çizelge önceliklidir.">Hız sınırı</label>
       <div><input id="e-bw" placeholder="30M"><div class="errmsg" id="err-bw"></div>
         <div class="eg"><code>30M</code> = 30 MB/sn · <code>2M</code> yavaş hat için · <code>off</code> = sınırsız</div></div></div>
@@ -5272,7 +5534,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input id="e-bwsch" placeholder="08:00,2M 19:00,30M 23:00,off"><div class="errmsg" id="err-bwsch"></div>
         <div class="eg">Mesaide hattı boğma, gece hızlan: <code>08:00,2M 19:00,10M 23:00,off</code><br>
           Her giriş <b>o saatten itibaren</b> geçerli olur. Boş bırakırsan sabit sınır kullanılır.</div>
-        <div class="btns" style="margin-top:6px">
+        <div class="btns" id="bwsch-onayar" style="margin-top:6px">
           <button class="sm" onclick="bwPreset('')">Çizelgesiz</button>
           <button class="sm" onclick="bwPreset('08:00,2M 19:00,10M 23:00,off')">Mesai dostu</button>
           <button class="sm" onclick="bwPreset('00:00,off 07:00,1M 23:00,off')">Sadece gece</button>
@@ -5745,6 +6007,12 @@ const EN = {
     "yükleme başarısız olsa da eskileri sil": "delete old ones even if the upload failed",
     /* --- otomatik bant genişliği --- */
     "Otomatik bant genişliği": "Automatic bandwidth", "Otomatik mod": "Automatic mode",
+    // Otomatik mod acikken hiz alanlarinin kilitlendigini anlatan not
+    "Otomatik mod açık.": "Automatic mode is on.",
+    "Hız sınırı ve saatlik çizelge devre dışı — sınırı araç kendisi belirliyor.": "Speed limit and hourly schedule are disabled — the tool sets the limit itself.",
+    "Elle değer girmek için aşağıdaki": "To enter a value manually, clear the",
+    "kutusunun işaretini kaldır.": "checkbox below.",
+    "Otomatik mod açıkken bu alan kullanılmaz.": "This field is unused while automatic mode is on.",
     "Hat kapasitesi": "Link capacity", "Diğerlerine ayrılan": "Reserved for others",
     "Alt sınır": "Lower bound", "Üst sınır": "Upper bound", "Ağ arayüzü": "Network interface",
     "Ölçüm aralığı (sn)": "Measure interval (s)", "Yumuşatma (0-1)": "Smoothing (0-1)",
@@ -6948,8 +7216,25 @@ function bwLinkKipi() {
 function bwAutoUygula() {
     const acik = chk("e-bwauto");
     el("bwauto-box").style.display = acik ? "" : "none";
-    fld("e-bw").disabled = acik;
-    fld("e-bwsch").disabled = acik;
+    kilitle("e-bw", acik);
+    kilitle("e-bwsch", acik);
+    // Kilidin gorunur bir karsiligi olmali. Once yoktu: alan normal gorunuyor ama
+    // yaziyi sessizce reddediyordu, kullanici arayuz bozuldu saniyordu.
+    el("bw-kilit").style.display = acik ? "" : "none";
+    // On ayar butonlari kilitli alana deger yaziyordu: tikliyorsun, hicbir sey
+    // olmuyor gibi gorunuyor. Alanla birlikte kapanirlar.
+    Array.prototype.slice.call(el("bwsch-onayar").querySelectorAll("button"))
+        .forEach((b) => { b.disabled = acik; });
+}
+/** Bir alani kilitler ve nedenini alanin uzerine yazar.
+ *  Kilit uc kanaldan da duyulur: gorunum (CSS :disabled), imlec ve ipucu. */
+function kilitle(id, kilit, neden) {
+    const f = fld(id);
+    f.disabled = kilit;
+    if (kilit)
+        f.title = neden || C("Otomatik mod açıkken bu alan kullanılmaz.");
+    else
+        f.removeAttribute("title");
 }
 /** Kullanici kutuyu tikladiginda. Onceden bu tek fonksiyon vardi ve openEditor
  *  da onu cagiriyordu: her plan acilisi aninda "kaydedilmemis degisiklik var"
@@ -7117,7 +7402,9 @@ function planCard(p) {
         + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
         + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
         + '<div class="pbtns" onclick="event.stopPropagation()">'
-        + "<button class=\"sm primary\" onclick=\"act('backup','" + p.id + "')\"" + (p.running ? " disabled" : "") + ">▶ Yedekle</button>"
+        + (p.running
+            ? "<button class=\"sm tehlike\" onclick=\"planDurdur('" + p.id + "')\">⏹ Durdur</button>"
+            : "<button class=\"sm primary\" onclick=\"act('backup','" + p.id + "')\">▶ Yedekle</button>")
         + "<button class=\"sm\" onclick=\"act('prune','" + p.id + "')\">🧹 Retention</button>"
         + "<button class=\"sm\" onclick=\"act('purgetrash','" + p.id + "')\">🗑 Çöpü Boşalt</button>"
         + "<button class=\"sm\" onclick=\"act('report','" + p.id + "')\">📊 Rapor</button>"
@@ -7390,6 +7677,16 @@ async function act(d, pid) {
     if (!akisCanli)
         window.setTimeout(() => void refresh(), 900);
 }
+/** Calisan yedegi durdurur. Onay ister: yarim kalan yukleme kullaniciya
+ *  soylenmeli, ama korkutmaya gerek yok -- hicbir yedek SILINMEZ. */
+async function planDurdur(pid) {
+    if (!await onay(C("Çalışan yedekleme durdurulsun mu?") + "\n\n"
+        + C("• rclone sonlandırılır, yarım kalan dosya Drive'da tamamlanmaz.") + "\n"
+        + C("• Hiçbir eski yedek SİLİNMEZ — retention bu turda hiç çalışmaz.") + "\n"
+        + C("• Bir sonraki planlı saatte normal şekilde yeniden denenir."), C("Yedeklemeyi durdur"), C("Durdur"), C("Vazgeç")))
+        return;
+    await act("stop", pid);
+}
 async function delPlan(pid) {
     if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")))
         return;
@@ -7422,7 +7719,7 @@ const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktar�
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI = [
     ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
-    ["e-runat", "e-wvm", "e-mage"],
+    ["e-runat", "e-wvm", "e-mage", "e-cool"],
     ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
     ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
 ];
@@ -7508,6 +7805,10 @@ function wOzet() {
         : C("yedeklenmiyor"), !chk("e-hc"));
     h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
     h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
+    const cool = Number(val("e-cool")) || 0;
+    h += wSatir(C("Soğuma"), cool
+        ? cool + C(" saat içinde başarılı koşu olduysa o günkü slot atlanır")
+        : C("kapalı — plan saati gelince her durumda çalışır"));
     h += wSatir(C("vzdump koruması"), chk("e-wv")
         ? C("bekle, en fazla ") + val("e-wvm") + C(" dk") : C("beklemeden çalış"), !chk("e-wv"));
     h += wSatir("Hatada retention", chk("e-pof")
@@ -7833,6 +8134,82 @@ async function savePlan() {
         void refresh();
     }
 }
+/** Kaynak klasorde GERCEKTE ne var. Sayilar degil dosyalar: "yedeklendi mi"
+ *  sorusu dosya duzeyinde sorulur, ozet ortalamalar bunu gizler. */
+async function kaynakListeYukle(yenile) {
+    const src = val("e-src").trim();
+    if (!src) {
+        setTxt("ksl-ozet", C("Önce kaynak klasörü seç."));
+        return;
+    }
+    setTxt("ksl-ozet", C("okunuyor…"));
+    if (!yenile)
+        setHtml("ksl-liste", "");
+    // Plan henuz kaydedilmemis olabilir: formdaki guncel degerler sorguya eklenir,
+    // boyle olmazsa liste kaydedilmis eski desene gore etiketlenirdi.
+    const q = "/api/kaynak-dosyalar?src=" + encodeURIComponent(src)
+        + "&plan=" + encodeURIComponent(sel || "")
+        + "&skip=" + encodeURIComponent(val("e-skip"))
+        + "&mage=" + encodeURIComponent(val("e-mage"));
+    let j;
+    try {
+        j = await api(q);
+    }
+    catch {
+        setTxt("ksl-ozet", C("klasör okunamadı"));
+        return;
+    }
+    el("ksl-yenile").style.display = "";
+    if (!j.ok) {
+        setHtml("ksl-ozet", '<span class="kap-hata">⚠ ' + esc(j.hata || C("okunamadı")) + "</span>");
+        setHtml("ksl-liste", "");
+        return;
+    }
+    const d = j.dosyalar || [];
+    const ozet = [
+        (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
+        (j.yuklenecek || 0) + C(" tanesi yüklenir"),
+    ];
+    if (j.saklama_disi)
+        ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
+    setHtml("ksl-ozet", ozet.join(" · ")
+        + (j.kirpildi ? '<br><span class="uyari-metin">' + C("liste ilk ")
+            + (j.limit || 0) + C(" satırla sınırlandı (kaynak_liste_limit)") + "</span>" : ""));
+    if (!d.length) {
+        setHtml("ksl-liste", '<div class="hint">' + C("klasörde dosya yok") + "</div>");
+        return;
+    }
+    const rozet = (x) => {
+        if (x.durum === "atlanir")
+            return '<span class="ksl-r ksl-atla">' + C("atlanır") + "</span>";
+        if (x.durum === "bekler")
+            return '<span class="ksl-r ksl-bekle">' + C("bekler") + "</span>";
+        if (x.durum === "belirsiz")
+            return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
+        if (!x.dump && !x.konf)
+            return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
+        return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
+    };
+    // Aciklama cumlesi burada kurulur: arka uc ASCII veri gonderir, arayuz metni
+    // kendi dilinde yazar. Boylece log ozeti ile ekran metni birbirine bagli olmaz.
+    const kslNeden = (x) => {
+        if (x.durum === "atlanir")
+            return C("desen: ") + "<code>" + esc(x.desen) + "</code>";
+        if (x.durum === "belirsiz")
+            return C("desen elle değerlendirilmeli: ") + "<code>" + esc(x.desen) + "</code>";
+        if (x.durum === "bekler")
+            return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
+        if (x.dump)
+            return C("saklama: gün kuralı işler");
+        if (x.konf)
+            return C("saklama: yapılandırma kuralı işler");
+        return "<b>" + C("yüklenir ama hiç silinmez") + "</b> — " + C("ad kalıbına uymuyor");
+    };
+    setHtml("ksl-liste", "<table><tbody>" + d.map((x) => "<tr><td>" + rozet(x) + "</td><td>" + esc(x.ad) + "</td>"
+        + "<td>" + hb(x.boyut) + "</td>"
+        + '<td class="small">' + kslNeden(x) + "</td></tr>").join("")
+        + "</tbody></table>");
+}
 let KAP = null;
 let kapAnahtar = "";
 /** Kaynak klasoru olcup secilen hesabin kotasina gore projeksiyon gosterir.
@@ -8047,6 +8424,10 @@ function setSrc(path) {
     setVal("e-src", path);
     markDirty();
     void kaynakAnaliz();
+    // Klasor degisti: eski klasorun listesi ekranda kalirsa yanlis klasoru okuruz.
+    setHtml("ksl-liste", "");
+    setTxt("ksl-ozet", "");
+    el("ksl-yenile").style.display = "none";
 }
 async function openBrowser() {
     // Mevcut yoldan basla; yoksa ust klasorunden. Kullanici yazdigi yolu
@@ -8702,6 +9083,12 @@ function planMenusu(kap) {
         { baslik: true, etiket: p.name },
         { simge: "▶", etiket: "Yedeklemeyi başlat", pasif: p.running,
             ipucu: p.running ? "bu plan zaten çalışıyor" : "", is: () => act("backup", p.id) },
+        // "Planı duraklat" yalnizca ZAMANLAYICIYI kapatir; suren yedegi durdurmaz.
+        // Ikisi ayri islerdir ve menude ayri durmalidir.
+        { simge: "⏹", etiket: "Yedeklemeyi durdur", pasif: !p.running,
+            ipucu: p.running ? "rclone sonlandırılır, hiçbir yedek silinmez"
+                : "şu an çalışan bir yedek yok",
+            is: () => planDurdur(p.id) },
         { simge: p.enabled ? "⏸" : "✅", etiket: p.enabled ? "Planı duraklat" : "Planı etkinleştir",
             ipucu: p.enabled ? "zamanlama durur, dosyalara dokunulmaz" : "",
             is: () => planDurumDegistir(p) },
@@ -8885,6 +9272,8 @@ const PLAN_ALANLARI = [
     { id: "e-wv", anahtar: "wait_for_vzdump", tip: "onay", adim: 0 },
     { id: "e-wvm", anahtar: "vzdump_wait_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
     { id: "e-mage", anahtar: "min_age_min", tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
+    { id: "e-cool", anahtar: "cooldown_hours", tip: "sayi", adim: 5, min: 0, max: 168,
+        mesaj: C("0-168 saat (0 = kapalı)") },
     { id: "e-skip", anahtar: "skip_patterns", tip: "liste", adim: 0 },
     { id: "e-pof", anahtar: "prune_on_failure", tip: "onay", adim: 0 },
     // 6. Aktarim

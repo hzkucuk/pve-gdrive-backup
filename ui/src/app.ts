@@ -263,8 +263,23 @@ function bwLinkKipi(): void {
 function bwAutoUygula(): void {
   const acik = chk("e-bwauto");
   el("bwauto-box").style.display = acik ? "" : "none";
-  fld("e-bw").disabled = acik;
-  fld("e-bwsch").disabled = acik;
+  kilitle("e-bw", acik); kilitle("e-bwsch", acik);
+  // Kilidin gorunur bir karsiligi olmali. Once yoktu: alan normal gorunuyor ama
+  // yaziyi sessizce reddediyordu, kullanici arayuz bozuldu saniyordu.
+  el("bw-kilit").style.display = acik ? "" : "none";
+  // On ayar butonlari kilitli alana deger yaziyordu: tikliyorsun, hicbir sey
+  // olmuyor gibi gorunuyor. Alanla birlikte kapanirlar.
+  Array.prototype.slice.call(el("bwsch-onayar").querySelectorAll("button"))
+    .forEach((b: HTMLButtonElement) => { b.disabled = acik; });
+}
+
+/** Bir alani kilitler ve nedenini alanin uzerine yazar.
+ *  Kilit uc kanaldan da duyulur: gorunum (CSS :disabled), imlec ve ipucu. */
+function kilitle(id: string, kilit: boolean, neden?: string): void {
+  const f = fld(id);
+  f.disabled = kilit;
+  if (kilit) f.title = neden || C("Otomatik mod açıkken bu alan kullanılmaz.");
+  else f.removeAttribute("title");
 }
 
 /** Kullanici kutuyu tikladiginda. Onceden bu tek fonksiyon vardi ve openEditor
@@ -425,7 +440,9 @@ function planCard(p: Plan): string {
     + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
     + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
     + '<div class="pbtns" onclick="event.stopPropagation()">'
-    + "<button class=\"sm primary\" onclick=\"act('backup','" + p.id + "')\"" + (p.running ? " disabled" : "") + ">▶ Yedekle</button>"
+    + (p.running
+      ? "<button class=\"sm tehlike\" onclick=\"planDurdur('" + p.id + "')\">⏹ Durdur</button>"
+      : "<button class=\"sm primary\" onclick=\"act('backup','" + p.id + "')\">▶ Yedekle</button>")
     + "<button class=\"sm\" onclick=\"act('prune','" + p.id + "')\">🧹 Retention</button>"
     + "<button class=\"sm\" onclick=\"act('purgetrash','" + p.id + "')\">🗑 Çöpü Boşalt</button>"
     + "<button class=\"sm\" onclick=\"act('report','" + p.id + "')\">📊 Rapor</button>"
@@ -664,6 +681,18 @@ async function act(d: string, pid: string): Promise<void> {
   } catch { flash("hata", false); }
   if (!akisCanli) window.setTimeout(() => void refresh(), 900);
 }
+/** Calisan yedegi durdurur. Onay ister: yarim kalan yukleme kullaniciya
+ *  soylenmeli, ama korkutmaya gerek yok -- hicbir yedek SILINMEZ. */
+async function planDurdur(pid: string): Promise<void> {
+  if (!await onay(
+    C("Çalışan yedekleme durdurulsun mu?") + "\n\n"
+    + C("• rclone sonlandırılır, yarım kalan dosya Drive'da tamamlanmaz.") + "\n"
+    + C("• Hiçbir eski yedek SİLİNMEZ — retention bu turda hiç çalışmaz.") + "\n"
+    + C("• Bir sonraki planlı saatte normal şekilde yeniden denenir."),
+    C("Yedeklemeyi durdur"), C("Durdur"), C("Vazgeç"))) return;
+  await act("stop", pid);
+}
+
 async function delPlan(pid: string): Promise<void> {
   if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))) return;
   const j = await api("/api/plan/delete?plan=" + encodeURIComponent(pid), { method: "POST" });
@@ -695,7 +724,7 @@ const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktar�
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI: string[][] = [
   ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
-  ["e-runat", "e-wvm", "e-mage"],
+  ["e-runat", "e-wvm", "e-mage", "e-cool"],
   ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
   ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
 ];
@@ -780,6 +809,10 @@ function wOzet(): void {
     : C("yedeklenmiyor"), !chk("e-hc"));
   h += wSatir(C("Çöp süresi"), val("e-td") + C(" gün sonra kalıcı silinir"));
   h += wSatir("Program", (wd.length ? wd.join(",") : C("her gün")) + C(" saat ") + val("e-runat"));
+  const cool = Number(val("e-cool")) || 0;
+  h += wSatir(C("Soğuma"), cool
+    ? cool + C(" saat içinde başarılı koşu olduysa o günkü slot atlanır")
+    : C("kapalı — plan saati gelince her durumda çalışır"));
   h += wSatir(C("vzdump koruması"), chk("e-wv")
     ? C("bekle, en fazla ") + val("e-wvm") + C(" dk") : C("beklemeden çalış"), !chk("e-wv"));
   h += wSatir("Hatada retention", chk("e-pof")
@@ -1078,6 +1111,73 @@ async function savePlan(): Promise<void> {
   }
 }
 
+/* ---------- kaynak klasordeki dosyalar ---------- */
+interface KaynakDosya {
+  ad: string; boyut: number; mtime: number; yas_dk: number;
+  durum: string; neden: string; desen: string; min_age: number;
+  dump: boolean; konf: boolean;
+}
+interface KaynakListe {
+  ok: boolean; hata?: string; toplam_dosya?: number; toplam_boyut?: number;
+  yuklenecek?: number; saklama_disi?: number; limit?: number; kirpildi?: boolean;
+  dosyalar?: KaynakDosya[];
+}
+
+/** Kaynak klasorde GERCEKTE ne var. Sayilar degil dosyalar: "yedeklendi mi"
+ *  sorusu dosya duzeyinde sorulur, ozet ortalamalar bunu gizler. */
+async function kaynakListeYukle(yenile?: boolean): Promise<void> {
+  const src = val("e-src").trim();
+  if (!src) { setTxt("ksl-ozet", C("Önce kaynak klasörü seç.")); return; }
+  setTxt("ksl-ozet", C("okunuyor…"));
+  if (!yenile) setHtml("ksl-liste", "");
+  // Plan henuz kaydedilmemis olabilir: formdaki guncel degerler sorguya eklenir,
+  // boyle olmazsa liste kaydedilmis eski desene gore etiketlenirdi.
+  const q = "/api/kaynak-dosyalar?src=" + encodeURIComponent(src)
+    + "&plan=" + encodeURIComponent(sel || "")
+    + "&skip=" + encodeURIComponent(val("e-skip"))
+    + "&mage=" + encodeURIComponent(val("e-mage"));
+  let j: KaynakListe;
+  try { j = await api<KaynakListe>(q); }
+  catch { setTxt("ksl-ozet", C("klasör okunamadı")); return; }
+  el("ksl-yenile").style.display = "";
+  if (!j.ok) {
+    setHtml("ksl-ozet", '<span class="kap-hata">⚠ ' + esc(j.hata || C("okunamadı")) + "</span>");
+    setHtml("ksl-liste", ""); return;
+  }
+  const d = j.dosyalar || [];
+  const ozet = [
+    (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
+    (j.yuklenecek || 0) + C(" tanesi yüklenir"),
+  ];
+  if (j.saklama_disi) ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
+  setHtml("ksl-ozet", ozet.join(" · ")
+    + (j.kirpildi ? '<br><span class="uyari-metin">' + C("liste ilk ")
+      + (j.limit || 0) + C(" satırla sınırlandı (kaynak_liste_limit)") + "</span>" : ""));
+  if (!d.length) { setHtml("ksl-liste", '<div class="hint">' + C("klasörde dosya yok") + "</div>"); return; }
+  const rozet = (x: KaynakDosya): string => {
+    if (x.durum === "atlanir") return '<span class="ksl-r ksl-atla">' + C("atlanır") + "</span>";
+    if (x.durum === "bekler") return '<span class="ksl-r ksl-bekle">' + C("bekler") + "</span>";
+    if (x.durum === "belirsiz") return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
+    if (!x.dump && !x.konf) return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
+    return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
+  };
+  // Aciklama cumlesi burada kurulur: arka uc ASCII veri gonderir, arayuz metni
+  // kendi dilinde yazar. Boylece log ozeti ile ekran metni birbirine bagli olmaz.
+  const kslNeden = (x: KaynakDosya): string => {
+    if (x.durum === "atlanir") return C("desen: ") + "<code>" + esc(x.desen) + "</code>";
+    if (x.durum === "belirsiz") return C("desen elle değerlendirilmeli: ") + "<code>" + esc(x.desen) + "</code>";
+    if (x.durum === "bekler") return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
+    if (x.dump) return C("saklama: gün kuralı işler");
+    if (x.konf) return C("saklama: yapılandırma kuralı işler");
+    return "<b>" + C("yüklenir ama hiç silinmez") + "</b> — " + C("ad kalıbına uymuyor");
+  };
+  setHtml("ksl-liste", "<table><tbody>" + d.map((x) =>
+    "<tr><td>" + rozet(x) + "</td><td>" + esc(x.ad) + "</td>"
+    + "<td>" + hb(x.boyut) + "</td>"
+    + '<td class="small">' + kslNeden(x) + "</td></tr>").join("")
+    + "</tbody></table>");
+}
+
 /* ---------- kapasite planlayici ---------- */
 interface Analiz {
   ok: boolean; hata?: string; dosya?: number; set_sayisi?: number;
@@ -1283,6 +1383,9 @@ async function depoDuzelt(ad: string, eylem: string): Promise<void> {
 }
 function setSrc(path: string): void {
   setVal("e-src", path); markDirty(); void kaynakAnaliz();
+  // Klasor degisti: eski klasorun listesi ekranda kalirsa yanlis klasoru okuruz.
+  setHtml("ksl-liste", ""); setTxt("ksl-ozet", "");
+  el("ksl-yenile").style.display = "none";
 }
 async function openBrowser(): Promise<void> {
   // Mevcut yoldan basla; yoksa ust klasorunden. Kullanici yazdigi yolu
@@ -1827,6 +1930,12 @@ function planMenusu(kap: HTMLElement): MenuOge[] {
     { baslik: true, etiket: p.name },
     { simge: "▶", etiket: "Yedeklemeyi başlat", pasif: p.running,
       ipucu: p.running ? "bu plan zaten çalışıyor" : "", is: () => act("backup", p.id) },
+    // "Planı duraklat" yalnizca ZAMANLAYICIYI kapatir; suren yedegi durdurmaz.
+    // Ikisi ayri islerdir ve menude ayri durmalidir.
+    { simge: "⏹", etiket: "Yedeklemeyi durdur", pasif: !p.running,
+      ipucu: p.running ? "rclone sonlandırılır, hiçbir yedek silinmez"
+                       : "şu an çalışan bir yedek yok",
+      is: () => planDurdur(p.id) },
     { simge: p.enabled ? "⏸" : "✅", etiket: p.enabled ? "Planı duraklat" : "Planı etkinleştir",
       ipucu: p.enabled ? "zamanlama durur, dosyalara dokunulmaz" : "",
       is: () => planDurumDegistir(p) },

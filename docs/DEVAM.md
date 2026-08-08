@@ -1,18 +1,23 @@
-# Kaldığımız yer — 2026-08-08
+# Kaldığımız yer — 2026-08-09
 
 Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o günkü durum**.
 
 ## Hemen bakılacaklar
 
-1. **İlk gerçek yükleme** — `192.168.2.252` üzerinde 2026-08-09 03:00'te 215 GB
-   yükleme başlıyordu. Ölçülen hıza göre ~8 saat (≈10:55'te biter). Sonucu
-   mail ve Telegram'a düşer. Sabah kontrol et:
+1. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
+   2026-08-09 00:41'de ürün sahibinin isteğiyle kesildi (29,8 GB / 215,9 GB,
+   %14). rclone'a SIGTERM verildi; `prune_on_failure=False` olduğu önceden
+   okunmuştu, **hiçbir yedek silinmedi** (log: `retention ATLANDI`). Hata maili
+   ve Telegram bildirimi gitti — durdurma eski kodda `HATA` sayılıyordu.
+
+   Plan `gunluk` şu an `enabled=False`. **Yeniden başlatma kararı ürün
+   sahibinin.** Etkinleştirilirse gece 03:00'te başlar. Baştan başlamaz:
+   tamamlanan 3 dosya Drive'da duruyor ve rclone onları `Unchanged skipping`
+   diyip geçiyor (ölçüldü); yarıda kalan 2 dosya yeniden yüklenir.
    ```bash
    ssh -i ~/.ssh/pve_gdrive_key root@192.168.2.252 \
      '/usr/local/bin/pve-gdrive plans; tail -30 /var/log/pve-gdrive.log'
    ```
-   Bakılacak: yükleme bitti mi, retention çalıştı mı, kapasite öğrenildi mi
-   (`pve-gdrive` logunda "olculen yukleme kapasitesi").
 
 2. **İkinci sunucu yarım** — `10.0.0.253`. Yapılmayanlar:
    - Google hesabı bağlanmadı (tünel: `ssh -N -L 53682:127.0.0.1:53682 root@10.0.0.253`)
@@ -53,6 +58,34 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
   arayüzden güncelleme yapılıp yapılmadığı bilinmiyor. Yapıldıysa sonucu sor:
   bu, güncelleme yolunun ilk saha sınavı olacaktı.
 
+## Açık kusur (küçük)
+
+- Durdurulan koşunun özeti `yuklenen:0` diyor, oysa rclone 3 dosyayı
+  tamamlamıştı. Sayaç kopyalama başarısız olunca sıfırlanıyor
+  (`_asama_kopyala` ok=False iken 0 döndürüyor). Kozmetik ama yanıltıcı:
+  durdurulan koşuda "kaç dosya kurtuldu" bilgisi kayboluyor.
+
+## 2026-08-09 yapılanlar (1.8.0)
+
+- **⏹ Yedeklemeyi durdur.** Önceden yalnızca "Planı duraklat" vardı ve o
+  sadece zamanlayıcıyı kapatıyordu; süren yüklemeyi kesmenin hiçbir yolu yoktu.
+  Sinyal değil dosya bayrağı (manuel koşu ayrı süreçte, zamanlanmış koşu
+  servisin kendi sürecinde — `killpg` servisi de öldürürdü).
+  **Durdurulan koşuda `prune_on_failure` açık olsa bile silme yapılmaz.**
+- **Soğuma süresi** `cooldown_hours`, varsayılan 6 saat. Slot atlanır,
+  ertelenmez (erteleme gündüz kendiliğinden başlatırdı).
+- **Kaynak klasördeki dosyalar listelenebiliyor.** Ortaya çıkardığı gerçek:
+  `dump_regex`'e uymayan dosya yüklenir ama `do_prune` onu hiç görmez —
+  Drive'da sonsuza kadar birikir. Listede `saklama dışı` diye işaretli.
+- **Kilitli alan artık kilitli görünüyor.** Stil sayfasında tek bir `:disabled`
+  kuralı yoktu; aynı kökten 3 kusur daha vardı (▶ Yedekle, ↑ taşı, çizelge
+  ön ayar butonları).
+
+Ölçümler: Drive'a karşı gerçek durdurma testi yapıldı — %2 akmışken kesildi,
+**Drive'da yarım dosya kalmadı**, test klasörü silindi (Drive çöpüne
+dokunulmadı). Tepki = `(0…durdur_kontrol_sn) + ~0,5 sn`. Görsel doğrulama
+Chrome headless ile önce/sonra alındı. **112/112 test geçiyor.**
+
 ## Bugün yapılanlar (1.3.1 → 1.7.4, 12 sürüm)
 
 Canlı olay akışı (SSE), sağ tık menüleri, F5 taslağı, host yapılandırma yedeği,
@@ -68,3 +101,8 @@ Ayrıntı: `CHANGELOG.md`. **100/100 test geçiyor.**
 - `state.json`'daki `last_run`'ı elle boşaltma → zamanlayıcı yedeği o an başlatır
 - "Test ettim" demeden önce **kullanıcının gireceği yolu** çalıştır
 - Oturum sonunda `tools/transcript-yedekle.sh`
+- Canlıda süreç öldürmeden önce `prune_on_failure`'ı **oku** — açıksa silme yapar
+- Ölçüm aracını da sına: `Ortam` PATH'e sahte rclone koyar, gerçek ölçüm için
+  tam yolla gerçek ikili çağrılmalı; yerel diskte rclone sunucu tarafı klonlama
+  yapar, `--disable Copy` olmadan bwlimit/kesinti ölçülemez
+- `rclone cleanup` **tüm** Drive çöpünü boşaltır — test temizliğinde kullanma

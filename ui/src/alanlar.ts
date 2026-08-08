@@ -44,6 +44,8 @@ const PLAN_ALANLARI: Alan[] = [
   { id: "e-wv",    anahtar: "wait_for_vzdump",  tip: "onay", adim: 0 },
   { id: "e-wvm",   anahtar: "vzdump_wait_min",  tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
   { id: "e-mage",  anahtar: "min_age_min",      tip: "sayi", adim: 5, min: 0, max: 1440, mesaj: C("0-1440 dakika") },
+  { id: "e-cool",  anahtar: "cooldown_hours",   tip: "sayi", adim: 5, min: 0, max: 168,
+    mesaj: C("0-168 saat (0 = kapalı)") },
   { id: "e-skip",  anahtar: "skip_patterns",    tip: "liste", adim: 0 },
   { id: "e-pof",   anahtar: "prune_on_failure", tip: "onay", adim: 0 },
   // 6. Aktarim
