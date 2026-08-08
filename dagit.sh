@@ -50,6 +50,16 @@ kisa="$(dirname "$HEDEF")/pve-gdrive"
 
 systemctl restart pve-gdrive-ui
 sleep 2
+
+# Butunluk referansini yenile. Yenilenmezse arayuz her dagitimdan sonra
+# "Calisan betik degismis" diye alarm veriyordu -- ve dagitim yapan biz
+# oldugumuz icin bu YANLIS alarm. Yanlis alarm gercek alarmi ise yaramaz
+# hale getirir: kullanici uyariyi gormeye alisir ve gercekten degistiginde
+# de gormezden gelir. Arayuzden guncelleme yolu bunu zaten yapiyordu
+# (guncelleme sonrasi butunluk_sabitle), dagitim yolu yapmiyordu.
+"$HEDEF" butunluk --sabitle >/dev/null 2>&1 \
+  && echo "butunluk: referans yenilendi" \
+  || echo "butunluk: referans YENILENEMEDI - arayuzden 'Referansi yenile'" >&2
 UZAK
 
 # 2) Dogrulamayi calisan surecin actigi dosyadan yap

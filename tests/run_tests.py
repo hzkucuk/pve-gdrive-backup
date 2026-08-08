@@ -86,9 +86,13 @@ class Ortam:
 
         class Istemci:
             G = None                 # sunucunun kullandigi modul ornegi (bkz. modul())
-            def istek(_s, yol, akis=False, zaman=5):
-                r = urllib.request.Request(taban + yol,
-                                           headers={"Authorization": "Bearer test-token-123"})
+            def istek(_s, yol, akis=False, zaman=5, yontem=None, govde=None):
+                r = urllib.request.Request(
+                    taban + yol,
+                    data=(govde.encode() if isinstance(govde, str) else govde),
+                    method=yontem,
+                    headers={"Authorization": "Bearer test-token-123",
+                             "Content-Type": "application/json"})
                 return urllib.request.urlopen(r, timeout=zaman)
         # modul() her cagrida taze kopya uretiyor; sunucu ile test ayni ornegi
         # kullanmazsa OLAY nesneleri farkli olur ve olaylar bulusmaz.
@@ -138,7 +142,27 @@ class Ortam:
         self._yamalar.append((nesne, ad, getattr(nesne, ad)))
         setattr(nesne, ad, yeni)
 
+    def ana_betik(self, icerik="# betik\n", ad="betik.py"):
+        """sys.modules["__main__"] gecici bir betige baglanir; temizle() geri koyar.
+
+        Elle yapildiginda iki test bunu geri koymayi unutmustu. sys.modules
+        SUREC GENELI oldugu icin sonraki testler silinmis bir gecici dosyayi
+        okumaya calisiyor ve 'betik okunamadi' diye patliyordu -- hatanin
+        sebebi bambaska bir testte duruyordu. Geri koymak artik yapinin isi."""
+        import sys as _s
+        yol = os.path.join(self.dizin, ad)
+        if icerik is not None:
+            with open(yol, "w") as f: f.write(icerik)
+        self._eski_ana = getattr(self, "_eski_ana", _s.modules.get("__main__"))
+        class _Ana: __file__ = yol
+        _s.modules["__main__"] = _Ana
+        return yol
+
     def temizle(self):
+        if hasattr(self, "_eski_ana"):
+            import sys as _s
+            _s.modules["__main__"] = self._eski_ana
+            del self._eski_ana
         for nesne, ad, eski in reversed(getattr(self, "_yamalar", [])):
             try: setattr(nesne, ad, eski)
             except Exception: pass
@@ -844,9 +868,7 @@ def t_betik_yolu_symlink():
         open(gercek, "w").write("# gercek\n")
         bag = os.path.join(o.dizin, "kisa-ad")
         os.symlink(gercek, bag)
-
-        class SahteAna: __file__ = bag
-        G.sys.modules["__main__"] = SahteAna
+        o.ana_betik(icerik=None, ad="kisa-ad")
         esit(G.betik_yolu(), os.path.realpath(gercek),
              "sembolik baglanti cozulup gercek dosya donmeli")
     finally: o.temizle()
@@ -949,10 +971,7 @@ def t_butunluk():
     o = Ortam()
     try:
         G = o.modul()
-        sahte = os.path.join(o.dizin, "betik.py")
-        open(sahte, "w").write("# ilk hal\n")
-        class Ana: __file__ = sahte
-        G.sys.modules["__main__"] = Ana
+        sahte = o.ana_betik("# ilk hal\n")
 
         esit(G.butunluk_kontrol()[0], "referans-yok", "once referans olmamali")
         dogru(G.butunluk_sabitle("test")["ok"], "referans alinmali")
@@ -2736,6 +2755,58 @@ def t_soguma_parametrik():
         dogru("cooldown_hours" in G.HTML, "arayuz alani plan anahtarina baglanmali")
     finally: o.temizle()
 
+@test("butunluk referansi arayuzden yenilenebiliyor", "butunluk")
+def t_butunluk_arayuz():
+    """Uyari kullaniciyi SSH'a yolluyordu: ekranda 'pve-gdrive butunluk
+    --sabitle' yaziyor ama arayuzde karsiligi yoktu. Bakim islemleri arayuzde
+    durur."""
+    o = Ortam()
+    try:
+        o.plan()
+        ist = o.sunucu(); G = ist.G
+        # Once referans yok
+        d, m = G.butunluk_kontrol()
+        # Arayuz ucu referansi alsin
+        r = json.load(ist.istek("/api/butunluk/sabitle", yontem="POST"))
+        dogru(r["ok"], f"uc basarili donmeli: {r}")
+        dogru(len(r.get("sha256", "")) == 64, f"sha256 donmeli: {r}")
+        d2, m2 = G.butunluk_kontrol()
+        dogru(d2 == "iyi", f"referans alindiktan sonra durum iyi olmali: {d2} / {m2}")
+        # Kim yenilemis, durum dosyasina yazilmali
+        st = G.read_state()
+        dogru("arayuz" in str(st.get("betik_sha_sebep", "")),
+              f"sebep arayuz olarak kaydedilmeli: {st.get('betik_sha_sebep')}")
+    finally: o.temizle()
+
+@test("ekranda cozumu CLI olan uyari kalmadi", "butunluk")
+def t_cli_yonlendirmesi_yok():
+    """Sinif: arayuzde bir sorun bildirilip cozumu icin terminale yollamak.
+    Bakim islemleri arayuze tasinmisti; bu uyari geride kalmisti."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru("butunlukSabitle" in G.HTML, "arayuzde yenileme eylemi olmali")
+        dogru('id="s-butunluk"' in G.HTML, "bakim bolumunde durum satiri olmali")
+        # Uyari kutusunda ham CLI komutu KALMAMALI
+        import re as _re
+        kutu = _re.search(r"butunluk === \"DEGISTI\".{0,900}", G.HTML, _re.S)
+        dogru(kutu is not None, "uyari kutusu bulunmali")
+        dogru("pve-gdrive butunluk --sabitle" not in kutu.group(0),
+              "uyari kutusu kullaniciyi CLI'a yonlendirmemeli")
+    finally: o.temizle()
+
+@test("dagitim butunluk referansini yeniler", "butunluk")
+def t_dagit_sabitler():
+    """Yanlis alarm gercek alarmi ise yaramaz hale getirir: her dagitimdan
+    sonra 'betik degismis' uyarisi cikiyordu ve degistiren bizdik."""
+    kok = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(kok, "dagit.sh"), encoding="utf-8") as f:
+        d = f.read()
+    dogru("butunluk --sabitle" in d, "dagit.sh referansi yenilemeli")
+    i_restart = d.find("systemctl restart pve-gdrive-ui")
+    i_sabit = d.find("butunluk --sabitle")
+    dogru(0 <= i_restart < i_sabit, "yenileme servis yeniden baslatildiktan SONRA olmali")
+
 # ============================ KOSUCU ============================
 def main():
     gruplar = {}
@@ -2750,14 +2821,17 @@ def main():
     # SONRAKI teste sicrar; sebebi bulmak zor olur. Her testten sonra kritik
     # global'lerin yerinde oldugunu dogrula.
     import urllib.request as _ur, smtplib as _sm, subprocess as _sp
-    NOBET = {"urlopen": _ur.urlopen, "SMTP": _sm.SMTP, "SMTP_SSL": _sm.SMTP_SSL,
-             "Popen": _sp.Popen, "run": _sp.run}
+    # sys.modules["__main__"] de nobette: iki test onu degistirip geri koymuyordu
+    # ve hata bambaska bir testte "betik okunamadi" diye ortaya cikiyordu.
+    def _simdi():
+        return {"urlopen": _ur.urlopen, "SMTP": _sm.SMTP, "SMTP_SSL": _sm.SMTP_SSL,
+                "Popen": _sp.Popen, "run": _sp.run,
+                "__main__": sys.modules.get("__main__")}
+    NOBET = _simdi()
 
     def nobet_kontrol():
-        bozuk = [ad for ad, deger in NOBET.items()
-                 if {"urlopen": _ur.urlopen, "SMTP": _sm.SMTP, "SMTP_SSL": _sm.SMTP_SSL,
-                     "Popen": _sp.Popen, "run": _sp.run}[ad] is not deger]
-        return bozuk
+        simdi = _simdi()
+        return [ad for ad, deger in NOBET.items() if simdi[ad] is not deger]
 
     for grup, testler in gruplar.items():
         print(f"\n\033[1m{grup.upper()}\033[0m")

@@ -352,7 +352,8 @@ function saglikCiz(): void {
       + '<div class="small" style="margin-top:5px">' + esc(h.butunluk_mesaj || "") + "</div>"
       + '<div class="small" style="margin-top:5px">'
       + esc(C("Güncelleme yaptıysan normaldir; referansı yenile: "))
-      + "<code>pve-gdrive butunluk --sabitle</code></div>");
+      + '<button class="sm" style="margin-top:6px" onclick="butunlukSabitle()">'
+      + C("🔒 Referansı yenile") + "</button></div>");
   }
   if (h && h.tick !== "iyi") {
     uyarilar.push('<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
@@ -1689,6 +1690,30 @@ async function ayarYukle(dosya: File): Promise<void> {
     body: JSON.stringify({ veri, kip: "ekle" }) });
   flash(j.msg || "", j.ok);
   if (j.ok) { void refresh(); renderSmtp(); }
+}
+
+/** Betik ozetini su anki dosyaya gore yeniler.
+ *  Onay ister: bu dugme uyariyi susturur, sebebini arastirmaz. */
+async function butunlukSabitle(): Promise<void> {
+  if (!await onay(
+    C("Çalışan betiğin sha256 özeti yeni referans olarak alınsın mı?") + "\n\n"
+    + C("• Sen güncellediysen (ya da dagit.sh ile dağıttıysan) doğru olan budur.") + "\n"
+    + C("• Beklenmedik bir değişiklikse bu düğme uyarıyı susturur, sebebini araştırmaz."),
+    C("Bütünlük referansı"), C("Yenile"), C("Vazgeç"))) return;
+  const j = await api("/api/butunluk/sabitle", { method: "POST" });
+  flash(j.msg || "", j.ok);
+  void butunlukDurum(); void refresh();
+}
+
+async function butunlukDurum(): Promise<void> {
+  const e = document.getElementById("s-butunluk");
+  if (!e) return;
+  try {
+    const j = await api<{ butunluk?: string; butunluk_mesaj?: string }>("/api/status");
+    const d = j.butunluk || "";
+    e.innerHTML = (d === "iyi" ? "✅ " : d === "DEGISTI" ? "🛑 " : "○ ")
+      + esc(j.butunluk_mesaj || C("durum bilinmiyor"));
+  } catch { e.textContent = C("durum okunamadı"); }
 }
 
 async function pveLinkDurum(): Promise<void> {

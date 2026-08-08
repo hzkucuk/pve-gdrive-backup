@@ -4,6 +4,29 @@ Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde
 
 ## 1.8.0 — 2026-08-09
 
+### Bütünlük uyarısı kullanıcıyı terminale yolluyordu
+
+*"Çalışan betik değişmiş"* uyarısı ekranda `pve-gdrive butunluk --sabitle`
+yazıyordu — bakım işlemleri arayüze taşınmıştı ama bu geride kalmıştı. Artık
+uyarının içinde **🔒 Referansı yenile** düğmesi var, ayrıca *Ayarlar → Bakım ve
+taşıma* altında durumuyla birlikte duruyor.
+
+Asıl kök sorun ayrıydı: `dagit.sh` dağıtımdan sonra referansı yenilemiyordu,
+yani **her dağıtım yanlış alarm üretiyordu**. Arayüzden güncelleme yolu bunu
+zaten yapıyordu, dağıtım yolu yapmıyordu. Yanlış alarm gerçek alarmı işe yaramaz
+hâle getirir — kullanıcı uyarıyı görmeye alışır. `dagit.sh` artık servis
+yeniden başladıktan sonra referansı yeniliyor.
+
+### Test sızıntısı: `sys.modules["__main__"]`
+
+İki test `__main__`'i geçici bir dosyaya bağlayıp geri koymuyordu. `sys.modules`
+süreç geneli olduğu için sonraki testler silinmiş bir dosyayı okumaya çalışıyor
+ve hata **bambaşka bir testte** ortaya çıkıyordu. Nöbetçi bunu izlemiyordu;
+artık izliyor ve `Ortam.ana_betik()` geri koymayı yapının işi hâline getiriyor.
+
+*Nasıl doğrulandı:* nöbetçiye kasıtlı sızıntı bırakan bir test verildi ve
+`surec genelinde yama birakti: __main__` diyerek düştü.
+
 ### Çalışan yedeği durdurma
 
 Sağ tık menüsünde yalnızca *"Planı duraklat"* vardı ve o sadece zamanlayıcıyı
