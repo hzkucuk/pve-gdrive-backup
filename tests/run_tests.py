@@ -9,7 +9,7 @@ pve-gdrive-backup test paketi.
 Gercek Drive'a veya gercek bir Proxmox'a dokunmaz: rclone ve pgrep sahte
 surumlerle degistirilir (tests/mock/). Her test kendi gecici dizininde calisir.
 """
-import os, sys, json, time, shutil, tempfile, subprocess, importlib.util, base64, re, urllib.request, urllib.error
+import os, re, sys, json, time, shutil, tempfile, subprocess, importlib.util, base64, urllib.request, urllib.error
 
 os.environ.setdefault("PVE_GDRIVE_QUIET", "1")   # log satirlari test ciktisini bogmasin
 KOK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,8 +58,15 @@ class Ortam:
         t = time.time() - yas_sn
         os.utime(yol, (t, t))
         return yol
-    def vzdump_seti(self, misafir, gun, uzanti="vma.zst"):
-        return self.dosya(f"vzdump-{misafir}-2026_08_{gun:02d}-03_00_00.{uzanti}")
+    def vzdump_seti(self, misafir, gun_once, uzanti="vma.zst"):
+        """gun_once gun ONCESINE ait bir set uretir.
+
+        Sabit tarih kullanmak testi kirilgan yapiyordu: gun sinirinin tam saatine
+        denk gelen bir set, testin kostugu saate gore icerde veya disarida
+        kaliyordu. Yarim gun kaydirarak sinira denk gelme ihtimali kaldirilir."""
+        from datetime import datetime, timedelta
+        t = datetime.now() - timedelta(days=gun_once, hours=12)
+        return self.dosya(f"vzdump-{misafir}-{t:%Y_%m_%d-%H_%M_%S}.{uzanti}")
     def modul(self):
         os.environ["PVE_GDRIVE_CONF"] = self.cfg_yolu
         os.environ["MOCK_DB"] = self.db
@@ -86,7 +93,7 @@ def dogru(k, mesaj=""):
 def t_retention():
     o = Ortam()
     try:
-        for g in range(1, 8):
+        for g in range(0, 7):     # bugunden 6 gun oncesine
             o.vzdump_seti("qemu-100", g); o.vzdump_seti("lxc-201", g, "tar.zst")
         p = o.plan(keep_days=3, keep_count=2)
         G = o.modul()
@@ -96,7 +103,10 @@ def t_retention():
         G.do_prune(G.get_plan("p1"))
         kalan = o.drive()
         esit(len(kalan), 6, "3 gun + 2 set tabani sonrasi kalan")
-        dogru(all("2026_08_0" + str(g) in " ".join(kalan) for g in (5, 6, 7)), "son 3 gun kalmali")
+        from datetime import datetime, timedelta
+        for g in range(0, 3):
+            t = datetime.now() - timedelta(days=g, hours=12)
+            dogru(any(f"{t:%Y_%m_%d}" in k for k in kalan), f"{g} gun oncesi kalmali")
         esit(len(o.drive(copte=True)), 8, "cope giden")
     finally: o.temizle()
 
@@ -104,7 +114,7 @@ def t_retention():
 def t_taban():
     o = Ortam()
     try:
-        for g in range(1, 6): o.vzdump_seti("qemu-100", g)
+        for g in range(0, 5): o.vzdump_seti("qemu-100", g)
         o.plan(keep_days=0, keep_count=2)
         G = o.modul()
         G.do_copy(G.get_plan("p1")); G.do_prune(G.get_plan("p1"))
@@ -116,7 +126,7 @@ def t_taban():
 def t_hatada_silme_yok():
     o = Ortam()
     try:
-        for g in range(1, 8): o.vzdump_seti("qemu-100", g)
+        for g in range(0, 7): o.vzdump_seti("qemu-100", g)
         o.plan(keep_days=3, keep_count=1)
         G = o.modul()
         G.do_run("p1", "test")
@@ -155,7 +165,7 @@ def t_retention_kurali():
 def t_cop_listeleme_hatasi():
     o = Ortam()
     try:
-        for g in range(1, 5): o.vzdump_seti("qemu-100", g)
+        for g in range(0, 4): o.vzdump_seti("qemu-100", g)
         o.plan(keep_days=1, keep_count=1, drive_trash_days=0)
         G = o.modul()
         G.do_copy(G.get_plan("p1")); G.do_prune(G.get_plan("p1"))
@@ -173,7 +183,7 @@ def t_cop_listeleme_hatasi():
 def t_cop_suresi():
     o = Ortam()
     try:
-        for g in range(1, 5): o.vzdump_seti("qemu-100", g)
+        for g in range(0, 4): o.vzdump_seti("qemu-100", g)
         o.plan(keep_days=1, keep_count=1, drive_trash_days=2)
         G = o.modul()
         G.do_copy(G.get_plan("p1")); G.do_prune(G.get_plan("p1"))
@@ -190,7 +200,7 @@ def t_cop_suresi():
 def t_vzdump_bekleme():
     o = Ortam()
     try:
-        o.vzdump_seti("qemu-100", 1)
+        o.vzdump_seti("qemu-100", 0)
         o.plan(wait_for_vzdump=True, vzdump_wait_min=0)
         G = o.modul()
         os.environ["MOCK_VZDUMP"] = "1"
@@ -204,7 +214,7 @@ def t_vzdump_bekleme():
 def t_bayat_dat():
     o = Ortam()
     try:
-        o.vzdump_seti("qemu-100", 1)
+        o.vzdump_seti("qemu-100", 0)
         o.dosya("vzdump-qemu-100-2026_08_02-03_00_00.vma.zst.dat", yas_sn=7200)
         o.plan(wait_for_vzdump=True, vzdump_wait_min=0, min_age_min=10)
         G = o.modul()
@@ -438,7 +448,7 @@ def t_state_siniri():
     o = Ortam()
     try:
         c = o.oku_cfg(); c["snapshot_max_rows"] = 5; o.yaz_cfg(c)
-        for g in range(1, 11): o.vzdump_seti("qemu-100", g)
+        for g in range(0, 10): o.vzdump_seti("qemu-100", g)
         o.plan(keep_days=999, keep_count=99)
         G = o.modul()
         G.do_copy(G.get_plan("p1"))
@@ -568,15 +578,115 @@ def t_captcha():
 def t_rapor():
     o = Ortam()
     try:
-        for g in range(1, 4): o.vzdump_seti("qemu-100", g); o.vzdump_seti("lxc-201", g, "tar.zst")
+        for g in range(0, 3): o.vzdump_seti("qemu-100", g); o.vzdump_seti("lxc-201", g, "tar.zst")
         o.plan(keep_days=99, keep_count=9, weekly_report=True)
         G = o.modul()
         G.do_copy(G.get_plan("p1"))
         G.put_pstate("p1", G.update_snapshot(G.get_plan("p1")))
         govde, uyari = G.build_report(G.get_plan("p1"))
-        for bolum in ["HAFTALIK YEDEK RAPORU", "CALISMA", "DRIVE", "MISAFIR BAZINDA", "UYARILAR"]:
+        for bolum in ["HAFTALIK YEDEK RAPORU", "CALISMA", "DRIVE", "VM/CT BAZINDA", "UYARILAR"]:
             dogru(bolum in govde, f"'{bolum}' bolumu olmali")
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
+    finally: o.temizle()
+
+@test("beni hatirla servis yeniden baslayinca yasar", "guvenlik")
+def t_hatirla_kalici():
+    o = Ortam()
+    try:
+        G = o.modul()
+        gecici = G.new_session("root", "10.0.0.5", kalici=False)
+        kalici = G.new_session("root", "10.0.0.5", kalici=True)
+        dogru(G.get_session(kalici, "10.0.0.5") is not None, "oturum acilmali")
+        G.DEPO.sifirla()                       # servis yeniden basladi
+        dogru(G.get_session(kalici, "10.0.0.5") is None, "bellek gercekten bosalmali")
+        dogru(G.DEPO.kalicilari_yukle() == 1, "yalnizca kalici oturum geri gelmeli")
+        dogru(G.get_session(kalici, "10.0.0.5") is not None, "hatirlanan oturum yasamali")
+        dogru(G.get_session(gecici, "10.0.0.5") is None, "gecici oturum yasamamali")
+        import os
+        dogru(oct(os.stat(G.oturum_dosyasi()).st_mode)[-3:] == "600", "token dosyasi 600 olmali")
+    finally: o.temizle()
+
+@test("oturum adres baglama kipleri", "guvenlik")
+def t_ip_baglama():
+    o = Ortam()
+    try:
+        G = o.modul()
+        for kip, ayni_ag, baska_ag in (("ip", False, False), ("ag", True, False), ("yok", True, True)):
+            C = G.cfg(); C["session_ip_bind"] = kip; G.save_cfg(C)
+            t = G.new_session("root", "192.168.2.10", kalici=True)
+            dogru(G.get_session(t, "192.168.2.10") is not None, f"{kip}: ayni adres gecmeli")
+            dogru((G.get_session(t, "192.168.2.77") is not None) == ayni_ag,
+                  f"{kip}: ayni ag beklenen sonucu vermeli")
+            dogru((G.get_session(t, "10.9.9.9") is not None) == baska_ag,
+                  f"{kip}: baska ag beklenen sonucu vermeli")
+        C = G.cfg(); C["session_ip_bind"] = "yok"; G.save_cfg(C)
+        t = G.new_session("root", "192.168.2.10", kalici=False)
+        dogru(G.get_session(t, "10.9.9.9") is None,
+              "kalici olmayan oturum kip ne olursa olsun adrese bagli kalmali")
+    finally: o.temizle()
+
+@test("Rapor butonu sunucuda karsilik bulur", "rapor")
+def t_rapor_eylemi():
+    o = Ortam()
+    try:
+        o.plan(weekly_report=True, mail_to="")
+        G = o.modul()
+        c = G.run_action("report", "p1")
+        dogru(c["msg"] != "bilinmeyen islem", "'report' tanimli olmali")
+        dogru(not c["ok"] and "alici" in c["msg"], "alici yoksa net sebep donmeli")
+        dogru(not G.run_action("report", "yok-boyle-plan")["ok"], "olmayan plan reddedilmeli")
+        o.plan(weekly_report=False, mail_to="a@b.c")
+        dogru("kapali" in G.run_action("report", "p1")["msg"], "rapor kapaliysa soylenmeli")
+    finally: o.temizle()
+
+@test("html mail Outlook uyumlu ve kacisli uretilir", "rapor")
+def t_html_mail():
+    o = Ortam()
+    try:
+        G = o.modul()
+        govde = ("[OK] Test <plan> - basarili\n" + "=" * 40 + "\n\nOZET\n"
+                 "  Zaman        : 2026-08-09 03:47:12\n"
+                 "  Hedef        : gdrive:proxmox-yedek\n"
+                 "  2026-08-09 03:12  vm-100     48.1 GiB  vzdump-qemu-100.vma.zst\n\n"
+                 "UYARILAR\n  ! Kota %91.0 - esik %90 asildi.\n")
+        h = G.mail_html(govde, "basarili", "konu")
+        dogru(h.startswith("<!DOCTYPE html>"), "doctype olmali")
+        dogru("<table" in h and "role=\"presentation\"" in h, "tablo tabanli olmali")
+        dogru("flex" not in h and "grid-template" not in h, "Outlook flex/grid anlamaz")
+        dogru("[if mso]" in h, "mso kosullu blogu olmali")
+        dogru("&lt;plan&gt;" in h, "baslik HTML-kacisli olmali")
+        dogru(h.count("<style") <= 1, "stil satir ici olmali")
+        dogru("OZET" in h and "UYARILAR" in h, "bolumler tasinmali")
+        dogru("Kota %91.0" in h, "uyari metni tasinmali")
+        dogru("gdrive:proxmox-yedek" in h, "iki nokta iceren deger bozulmamali")
+        for d, renk in (("HATA", "#b3261e"), ("atlandi", "#8a5a00")):
+            dogru(renk in G.mail_html(govde, d, "k"), f"{d} rengi kullanilmali")
+    finally: o.temizle()
+
+@test("html mail duz metin alternatifi ile birlikte gider", "rapor")
+def t_mail_multipart():
+    o = Ortam()
+    try:
+        G = o.modul()
+        yakalanan = {}
+        class SahteSMTP:
+            def __init__(self, *a, **k): pass
+            def starttls(self): pass
+            def login(self, *a): pass
+            def send_message(self, msg): yakalanan["m"] = msg
+            def quit(self): pass
+        G.smtplib.SMTP = SahteSMTP
+        C = G.cfg()
+        C["smtp_profiles"] = [{"id": "s1", "name": "t", "host": "h", "port": 25,
+                               "security": "none", "user": "", "pass": "",
+                               "from": "a@b.c"}]
+        G.save_cfg(C)
+        dogru(G.send_mail("x@y.z", "konu", "BASLIK\n\nOZET\n  A : 1\n", "s1"), "mail gitmeli")
+        m = yakalanan["m"]
+        dogru(m.is_multipart(), "multipart olmali")
+        tipler = [x.get_content_type() for x in m.walk()]
+        dogru("text/plain" in tipler, "duz metin parcasi olmali")
+        dogru("text/html" in tipler, "html parcasi olmali")
     finally: o.temizle()
 
 @test("ileri tarihli yedek negatif yas gostermez", "rapor")
@@ -597,7 +707,7 @@ def t_negatif_yas():
 def t_calisma_maili():
     o = Ortam()
     try:
-        o.vzdump_seti("qemu-100", 1)
+        o.vzdump_seti("qemu-100", 0)
         o.plan()
         G = o.modul()
         G.do_copy(G.get_plan("p1"))
@@ -629,7 +739,7 @@ def t_mail_ceviri():
     o = Ortam()
     try:
         c = o.oku_cfg(); c["dil"] = "en"; o.yaz_cfg(c)
-        o.vzdump_seti("qemu-100", 1)
+        o.vzdump_seti("qemu-100", 0)
         o.plan(); G = o.modul()
         G.do_copy(G.get_plan("p1"))
         snap = G.update_snapshot(G.get_plan("p1"))
@@ -729,6 +839,62 @@ def t_bundle():
         for parca in ["wAdim", "w-ozet", "hesap-ekle-panel", "progBox", "bwAutoToggle"]:
             dogru(parca in G.HTML, f"'{parca}' gomulu arayuzde bulunmali (npm run build gerekebilir)")
         dogru("captcha" in G.LOGIN_HTML, "login sayfasi captcha icermeli")
+    finally: o.temizle()
+
+@test("ceviri cagrisi HTML'e sizmamis", "arayuz")
+def t_ceviri_kacagi():
+    """Toplu kelime degistirme bir donem C(...) cagrilarini metnin icine yazdi;
+    arayuzde ekrana 'C(3 gun...' diye basiliyordu. Bir daha sessizce donmesin."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        for desen, aciklama in (
+            (r'>C\(', "HTML metninin icinde C( kalmis"),
+            (r'title=C\(', "tirnaksiz title=C( ozniteligi"),
+            (r'\bvC\(', "surum etiketine C( yapismis"),
+            (r"^\s*\+ '\)<", "basibos kapanis parantezi ile baslayan HTML parcasi"),
+        ):
+            bulgu = re.findall(desen, G.HTML, re.M)
+            dogru(not bulgu, f"{aciklama}: {bulgu[:3]}")
+        # Ekrana basilan metinde ham fonksiyon cagrisi gorunmemeli
+        for kotu in ["C(' + p.keep_days", '">C(', "vC('"]:
+            dogru(kotu not in G.HTML, f"'{kotu}' arayuzde kalmamali")
+    finally: o.temizle()
+
+@test("sag tik menusu sistemi gomulu", "arayuz")
+def t_sag_tik():
+    o = Ortam()
+    try:
+        G = o.modul()
+        for parca in ["menuKur", "sagTik", "ctx-oge", "planMenusu", "hesapMenusu",
+                      "smtpMenusu", "logMenusu", "panoyaYaz", "dosyaIndir"]:
+            dogru(parca in G.HTML, f"'{parca}' gomulu arayuzde bulunmali")
+        for sec in ["data-plan", "data-hesap", "data-smtp"]:
+            dogru(sec in G.HTML, f"'{sec}' menu hedefi isaretlenmeli")
+        dogru("contextmenu" in G.HTML, "contextmenu dinleyicisi olmali")
+        dogru("touchstart" in G.HTML, "dokunmatik uzun basma desteklenmeli")
+    finally: o.temizle()
+
+@test("F5 taslagi ve hata odaklama gomulu", "arayuz")
+def t_f5_taslak():
+    o = Ortam()
+    try:
+        G = o.modul()
+        for parca in ["beforeunload", "taslakPlanla", "taslakSor", "taslakSil",
+                      "hataOdakla", "ilkHataAlani"]:
+            dogru(parca in G.HTML, f"'{parca}' gomulu arayuzde bulunmali")
+        dogru('"password"' in G.HTML, "taslak sifre alanlarini disarida birakmali")
+    finally: o.temizle()
+
+@test("saklama ipuclari sabit gun sayisi icermez", "arayuz")
+def t_saklama_ipucu():
+    """Alanda 3 yazarken ipucu '14 gun' diyordu; metin artik degerden turetiliyor."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru("14 gün + günlük yedek" not in G.HTML, "sabit 14 gun ornegi kalmamali")
+        for parca in ["eg-kd", "eg-kc", "eg-td", "saklamaIpucu"]:
+            dogru(parca in G.HTML, f"'{parca}' bulunmali")
     finally: o.temizle()
 
 # ============================ KOSUCU ============================

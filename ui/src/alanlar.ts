@@ -117,6 +117,7 @@ function alanlariTopla(): Record<string, unknown> {
 
 /** Tabloya gore dogrular. adim verilirse yalnizca o adimin alanlari kontrol edilir. */
 function alanlariDogrula(adim?: number): boolean {
+  hataTuruBaslat();
   let ok = true;
   for (const a of PLAN_ALANLARI) {
     if (!document.getElementById(a.id)) continue;

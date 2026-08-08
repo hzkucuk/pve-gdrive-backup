@@ -43,6 +43,8 @@ GLOBAL_DEFAULTS = {
     # --- oturum ve giris guvenligi ---
     "remember_enabled": True,     # giris ekraninda "beni hatirla" secenegi
     "remember_days": 30,          # hatirlanan oturumun omru (gun)
+    # hatirlanan oturum adrese nasil baglansin: ip | ag | yok (bkz. ayni_kaynak)
+    "session_ip_bind": "ip",
     "session_timeout_min": 120,   # hareketsizlik suresi
     "session_absolute_h": 24,     # oturumun azami omru
     "login_max_attempts": 5,      # bu kadar hatali denemeden sonra kilit
@@ -323,6 +325,7 @@ EN_METIN = {
     "OZET": "SUMMARY", "YAPILANDIRMA": "CONFIGURATION", "DRIVE DURUMU": "DRIVE STATUS",
     "EN YENI YEDEKLER": "NEWEST BACKUPS", "COP KUTUSUNDA BEKLEYEN": "WAITING IN TRASH",
     "VM/CT BAZINDA SON YEDEK": "LAST BACKUP PER VM/CT", "UYARILAR": "WARNINGS",
+  "Bu mail otomatik olarak gonderildi.": "This message was sent automatically.",
     "HAFTALIK YEDEK RAPORU": "WEEKLY BACKUP REPORT", "CALISMA": "RUNS", "DRIVE": "DRIVE",
     "Zaman": "Time", "Tetikleyen": "Triggered by", "Sure": "Duration",
     "Yuklenen": "Uploaded", "Cope tasinan": "Moved to trash",
@@ -558,10 +561,24 @@ def parse_stats(line):
             "eta": (eta or "").strip()}
 
 # ---------- RCLONE ----------
+RCLONE_CONF = os.environ.get("RCLONE_CONFIG") or "/var/lib/pve-gdrive/rclone.conf"
+
+def rclone_ortam():
+    """rclone her zaman AYNI yapilandirmayi gorsun.
+
+    Servis birimi ProtectHome kullandigi icin /root altindaki varsayilan config
+    servise gorunmuyordu: hesaplar 'yok' saniliyor, yeni hesap gecici bir ad
+    alanina yazilip kayboluyordu. Config yolu artik acikca verilir."""
+    ort = dict(os.environ)
+    if os.path.exists(RCLONE_CONF) or os.environ.get("RCLONE_CONFIG"):
+        ort["RCLONE_CONFIG"] = RCLONE_CONF
+    return ort
+
 def rclone(args, timeout=None):
     """Kisa ciktili komutlar icin (lsjson, about, delete). Ciktiyi tam yakalar."""
     try:
-        r = subprocess.run(["rclone"] + args, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(["rclone"] + args, capture_output=True, text=True,
+                           timeout=timeout, env=rclone_ortam())
         return r.returncode, r.stdout, r.stderr
     except FileNotFoundError: return 127, "", "rclone bulunamadi (apt install rclone)"
     except subprocess.TimeoutExpired: return 124, "", "zaman asimi"
@@ -592,7 +609,8 @@ def rclone_stream(args, timeout=None, on_line=None, onek=None):
     n = max(1, int(cfg().get("rclone_tail_lines") or 40))
     try:
         pr = subprocess.Popen(list(onek or []) + ["rclone"] + args, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+                              stderr=subprocess.STDOUT, text=True, bufsize=1,
+                              env=rclone_ortam())
     except FileNotFoundError:
         return 127, ["rclone bulunamadi (apt install rclone)"]
     buf = deque(maxlen=n)
@@ -970,7 +988,7 @@ def build_report(p):
     try: gs = guest_summary(p)
     except Exception as e: yut("build_report", e)
     misafir_satirlari, eski = _bolum_misafirler(p, gs)
-    L += ["MISAFIR BAZINDA SON YEDEK"] + misafir_satirlari
+    L += ["VM/CT BAZINDA SON YEDEK"] + misafir_satirlari
     for g in eski:
         uyari.append(f"{g} icin en yeni yedek saklama suresinden eski - yedegi aliniyor mu?")
     if gs is not None:
@@ -1015,7 +1033,8 @@ def send_report(p, trigger="zamanlanmis"):
     konu = (f"[Proxmox Backup] Weekly report - {p['name']}" if not dil_tr()
             else f"[Proxmox Yedek] Haftalik rapor - {p['name']}")
     konu += (f" ({n} " + ("warning" if not dil_tr() else "uyari") + ")") if n else ""
-    ok = send_mail(to, konu, metni_cevir(body), p.get("smtp_profile"))
+    ok = send_mail(to, konu, metni_cevir(body), p.get("smtp_profile"),
+                   durum="HATA" if n else "basarili")
     if ok:
         put_pstate(p["id"], {"last_report": now_str(), "last_report_warn": n})
         log(f"haftalik rapor gonderildi ({n} uyari) -> {to}", p["id"])
@@ -1407,7 +1426,119 @@ def get_smtp(pid=None, c=None):
         log(f"UYARI: '{pid}' smtp profili yok, ilk profil kullaniliyor")
     return ps[0]
 
-def send_mail(to, subject, body, profile=None):
+# ---------- HTML MAIL SABLONU ----------
+# Outlook (Word motoru) flexbox/grid/float bilmez: her sey tablo + satir ici stil.
+# Duz metin govde kaynak olarak kalir, HTML ondan uretilir -> tek yerde bakim.
+MAIL_RENK = {
+    "basarili": ("#0f7b4f", "#e6f4ec", "#0f7b4f"),
+    "HATA":     ("#b3261e", "#fdeceb", "#b3261e"),
+    "atlandi":  ("#8a5a00", "#fdf3e0", "#8a5a00"),
+    "_":        ("#1b4d7a", "#e8f0f8", "#1b4d7a"),
+}
+MAIL_YAZI = ("-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif")
+MAIL_MONO = ("'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace")
+RE_MAIL_ETIKET = re.compile(r"^[A-Za-z\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc]"
+                            r"[A-Za-z\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc0-9 ./_()%-]*$")
+
+def _mail_coz(satir):
+    """Bir metin satirini (tip, sol, sag) olarak siniflar. HTML uretimi buna gore dallanir."""
+    if not satir.strip(): return ("bosluk", "", "")
+    govde = satir.lstrip(); girinti = len(satir) - len(govde); cikti = govde.rstrip()
+    if len(set(cikti)) == 1 and cikti[0] in "=-_" and len(cikti) > 8: return ("cizgi", "", "")
+    if cikti.startswith("! "): return ("uyari", cikti[2:], "")
+    if ":" in cikti:
+        anahtar, _, deger = cikti.partition(":")
+        if RE_MAIL_ETIKET.match(anahtar.strip()):
+            return ("satir", anahtar.strip(), deger.strip())
+    if girinti == 0 and cikti == cikti.upper() and len(cikti) > 2: return ("baslik", cikti, "")
+    return ("mono" if girinti else "metin", cikti, "")
+
+def _mail_kutu(ic, renk):
+    """Bolum kartlari. Outlook yuvarlak kose bilmez ama border-radius'u yok sayip devam eder."""
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"'
+            ' style="border-collapse:collapse;margin:0 0 14px 0;background:#ffffff;'
+            f'border:1px solid #e2e8f0;border-left:3px solid {renk};border-radius:4px">'
+            f"<tr><td style=\"padding:14px 18px\">{ic}</td></tr></table>")
+
+def mail_html(govde, durum=None, konu=""):
+    """Duz metin mail govdesini Outlook dostu HTML'e cevirir."""
+    E = _html.escape
+    ana, arka, kenar = MAIL_RENK.get(durum or "_", MAIL_RENK["_"])
+    satirlar = govde.split("\n")
+    baslik = satirlar[0].strip() if satirlar else konu
+    for onek in ("[OK] ", "[HATA] ", "[ATLANDI] ", "[?] "):
+        if baslik.startswith(onek): baslik = baslik[len(onek):]
+
+    parcalar, tampon, bolum_adi = [], [], ""
+    def bolumu_kapat():
+        if not tampon: return
+        ic = ""
+        if bolum_adi:
+            ic += (f'<div style="font:600 11px/1.4 {MAIL_YAZI};letter-spacing:.08em;'
+                   f'text-transform:uppercase;color:{ana};padding-bottom:10px">{E(bolum_adi)}</div>')
+        ic += ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"'
+               ' style="border-collapse:collapse">' + "".join(tampon) + "</table>")
+        parcalar.append(_mail_kutu(ic, kenar))
+        tampon.clear()
+
+    for ham in satirlar[1:]:
+        tip, sol, sag = _mail_coz(ham)
+        if tip == "baslik":
+            bolumu_kapat(); bolum_adi = sol; continue
+        if tip in ("bosluk", "cizgi"): continue
+        if tip == "uyari":
+            tampon.append('<tr><td colspan="2" style="padding:7px 10px;background:#fdeceb;'
+                          'border-left:3px solid #b3261e;border-radius:3px;'
+                          f'font:400 13px/1.5 {MAIL_YAZI};color:#7f1d1a">&#9888; {E(sol)}</td></tr>')
+        elif tip == "satir":
+            tampon.append(f'<tr><td style="padding:5px 12px 5px 0;font:400 13px/1.5 {MAIL_YAZI};'
+                          'color:#64748b;white-space:nowrap;vertical-align:top;width:42%">'
+                          f'{E(sol)}</td><td style="padding:5px 0;font:600 13px/1.5 {MAIL_YAZI};'
+                          f'color:#1e293b;vertical-align:top">{E(sag) or "&#8211;"}</td></tr>')
+        elif tip == "mono":
+            tampon.append('<tr><td colspan="2" style="padding:3px 0;'
+                          f'font:400 12px/1.5 {MAIL_MONO};color:#334155;white-space:nowrap">'
+                          f'{E(sol)}</td></tr>')
+        else:
+            tampon.append('<tr><td colspan="2" style="padding:4px 0;'
+                          f'font:400 13px/1.5 {MAIL_YAZI};color:#475569">{E(sol)}</td></tr>')
+    bolumu_kapat()
+
+    rozet = ""
+    if durum:
+        rozet = (f'<span style="display:inline-block;background:{arka};color:{ana};'
+                 f'font:600 11px/1 {MAIL_YAZI};letter-spacing:.06em;text-transform:uppercase;'
+                 f'padding:6px 10px;border-radius:3px">{E(M(durum))}</span>')
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="x-apple-disable-message-reformatting">'
+        '<!--[if mso]><style>table,td,div,p{font-family:Arial,sans-serif !important}</style><![endif]-->'
+        f"<title>{E(konu or baslik)}</title></head>"
+        '<body style="margin:0;padding:0;background:#eef2f6;-webkit-text-size-adjust:100%">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"'
+        ' style="border-collapse:collapse;background:#eef2f6"><tr>'
+        '<td align="center" style="padding:24px 12px">'
+        '<!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"'
+        ' border="0"><tr><td><![endif]-->'
+        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"'
+        ' style="border-collapse:collapse;width:100%;max-width:600px;text-align:left">'
+        f'<tr><td style="padding:0 0 16px 0;border-top:3px solid {ana};background:#ffffff;'
+        'border:1px solid #e2e8f0;border-radius:4px">'
+        f'<div style="padding:16px 18px 0 18px">{rozet}</div>'
+        f'<div style="padding:10px 18px 0 18px;font:600 19px/1.35 {MAIL_YAZI};color:#0f172a">'
+        f"{E(baslik)}</div>"
+        f'<div style="padding:6px 18px 14px 18px;font:400 12px/1.5 {MAIL_YAZI};color:#64748b">'
+        f'Proxmox &#8594; Google Drive &#183; {E(now_str())}</div></td></tr>'
+        '<tr><td style="height:14px;line-height:14px">&nbsp;</td></tr>'
+        f"<tr><td>{''.join(parcalar)}</td></tr>"
+        f'<tr><td style="padding:4px 2px 0 2px;font:400 11px/1.6 {MAIL_YAZI};color:#94a3b8">'
+        f"pve-gdrive-backup v{SURUM} &#183; {E(M('Bu mail otomatik olarak gonderildi.'))}"
+        "</td></tr></table>"
+        '<!--[if mso]></td></tr></table><![endif]-->'
+        "</td></tr></table></body></html>")
+
+def send_mail(to, subject, body, profile=None, durum=None):
     prof = get_smtp(profile)
     if not prof:
         log("mail atlandi (tanimli SMTP profili yok)"); return False
@@ -1418,6 +1549,10 @@ def send_mail(to, subject, body, profile=None):
     msg["From"] = prof.get("from") or prof.get("user")
     msg["To"] = to
     msg.set_content(body)
+    try:
+        msg.add_alternative(mail_html(body, durum, subject), subtype="html")
+    except Exception as e:
+        yut("mail_html", e)  # HTML uretilemezse duz metin yine gider
     sec = prof.get("security", "starttls")
     try:
         if sec == "ssl":
@@ -1446,7 +1581,7 @@ def maybe_report(p, status, summary, snap, detay=None):
     konu = f"[Proxmox Backup] {p['name']} - {M(status)}" if not dil_tr() else \
            f"[Proxmox Yedek] {p['name']} - {status}"
     konu += (f" ({uyari} " + ("warning" if not dil_tr() else "uyari") + ")") if uyari else ""
-    send_mail(p.get("mail_to", ""), konu, metni_cevir(body), p.get("smtp_profile"))
+    send_mail(p.get("mail_to", ""), konu, metni_cevir(body), p.get("smtp_profile"), durum=status)
 
 def build_run_mail(p, status, summary, snap, detay):
     """Tek bir calismanin detayli raporu: ne yapildi, ne silindi, ne durumda."""
@@ -1482,7 +1617,7 @@ def build_run_mail(p, status, summary, snap, detay):
     eski = []
     if gs:
         misafir_satirlari, eski = _bolum_misafirler(p, gs)
-        L += ["MISAFIR BAZINDA SON YEDEK"] + misafir_satirlari + [""]
+        L += ["VM/CT BAZINDA SON YEDEK"] + misafir_satirlari + [""]
     bl = snap.get("backups", [])[:10]
     if bl:
         L.append("EN YENI YEDEKLER")
@@ -1587,7 +1722,7 @@ def _asama_hata(p, pid, e):
     if p.get("notify_failure", True):
         send_mail(p.get("mail_to", ""), f"[Proxmox Yedek] {p['name']} - HATA",
                   f"Plan: {p['name']} ({pid})\nIstisna: {e}\nZaman: {now_str()}",
-                  p.get("smtp_profile"))
+                  p.get("smtp_profile"), durum="HATA")
 
 def do_run(pid, trigger="zamanlanmis"):
     """Bir plani bastan sona calistirir. Asamalar _asama_* fonksiyonlarindadir;
@@ -1768,7 +1903,7 @@ def auth_start():
     f = open(AUTH_OUT, "w")
     _AUTH["proc"] = subprocess.Popen(
         ["rclone", "authorize", "drive", "--drive-scope", "drive.file", "--auth-no-open-browser"],
-        stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        stdout=f, stderr=subprocess.STDOUT, start_new_session=True, env=rclone_ortam())
     _AUTH["started"] = time.time(); _AUTH["url"] = None
     hata = ""
     for _ in range(60):
@@ -1829,7 +1964,7 @@ def remote_create(name, token):
     rc, out, err = rclone(["config", "create", name, "drive", "scope=drive.file",
                            f"token={token}", "--non-interactive"], timeout=60)
     if rc != 0: return {"ok": False, "msg": (err or out).strip()[:200]}
-    try: os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
+    try: os.chmod(RCLONE_CONF, 0o600)
     except Exception as e: yut("remote_create", e)
     q = remote_quota(name)
     _KOTA_ONBELLEK.pop(name, None)
@@ -2118,6 +2253,44 @@ class GuvenlikDeposu:
         with self.kilit:
             self.oturumlar.clear(); self.captchalar.clear(); self.hatalar.clear()
 
+    def kalicilari_yukle(self):
+        """Servis yeniden baslarken 'beni hatirla' oturumlarini geri getirir.
+        Onceden oturumlar yalnizca bellekteydi: her guncelleme herkesi cikis
+        yaptiriyor, hatirlama calismiyor gorunuyordu."""
+        try:
+            with open(oturum_dosyasi(), "r", encoding="utf-8") as f:
+                kayit = json.load(f)
+        except FileNotFoundError:
+            return 0
+        except Exception as e:
+            yut("kalicilari_yukle", e); return 0
+        simdi = time.time(); n = 0
+        with self.kilit:
+            for tok, v in (kayit.get("oturumlar") or {}).items():
+                if not isinstance(v, dict) or v.get("bitis", 0) <= simdi: continue
+                v["kalici"] = True
+                self.oturumlar[tok] = v; n += 1
+        return n
+
+    def kalicilari_yaz(self):
+        """Yalnizca kalici oturumlar diske gider; normal oturumlar bellekte kalir."""
+        try:
+            with self.kilit:
+                kayit = {t: v for t, v in self.oturumlar.items() if v.get("kalici")}
+            yol = oturum_dosyasi()
+            os.makedirs(os.path.dirname(yol), exist_ok=True)
+            gecici = yol + ".tmp"
+            with open(gecici, "w", encoding="utf-8") as f:
+                json.dump({"oturumlar": kayit}, f)
+            os.chmod(gecici, 0o600)          # token dosyasi baskasina okunmasin
+            os.replace(gecici, yol)
+        except Exception as e:
+            yut("kalicilari_yaz", e)
+
+def oturum_dosyasi():
+    return os.path.join(os.path.dirname(cfg().get("state_file",
+                        "/var/lib/pve-gdrive/state.json")), "oturumlar.json")
+
 DEPO = GuvenlikDeposu()
 
 # Geriye donuk isimler: cagri yerleri degismesin diye ayni sozluklere isaret ederler.
@@ -2248,19 +2421,21 @@ def gc_sessions():
     C = cfg(); now = time.time()
     idle = float(C.get("session_timeout_min") or 120) * 60
     absmax = float(C.get("session_absolute_h") or 24) * 3600
+    kalici_dustu = False
     with _SEC_LOCK:
         for t in [t for t, v in SESSIONS.items()
                   # hatirlanan oturumda hareketsizlik siniri uygulanmaz, mutlak bitis gecerli
                   if (now > v.get("bitis", now + absmax))
                   or (not v.get("kalici") and (now - v["last"] > idle
                                                or now - v["created"] > absmax))]:
-            SESSIONS.pop(t, None)
+            kalici_dustu = kalici_dustu or bool(SESSIONS.pop(t, {}).get("kalici"))
         for c in [c for c, v in CAPTCHAS.items() if v["exp"] < now]:
             CAPTCHAS.pop(c, None)
         # bir saattir dokunulmamis ve kilitli olmayan deneme kayitlarini unut
         for i in [i for i, v in FAILS.items()
                   if v.get("until", 0) < now and now - v.get("last", 0) > 3600]:
             FAILS.pop(i, None)
+    if kalici_dustu: DEPO.kalicilari_yaz()
 
 def new_session(user, ip, kalici=False):
     """kalici=True ise oturum 'beni hatirla' omrunu alir ve cerez tarayici
@@ -2272,14 +2447,37 @@ def new_session(user, ip, kalici=False):
         SESSIONS[tok] = {"user": user, "ip": ip, "created": now, "last": now,
                          "csrf": secrets.token_urlsafe(24),
                          "kalici": bool(kalici), "bitis": now + omur}
+    if kalici: DEPO.kalicilari_yaz()
     return tok
+
+def ayni_kaynak(eski, yeni, kip):
+    """Oturumun tasinip tasinmadigini kip'e gore karara baglar.
+    'ip'  : birebir ayni adres (en siki, varsayilan)
+    'ag'  : ayni ag blogu (IPv4 /24, IPv6 /64) - VPN icinde adres degisebiliyorsa
+    'yok' : adres kontrolu yapilmaz (yalnizca guvendigin agda)"""
+    if kip == "yok": return True
+    if eski == yeni: return True
+    if kip != "ag": return False
+    try:
+        a, b = ipaddress.ip_address(eski), ipaddress.ip_address(yeni)
+        if a.version != b.version: return False
+        onek = 24 if a.version == 4 else 64
+        return (ipaddress.ip_network(f"{a}/{onek}", strict=False)
+                == ipaddress.ip_network(f"{b}/{onek}", strict=False))
+    except Exception as e:
+        yut("ayni_kaynak", e); return False
 
 def get_session(tok, ip):
     gc_sessions()
+    kip = str(cfg().get("session_ip_bind") or "ip")
     with _SEC_LOCK:
         v = SESSIONS.get(tok)
         if not v: return None
-        if v["ip"] != ip: return None          # oturum baska IP'ye tasinamaz
+        # Hatirlanan oturumda kip ayardan gelir; normal oturum her zaman birebir baglidir.
+        if not ayni_kaynak(v["ip"], ip, kip if v.get("kalici") else "ip"):
+            log(f"GUVENLIK: oturum baska adresten kullanilmak istendi "
+                f"({v['ip']} -> {ip}), reddedildi")
+            return None
         v["last"] = time.time()
         return v
 
@@ -2349,7 +2547,8 @@ def public_status():
                           "ssl_cert", "ssl_key", "cookie_secure", "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep", "debug",
                           "quota_cache_min", "dil",
-                          "remember_enabled", "remember_days", "session_timeout_min",
+                          "remember_enabled", "remember_days", "session_ip_bind",
+                          "session_timeout_min",
                           "log_file", "state_file")},
             "smtp": [{k: v for k, v in x.items() if k != "pass"} for x in smtp_profiles(C)],
             "smtp_ready": bool(smtp_profiles(C)),
@@ -2548,7 +2747,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/logout":
             m = re.search(r"pgs=([A-Za-z0-9_\-]+)", self.headers.get("Cookie", "") or "")
             if m:
-                with _SEC_LOCK: SESSIONS.pop(m.group(1), None)
+                with _SEC_LOCK: dusen = SESSIONS.pop(m.group(1), None)
+                if dusen and dusen.get("kalici"): DEPO.kalicilari_yaz()
             self._send(200, "application/json; charset=utf-8", '{"ok":true}', [self._cookie("", True)])
             return
         if not self._auth(need_csrf=True): return
@@ -2707,6 +2907,8 @@ def save_settings(data):
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
     for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik"):
         if k in data: C[k] = bool(data[k])
+    if str(data.get("session_ip_bind", "")) in ("ip", "ag", "yok"):
+        C["session_ip_bind"] = data["session_ip_bind"]
     for k in ("remember_days", "session_timeout_min"):
         if k in data:
             try: C[k] = max(1, int(data[k]))
@@ -2728,7 +2930,7 @@ def save_settings(data):
 
 def run_action(do, pid):
     p = get_plan(pid)
-    if do in ("backup", "prune", "purgetrash", "refresh", "testmail") and not p:
+    if do in ("backup", "prune", "purgetrash", "refresh", "testmail", "report") and not p:
         return {"ok": False, "msg": "plan bulunamadi"}
     if do == "backup":
         if is_running(pid): return {"ok": False, "msg": "bu plan zaten calisiyor"}
@@ -2742,6 +2944,17 @@ def run_action(do, pid):
         elif do == "purgetrash": msg = f"{do_purge_trash(p)} dosya kalici silindi"
         put_pstate(pid, update_snapshot(p))
         return {"ok": True, "msg": msg}
+    if do == "report":
+        if not p.get("weekly_report", True):
+            return {"ok": False, "msg": "bu planda haftalik rapor kapali"}
+        if not (p.get("report_mail_to") or p.get("mail_to")):
+            return {"ok": False, "msg": "rapor alicisi bos - plani duzenleyip mail adresi gir"}
+        try:
+            ok = send_report(p, trigger="manuel")
+        except Exception as e:
+            log(f"manuel rapor HATA: {e}", pid)
+            return {"ok": False, "msg": f"rapor gonderilemedi: {e}"}
+        return {"ok": ok, "msg": "rapor gonderildi" if ok else "rapor HATA (loga bak)"}
     if do == "testmail":
         nr = next_run(p)
         ok = send_mail(p.get("mail_to", ""), f"[Proxmox Yedek] TEST - {p['name']}",
@@ -2785,6 +2998,8 @@ def serve():
     global TLS_AKTIF
     C = cfg()
     ensure_hashed_pw()
+    n = DEPO.kalicilari_yukle()
+    if n: log(f"{n} hatirlanan oturum geri yuklendi")
     httpd = ThreadingHTTPServer((C["ui_bind"], int(C["ui_port"])), H)
     ctx = ssl_context()
     if ctx:
@@ -2896,11 +3111,16 @@ def init_conf():
 
 LOGIN_HTML = r"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Giriş — Proxmox Yedek</title><style>
+<title>Giriş — Proxmox Yedek</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1117'/%3E%3Cpath d='M20 40 L32 18 L44 40 Z' fill='%23e57000'/%3E%3Cpath d='M14 44h36a3 3 0 000-6h-1.2a10 10 0 00-19.3-3.4A7 7 0 0014 44Z' fill='%2358a6ff'/%3E%3Cpath d='M32 46v9m0 0-4.5-4.5M32 55l4.5-4.5' stroke='%237ee2a8' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E"><style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial;
  display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
 .box{background:#161b22;border:1px solid #232b36;border-radius:14px;padding:26px;width:100%;max-width:380px}
+.girislogo{width:56px;height:56px;margin:0 auto 12px;display:block}
+.girislogo svg{width:100%;height:100%}
+.box h1{text-align:center}
+.box .sub{text-align:center}
 h1{font-size:18px;margin-bottom:4px}
 .sub{font-size:12px;color:#8b97a5;margin-bottom:18px}
 label{display:block;font-size:12px;color:#9fb4c9;margin:12px 0 5px}
@@ -2920,7 +3140,8 @@ button:disabled{background:#30363d;border-color:#30363d;cursor:not-allowed}
 .hatirla input{width:auto;margin:0}
 </style></head><body>
 <form class="box" method="POST" action="/login" autocomplete="off">
-  <h1>🗄️ Proxmox → Drive Yedek</h1>
+  <div class="girislogo"><svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">  <rect x="2" y="2" width="60" height="60" rx="14" fill="#161b22" stroke="#2d3d50" stroke-width="2"/>  <path d="M20 40 L32 18 L44 40 Z" fill="#e57000" opacity=".92"/>  <path d="M14 44 h36 a3 3 0 0 0 0-6 h-1.2a10 10 0 0 0-19.3-3.4A7 7 0 0 0 14 44Z" fill="#58a6ff" opacity=".95"/>  <path d="M32 46 v9 m0 0 -4.5-4.5 M32 55 l4.5-4.5" stroke="#7ee2a8" stroke-width="3.2"        stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+  <h1>Proxmox → Drive Yedek</h1>
   <div class="sub">Devam etmek için giriş yap</div>
   <div class="err" id="err" style="display:{{ERRD}}">{{HATA}}</div>
   <label for="u">Kullanıcı</label>
@@ -2954,6 +3175,7 @@ function yenile(){var r=Math.random().toString(36).slice(2);
 HTML = r'''<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Proxmox → Drive Yedek</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1117'/%3E%3Cpath d='M20 40 L32 18 L44 40 Z' fill='%23e57000'/%3E%3Cpath d='M14 44h36a3 3 0 000-6h-1.2a10 10 0 00-19.3-3.4A7 7 0 0014 44Z' fill='%2358a6ff'/%3E%3Cpath d='M32 46v9m0 0-4.5-4.5M32 55l4.5-4.5' stroke='%237ee2a8' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial}
@@ -3076,10 +3298,54 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .kap-uyari{color:#ffd479;margin-top:8px;font-size:12px;line-height:1.5}
 .kap-hata{color:#ff9b9b}
 
+/* --- logo --- */
+.logo{display:inline-flex;width:34px;height:34px;flex:0 0 34px}
+.logo svg{width:100%;height:100%}
+.girislogo{width:56px;height:56px;margin:0 auto 10px;display:block}
+
+/* --- surukleme --- */
+.modal > h2{cursor:move;user-select:none}
+.modal > h2::before{content:"⠿";opacity:.35;margin-right:8px;font-size:13px;letter-spacing:-2px}
+.mask.suruklenen{transition:none}
+
+/* Dogrulama sonrasi odaklanan alan kisa sure vurgulanir */
+.odak{animation:odakYan 1.4s ease-out}
+@keyframes odakYan{
+  0%,55%{box-shadow:0 0 0 3px rgba(255,107,107,.55)}
+  100%{box-shadow:0 0 0 0 rgba(255,107,107,0)}
+}
+
+/* ---------- sag tik menusu ---------- */
+.ctx{position:fixed;z-index:900;min-width:230px;max-width:340px;padding:5px;
+  background:#161b22;border:1px solid #30363d;border-radius:10px;
+  box-shadow:0 12px 32px rgba(0,0,0,.55);font-size:13px;
+  animation:ctxGir .09s ease-out}
+@keyframes ctxGir{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.ctx hr{border:0;border-top:1px solid #232b36;margin:5px 6px}
+.ctx-baslik{padding:6px 10px 7px;color:#8b97a5;font-size:11px;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.ctx-oge{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:6px;
+  cursor:pointer;color:#e6edf3;white-space:nowrap}
+.ctx-oge:hover,.ctx-oge.on{background:#1f6feb;color:#fff}
+.ctx-oge.tehlike{color:#ff9b9b}
+.ctx-oge.tehlike:hover,.ctx-oge.tehlike.on{background:#8a2b2b;color:#fff}
+.ctx-oge.pasif{color:#5b6472;cursor:default}
+.ctx-oge.pasif:hover{background:transparent;color:#5b6472}
+.ctx-simge{width:17px;text-align:center;flex:0 0 auto;opacity:.9}
+.ctx-metin{overflow:hidden;text-overflow:ellipsis}
+
 </style></head><body>
 <div class="wrap">
 <header>
-  <h1>🗄️ Proxmox → Google Drive Yedek</h1>
+  <span class="logo"><svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#161b22" stroke="#2d3d50" stroke-width="2"/>
+  <path d="M20 40 L32 18 L44 40 Z" fill="#e57000" opacity=".92"/>
+  <path d="M14 44 h36 a3 3 0 0 0 0-6 h-1.2a10 10 0 0 0-19.3-3.4A7 7 0 0 0 14 44Z" fill="#58a6ff" opacity=".95"/>
+  <path d="M32 46 v9 m0 0 -4.5-4.5 M32 55 l4.5-4.5" stroke="#7ee2a8" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg></span>
+  <h1>Proxmox → Google Drive Yedek</h1>
   <span id="tlsrozet"></span>
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
@@ -3111,12 +3377,15 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <div class="wbaslik"><b>1. Plan</b> <span class="small">Bu plana bir ad ver</span></div>
   <fieldset><legend>Hazır senaryolar</legend>
     <div class="btns">
-      <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
+      <button class="sm" onclick="preset('az')" title="Her gün 03:00, Drive'da 3 gün, çöpte 1 gün. En az yer kaplayan seçenek; son birkaç günü korur.">🗜️ Az yer — 3 gün</button>
+      <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Daha geniş geri dönüş penceresi, daha çok yer.">📅 Günlük — 14 gün</button>
       <button class="sm" onclick="preset('haftalik')" title="Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.">🗄️ Haftalık arşiv — 6 ay</button>
       <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, VM/CT başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
       <button class="sm" onclick="preset('test')" title="Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.">🧪 Test</button>
     </div>
-    <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
+    <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.<br>
+      <b>Gün sayısı arttıkça yer de artar.</b> 4. adımdaki kapasite paneli seçtiğin sürenin
+      kaç GB tuttuğunu ve kotanın yüzde kaçını kullanacağını anında gösterir.</div>
   </fieldset>
   <fieldset><legend>Genel</legend>
     <div class="f"><label class="tip" title="Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.">Plan adı</label>
@@ -3172,13 +3441,13 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     </div>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
-        <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
+        <div class="eg" id="eg-kd">Bu süreden eski setler Google çöp kutusuna gönderilir.</div></div></div>
     <div class="f"><label class="tip" title="Güvenlik tabanı: VM/CT başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
       <div><input type="number" min="0" id="e-kc"><div class="errmsg" id="err-kc"></div>
-        <div class="eg">Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son <b>N</b> seti korur. <b>0 yazma.</b></div></div></div>
+        <div class="eg" id="eg-kc">Gün kuralından muaf güvenlik tabanı.</div></div></div>
     <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
-        <div class="eg">Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin. <b>0</b> = çöpe uğramadan hemen kalıcı sil.</div></div></div>
+        <div class="eg" id="eg-td">Çöpte bekleme süresi.</div></div></div>
   </fieldset>
 </div>
 <div class="wstep" data-step="5" style="display:none">
@@ -3498,6 +3767,18 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     </div>
   </fieldset>
 </div>
+<div class="mask" id="m-onay"><div class="modal" style="max-width:440px">
+  <h2 id="onay-baslik">Onay</h2>
+  <div id="onay-metin" class="small" style="margin:10px 0 4px;line-height:1.6"></div>
+  <div id="onay-girdi-sar" style="display:none;margin-top:10px">
+    <input id="onay-girdi" autocomplete="off">
+  </div>
+  <div class="mbtns">
+    <button id="onay-hayir" onclick="onayKapat(false)">Vazgeç</button>
+    <button id="onay-evet" class="primary" onclick="onayKapat(true)">Tamam</button>
+  </div>
+</div></div>
+
 <div class="flash" id="flash"></div>
 
 <script>
@@ -3532,7 +3813,7 @@ const EN = {
     "▶ Yedekle": "▶ Back up", "🧹 Retention": "🧹 Retention", "🗑 Çöpü Boşalt": "🗑 Empty Trash",
     "📊 Rapor": "📊 Report", "✉ Test": "✉ Test", "✎ Düzenle": "✎ Edit",
     " dosya)": " files)", " gün": " days", " set": " sets", " · min ": " · min ",
-    " set · çöp ": " sets · trash ", " gün</b></div>": " days</b></div>",
+    " set · çöp ": " sets · trash ",
     /* --- ilerleme --- */
     "Başlangıç": "Started", "Geçen": "Elapsed", "Aktarılan": "Transferred", "Hız": "Speed",
     "Kalan süre": "Time left", "Tahmini bitiş": "Est. finish", "Çalışıyor": "Running",
@@ -3864,6 +4145,104 @@ const EN = {
     "'ini kullanır). Bu bir tavsiye değil, üst sınır.": "of free space). This is an upper bound, not a recommendation.",
     "Kısa süre daha az yer kaplar; uzun süre geç fark edilen bir soruna karşı daha geniş geri dönüş penceresi verir.": "A shorter period uses less space; a longer one gives a wider recovery window for problems noticed late.",
     "📐 Sığabilecek en uzun süreyi uygula": "📐 Apply longest period that fits",
+    "🗜️ Az yer — 3 gün": "🗜️ Low space — 3 days",
+    "Her gün 03:00, Drive'da 3 gün, çöpte 1 gün. En az yer kaplayan seçenek; son birkaç günü korur.": "Every day at 03:00, 3 days on Drive, 1 day in trash. The smallest option; keeps the last few days.",
+    "Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Daha geniş geri dönüş penceresi, daha çok yer.": "Every day at 03:00, 14 days on Drive, 1 day in trash. Wider recovery window, more space.",
+    "Gün sayısı arttıkça yer de artar.": "More days means more space.",
+    "Onay": "Confirm", "Bilgi gerekli": "Input required", "Tamam": "OK",
+    "Gün kuralı kapalı — yalnızca aşağıdaki set tabanı korur.": "Day rule disabled — only the set floor below protects backups.",
+    "günden eski setler Google çöp kutusuna gönderilir.": "days and older are moved to Google trash.",
+    "Günlük yedek alıyorsan Drive'da yaklaşık": "With daily backups Drive holds about",
+    "set durur.": "sets.", "Ölçülene göre": "Measured, that is",
+    "0 riskli: gün kuralı bir VM/CT'nin tüm yedeklerini silebilir.": "0 is risky: the day rule could delete every backup of a VM/CT.",
+    "Bir VM/CT uzun süre yedeklenmese bile en yeni": "Even if a VM/CT is not backed up for a long time, the newest",
+    "seti gün kuralından muaf tutulur.": "sets are exempt from the day rule.",
+    "Taban gün sayısından büyük ya da eşit: pratikte saklamayı taban belirler.": "The floor is at or above the day count, so in practice the floor decides retention.",
+    "0 = çöpe uğramadan hemen kalıcı silinir; yanlış silmede geri dönüş olmaz.": "0 = deleted permanently without using the trash; no way back if it was a mistake.",
+    "Yanlış silme olursa": "If something is deleted by mistake you have",
+    "içinde Drive'ın çöp kutusundan geri alabilirsin.": "to restore it from Drive's trash.",
+    "Çöpte yaklaşık": "About", "bekler.": "waits in trash.",
+    "Bu süreden eski setler Google çöp kutusuna gönderilir.": "Sets older than this go to Google trash.",
+    "Gün kuralından muaf güvenlik tabanı.": "Safety floor, exempt from the day rule.",
+    "Çöpte bekleme süresi.": "How long it waits in trash.",
+    " gün · min ": " days · min ",
+    "Yedeklemeyi başlat": "Start backup",
+    "bu plan zaten çalışıyor": "this plan is already running",
+    "Planı duraklat": "Pause plan",
+    "Planı etkinleştir": "Enable plan",
+    "zamanlama durur, dosyalara dokunulmaz": "scheduling stops; no file is touched",
+    "plan duraklatıldı": "plan paused",
+    "plan etkinleştirildi": "plan enabled",
+    "Retention'ı şimdi çalıştır": "Run retention now",
+    "süresi dolan setleri Drive çöpüne taşır": "moves expired sets to Drive trash",
+    "Çöpü boşalt": "Empty trash",
+    "çöpte süresi dolmuş dosyaları kalıcı siler": "permanently deletes expired files in trash",
+    "Drive durumunu tazele": "Refresh Drive status",
+    "Haftalık raporu şimdi gönder": "Send weekly report now",
+    "bu planda rapor kapalı": "weekly report is off for this plan",
+    "önce plana mail adresi gir": "add a mail address to the plan first",
+    "Test maili gönder": "Send test mail",
+    "Kopyasını oluştur": "Duplicate",
+    " (kopya)": " (copy)",
+    "kopya hazır — gözden geçirip kaydet": "copy ready — review and save",
+    "Planı JSON olarak indir": "Download plan as JSON",
+    "başka sunucuya taşımak için": "to move it to another server",
+    "Kaynak klasörü kopyala": "Copy source folder",
+    "Hedefi kopyala": "Copy target",
+    "kaynak": "source",
+    "hedef": "target",
+    "Bu planın loglarını göster": "Show this plan's logs",
+    "Planı sil": "Delete plan",
+    "Bağlantıyı test et": "Test connection",
+    "Kotayı yenile": "Refresh quota",
+    "Hesap adını kopyala": "Copy account name",
+    "hesap adı": "account name",
+    "Kota bilgisini kopyala": "Copy quota info",
+    "Hesabı kaldır": "Remove account",
+    "Drive'daki dosyalara dokunulmaz": "files on Drive are not touched",
+    "Sunucu adresini kopyala": "Copy server address",
+    "sunucu": "server",
+    "Profili sil": "Delete profile",
+    "Log — ": "Log — ",
+    "tümü": "all",
+    "sistem": "system",
+    "Bu satırı kopyala": "Copy this line",
+    "satır": "line",
+    "Görünen logu kopyala": "Copy visible log",
+    "Log dosyası olarak indir": "Download as log file",
+    "Yenile": "Refresh",
+    "Sistem loglarına geç": "Switch to system logs",
+    "Tüm logları göster": "Show all logs",
+    "Dosya adını kopyala": "Copy file name",
+    "dosya adı": "file name",
+    "Satırı kopyala": "Copy row",
+    "Tabloyu kopyala": "Copy table",
+    "tablo": "table",
+    "Yeni plan": "New plan",
+    "Şimdi yenile": "Refresh now",
+    "Google hesapları": "Google accounts",
+    "SMTP profilleri": "SMTP profiles",
+    "Ayarlar": "Settings",
+    "panoya kopyalandı": "copied to clipboard",
+    "kopyalanamadı — metni elle seçmen gerekiyor": "could not copy — select the text manually",
+    "Yarım kalmış bir düzenleme var — ": "You have an unfinished edit — ",
+    "Kaydedilmemişti. Geri yüklensin mi?": "It was not saved. Restore it?",
+    "Yarım kalan düzenleme": "Unfinished edit",
+    "Geri yükle": "Restore",
+    "az önce": "just now",
+    " dakika önce": " minutes ago",
+    "yeni plan": "new plan",
+    "taslak geri yüklendi — kaydetmedikçe uygulanmaz": "draft restored — nothing is applied until you save",
+    "İptal": "Cancel",
+    "Henüz plan yok. Sağ üstten + Yeni Plan ile başla.": "No plans yet. Start with + New Plan at the top right.",
+    " gönderilmiş": " sent",
+    " (varsayılan rota)": " (default route)",
+    "Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; ": "On Proxmox a bridge (vmbr0) only sees host traffic; ",
+    "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.": "pick the physical or bond interface to also count VM and CT traffic.",
+    "Yeni sürüm var: ": "New version available: ",
+    " hazır": " ready",
+    "%) · çöp: ": "%) · trash: ",
+    " · boş: ": " · free: ",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -3955,6 +4334,302 @@ function dilBaslat() {
         sec.value = dilAl();
     sayfayiCevir();
 }
+/* ---------- uygulama ici diyaloglar ---------- */
+/* Tarayicinin confirm/prompt kutulari "web sitesinin mesaji" diye gorunuyor ve
+   arayuzle uyumsuz. Ayni isi yapan, uygulamanin kendi penceresi kullanilir. */
+let onayCoz = null;
+function onayKapat(evet) {
+    const girdiAcik = el("onay-girdi-sar").style.display !== "none";
+    const deger = girdiAcik ? el("onay-girdi").value : "";
+    el("m-onay").classList.remove("show");
+    const c = onayCoz;
+    onayCoz = null;
+    if (c)
+        c(evet ? deger : null);
+}
+/** confirm() yerine. true/false doner.
+ *  Buton etiketleri verilebilir: "Sil / Vazgec" gibi netlik gerektiren yerlerde
+ *  "Tamam / Iptal" ne olacagini soylemiyordu. */
+function onay(metin, baslik, evetEtiket, hayirEtiket) {
+    return new Promise((coz) => {
+        setTxt("onay-baslik", baslik || C("Onay"));
+        setTxt("onay-evet", evetEtiket || C("Tamam"));
+        setTxt("onay-hayir", hayirEtiket || C("İptal"));
+        setHtml("onay-metin", metin.split("\n").map((x) => esc(x)).join("<br>"));
+        el("onay-girdi-sar").style.display = "none";
+        onayCoz = (d) => coz(d !== null);
+        el("m-onay").classList.add("show");
+        el("onay-evet").focus();
+    });
+}
+/** prompt() yerine. Girilen metni ya da iptalde null doner. */
+function sorMetin(metin, varsayilan, baslik) {
+    return new Promise((coz) => {
+        setTxt("onay-baslik", baslik || C("Bilgi gerekli"));
+        setTxt("onay-evet", C("Tamam"));
+        setTxt("onay-hayir", C("İptal"));
+        setHtml("onay-metin", metin.split("\n").map((x) => esc(x)).join("<br>"));
+        el("onay-girdi-sar").style.display = "";
+        el("onay-girdi").value = varsayilan || "";
+        onayCoz = coz;
+        el("m-onay").classList.add("show");
+        el("onay-girdi").focus();
+    });
+}
+/* ---------- pencereleri suruklenebilir yap ---------- */
+function surukleKur() {
+    Array.prototype.slice.call(document.querySelectorAll(".modal > h2")).forEach((bas) => {
+        const pencere = bas.parentElement;
+        if (!pencere || bas.dataset.suruklenir)
+            return;
+        bas.dataset.suruklenir = "1";
+        let x = 0, y = 0, bx = 0, by = 0, aktif = false;
+        bas.addEventListener("pointerdown", (e) => {
+            aktif = true;
+            x = e.clientX;
+            y = e.clientY;
+            const m = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/.exec(pencere.style.transform || "");
+            bx = m ? parseFloat(m[1]) : 0;
+            by = m ? parseFloat(m[2]) : 0;
+            bas.setPointerCapture(e.pointerId);
+        });
+        bas.addEventListener("pointermove", (e) => {
+            if (!aktif)
+                return;
+            pencere.style.transform = `translate(${bx + e.clientX - x}px, ${by + e.clientY - y}px)`;
+        });
+        const birak = (e) => {
+            if (!aktif)
+                return;
+            aktif = false;
+            try {
+                bas.releasePointerCapture(e.pointerId);
+            }
+            catch { /* yok say */ }
+        };
+        bas.addEventListener("pointerup", birak);
+        bas.addEventListener("pointercancel", birak);
+        // cift tiklama: pencereyi ortala
+        bas.addEventListener("dblclick", () => { pencere.style.transform = ""; });
+    });
+}
+/* Sag tik menusu.
+ *
+ * Tarayicinin kendi menusu bu arayuzde ise yaramiyor: kullanicinin isteyecegi
+ * seyler "yedegi baslat", "dosya adini kopyala", "bu plani disa aktar" gibi
+ * uygulamaya ozel eylemler. Butonlari her karta dizmek yerine sik kullanilanlari
+ * butonda, gerisini sag tikta topluyoruz.
+ *
+ * Tek bir delege dinleyici var; listeler her yenilendiginde tekrar baglamak
+ * gerekmiyor (kartlar refresh ile bastan uretiliyor).
+ */
+const MENU_KAYIT = [];
+let menuEl = null;
+let menuOgeleri = [];
+let menuSecim = -1;
+function menuKapat() {
+    if (!menuEl)
+        return;
+    menuEl.remove();
+    menuEl = null;
+    menuOgeleri = [];
+    menuSecim = -1;
+}
+/** Menuyu imlecin yaninda acar; ekran disina tasarsa ice ceker. */
+function menuAc(x, y, ogeler) {
+    menuKapat();
+    const kutu = document.createElement("div");
+    kutu.className = "ctx";
+    kutu.setAttribute("role", "menu");
+    menuOgeleri = ogeler;
+    ogeler.forEach((o, i) => {
+        if (o.ayrac) {
+            kutu.appendChild(document.createElement("hr"));
+            return;
+        }
+        const d = document.createElement("div");
+        if (o.baslik) {
+            d.className = "ctx-baslik";
+            d.textContent = C(o.etiket || "");
+            kutu.appendChild(d);
+            return;
+        }
+        d.className = "ctx-oge" + (o.pasif ? " pasif" : "") + (o.tehlike ? " tehlike" : "");
+        d.setAttribute("role", "menuitem");
+        d.setAttribute("data-i", String(i));
+        if (o.ipucu)
+            d.title = C(o.ipucu);
+        d.innerHTML = '<span class="ctx-simge">' + (o.simge || "") + "</span>"
+            + '<span class="ctx-metin"></span>';
+        d.querySelector(".ctx-metin").textContent = C(o.etiket || "");
+        if (!o.pasif) {
+            d.onclick = (e) => { var _a; e.stopPropagation(); menuKapat(); void ((_a = o.is) === null || _a === void 0 ? void 0 : _a.call(o)); };
+            d.onmouseenter = () => menuVurgula(i);
+        }
+        kutu.appendChild(d);
+    });
+    // Once gorunmez yerlestir ki gercek olcusunu okuyabilelim
+    kutu.style.left = "-9999px";
+    kutu.style.top = "-9999px";
+    document.body.appendChild(kutu);
+    const g = kutu.getBoundingClientRect();
+    const bosluk = 6;
+    let sol = x, ust = y;
+    if (sol + g.width + bosluk > window.innerWidth)
+        sol = Math.max(bosluk, x - g.width);
+    if (ust + g.height + bosluk > window.innerHeight)
+        ust = Math.max(bosluk, y - g.height);
+    // Menu ekrandan uzunsa kendi icinde kaysin
+    if (g.height + bosluk * 2 > window.innerHeight) {
+        ust = bosluk;
+        kutu.style.maxHeight = window.innerHeight - bosluk * 2 + "px";
+        kutu.style.overflowY = "auto";
+    }
+    kutu.style.left = sol + "px";
+    kutu.style.top = ust + "px";
+    menuEl = kutu;
+}
+function menuVurgula(i) {
+    if (!menuEl)
+        return;
+    Array.prototype.slice.call(menuEl.querySelectorAll(".ctx-oge"))
+        .forEach((d) => d.classList.remove("on"));
+    menuSecim = i;
+    const d = menuEl.querySelector('.ctx-oge[data-i="' + i + '"]');
+    if (d) {
+        d.classList.add("on");
+        d.scrollIntoView({ block: "nearest" });
+    }
+}
+/** Klavyeyle gezinirken atlanacak ogeleri (ayrac, baslik, pasif) es geçer. */
+function menuGez(yon) {
+    const n = menuOgeleri.length;
+    if (!n)
+        return;
+    let i = menuSecim;
+    for (let adim = 0; adim < n; adim++) {
+        i = (i + yon + n) % n;
+        const o = menuOgeleri[i];
+        if (!o.ayrac && !o.baslik && !o.pasif) {
+            menuVurgula(i);
+            return;
+        }
+    }
+}
+/** Bir secici icin sag tik menusu tanimlar. uret() null donerse menu acilmaz. */
+function sagTik(secici, uret) {
+    MENU_KAYIT.push({ secici, uret });
+}
+function menuTetikle(x, y, hedef, olay) {
+    const e = hedef;
+    if (!e || !e.closest)
+        return false;
+    for (const k of MENU_KAYIT) {
+        const kap = e.closest(k.secici);
+        if (!kap)
+            continue;
+        const ogeler = k.uret(kap, olay);
+        if (!ogeler || !ogeler.length)
+            return false;
+        menuAc(x, y, ogeler);
+        return true;
+    }
+    return false;
+}
+function menuKur() {
+    document.addEventListener("contextmenu", (e) => {
+        // Metin secilmisse tarayicinin kopyala menusu daha faydali; karisma.
+        const secili = window.getSelection();
+        if (secili && String(secili).length > 2 && !e.shiftKey)
+            return;
+        if (menuTetikle(e.clientX, e.clientY, e.target, e))
+            e.preventDefault();
+        else
+            menuKapat();
+    });
+    document.addEventListener("click", (e) => {
+        if (menuEl && !e.target.closest(".ctx"))
+            menuKapat();
+    });
+    document.addEventListener("keydown", (e) => {
+        var _a;
+        if (!menuEl)
+            return;
+        if (e.key === "Escape") {
+            e.preventDefault();
+            menuKapat();
+        }
+        else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            menuGez(1);
+        }
+        else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            menuGez(-1);
+        }
+        else if (e.key === "Enter" && menuSecim >= 0) {
+            e.preventDefault();
+            const o = menuOgeleri[menuSecim];
+            menuKapat();
+            void ((_a = o === null || o === void 0 ? void 0 : o.is) === null || _a === void 0 ? void 0 : _a.call(o));
+        }
+    }, true);
+    window.addEventListener("resize", menuKapat);
+    window.addEventListener("blur", menuKapat);
+    document.addEventListener("scroll", menuKapat, true);
+    // Dokunmatik: uzun basma sag tik yerine gecer
+    let zaman = 0, bx = 0, by = 0;
+    document.addEventListener("touchstart", (e) => {
+        if (e.touches.length !== 1)
+            return;
+        const t = e.touches[0];
+        bx = t.clientX;
+        by = t.clientY;
+        const hedef = e.target;
+        zaman = window.setTimeout(() => menuTetikle(bx, by, hedef, e), 520);
+    }, { passive: true });
+    const iptal = () => { if (zaman) {
+        clearTimeout(zaman);
+        zaman = 0;
+    } };
+    document.addEventListener("touchmove", iptal, { passive: true });
+    document.addEventListener("touchend", iptal, { passive: true });
+}
+/* ---------- ortak yardimcilar ---------- */
+/** Panoya yazar. HTTPS/localhost disinda clipboard API yok; eski yola duser. */
+async function panoyaYaz(metin, ne) {
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(metin);
+        }
+        else {
+            const t = document.createElement("textarea");
+            t.value = metin;
+            t.style.position = "fixed";
+            t.style.opacity = "0";
+            document.body.appendChild(t);
+            t.select();
+            document.execCommand("copy");
+            t.remove();
+        }
+        flash((ne ? C(ne) + " " : "") + C("panoya kopyalandı"), true);
+    }
+    catch {
+        flash(C("kopyalanamadı — metni elle seçmen gerekiyor"), false);
+    }
+}
+/** Metni dosya olarak indirir (log, plan disa aktarimi vb.). */
+function dosyaIndir(ad, icerik, tip) {
+    const b = new Blob([icerik], { type: tip || "text/plain;charset=utf-8" });
+    const u = URL.createObjectURL(b);
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = ad;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(u), 1000);
+}
 /** pve-gdrive-backup web arayuzu. tsc ile derlenip pve_gdrive.py icine gomulur. */
 let S = null;
 let sel = null;
@@ -4037,7 +4712,108 @@ window.addEventListener("beforeunload", (e) => {
     }
     return undefined;
 });
-function markDirty() { dirty = true; }
+function markDirty() { dirty = true; taslakPlanla(); }
+/* ---------- F5 taslagi ----------
+ * beforeunload uyarisi yalnizca soruyor; "evet" dersen yazdiklarin gidiyordu.
+ * Acik formu araliklarla yerel olarak sakliyoruz, donunce geri yuklemeyi oneriyoruz.
+ * Sunucuya hicbir sey gitmez; taslak yalnizca bu tarayicida durur. */
+const TASLAK = "pg_taslak";
+let taslakZamanlayici = 0;
+/** #m-edit icindeki tum girdilerin anlik degeri. Alan tablosuna bagimli degil:
+ *  forma yeni bir alan eklendiginde taslak da kendiliginden kapsar. */
+function formAnlik() {
+    const o = {};
+    const kap = document.getElementById("m-edit");
+    if (!kap)
+        return o;
+    Array.prototype.slice.call(kap.querySelectorAll("input,select,textarea"))
+        .forEach((g) => {
+        if (!g.id || g.type === "file" || g.type === "password")
+            return;
+        o[g.id] = g.type === "checkbox" || g.type === "radio" ? g.checked : g.value;
+    });
+    o.__gunler = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
+        .map((c) => c.value);
+    return o;
+}
+function formGeriYukle(o) {
+    for (const k of Object.keys(o)) {
+        if (k === "__gunler")
+            continue;
+        const g = document.getElementById(k);
+        if (!g)
+            continue;
+        if (g.type === "checkbox" || g.type === "radio")
+            g.checked = Boolean(o[k]);
+        else
+            g.value = String(o[k]);
+    }
+    const gunler = o.__gunler || [];
+    Array.prototype.slice.call(el("e-wd").querySelectorAll("input"))
+        .forEach((c) => { c.checked = gunler.indexOf(c.value) >= 0; });
+}
+function taslakPlanla() {
+    if (taslakZamanlayici)
+        return; // saniyede bir yaz, her tusa basista degil
+    taslakZamanlayici = window.setTimeout(() => {
+        taslakZamanlayici = 0;
+        if (!dirty || !el("m-edit").classList.contains("show"))
+            return;
+        try {
+            localStorage.setItem(TASLAK, JSON.stringify({
+                pid: EDIT, sihirbaz: wSihirbaz, adim: wAktif,
+                zaman: Date.now(), alanlar: formAnlik(),
+            }));
+        }
+        catch { /* kota dolu olabilir, taslak zorunlu degil */ }
+    }, 1000);
+}
+function taslakSil() {
+    try {
+        localStorage.removeItem(TASLAK);
+    }
+    catch { /* yok say */ }
+}
+/** Acilista yarim kalmis duzenleme varsa geri yuklemeyi onerir. */
+async function taslakSor() {
+    let t = null;
+    try {
+        t = JSON.parse(localStorage.getItem(TASLAK) || "null");
+    }
+    catch {
+        t = null;
+    }
+    if (!t || !t.alanlar)
+        return;
+    const yas = (Date.now() - (t.zaman || 0)) / 60000;
+    if (yas > 60 * 24) {
+        taslakSil();
+        return;
+    } // bir gunden eski taslak ise yaramaz
+    if (t.pid && S && !S.plans.some((p) => p.id === t.pid)) {
+        taslakSil();
+        return;
+    }
+    const ad = String(t.alanlar["e-name"] || "").trim();
+    const ne = t.pid ? C("Plan: ") + (ad || t.pid) : C("yeni plan");
+    const sure = yas < 1 ? C("az önce") : Math.round(yas) + C(" dakika önce");
+    if (!await onay(C("Yarım kalmış bir düzenleme var — ") + ne + " (" + sure + ").\n"
+        + C("Kaydedilmemişti. Geri yüklensin mi?"), C("Yarım kalan düzenleme"), C("Geri yükle"), C("Sil"))) {
+        taslakSil();
+        return;
+    }
+    openEditor(t.pid);
+    formGeriYukle(t.alanlar);
+    if (t.sihirbaz) {
+        wAktif = Math.max(1, Math.min(ADIMLAR.length, t.adim || 1));
+        wGoster();
+    }
+    ceviriUygula();
+    ramHint();
+    saklamaIpucu();
+    markDirty();
+    flash(C("taslak geri yüklendi — kaydetmedikçe uygulanmaz"), true);
+}
 try {
     sel = localStorage.getItem("pg_sel") || null;
     LOGSRC = localStorage.getItem("pg_log") || "all";
@@ -4067,7 +4843,48 @@ function errBox(id) {
     return document.getElementById("err-" + id.replace("-", ""))
         || document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
 }
+/** Dogrulama turunda ilk hatali alanin id'si. hataOdakla() bunu kullanir. */
+let ilkHataAlani = null;
+function hataTuruBaslat() { ilkHataAlani = null; }
+/** Hatali alan ekranin disinda kalabiliyordu: sihirbazda dogru adima gec,
+ *  alani ortala ve odagi ver ki kullanici neyi duzeltecegini gorsun. */
+function hataOdakla() {
+    const id = ilkHataAlani;
+    if (!id)
+        return;
+    const e = document.getElementById(id);
+    if (!e)
+        return;
+    if (wSihirbaz) {
+        const adim = ADIM_ALANLARI.findIndex((liste) => liste.indexOf(id) >= 0);
+        if (adim >= 0 && adim + 1 !== wAktif) {
+            wAktif = adim + 1;
+            wGoster();
+        }
+    }
+    const kutu = e.closest("details");
+    if (kutu && !kutu.open)
+        kutu.open = true;
+    window.setTimeout(() => {
+        try {
+            e.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+        catch {
+            e.scrollIntoView();
+        }
+        try {
+            e.focus({ preventScroll: true });
+        }
+        catch {
+            e.focus();
+        }
+        e.classList.add("odak");
+        window.setTimeout(() => e.classList.remove("odak"), 1400);
+    }, 60);
+}
 function bad(id, msg) {
+    if (!ilkHataAlani)
+        ilkHataAlani = id;
     fld(id).classList.add("bad");
     const e = errBox(id);
     if (e) {
@@ -4133,11 +4950,12 @@ async function loadIfaces(secili) {
         const j = await api("/api/ifaces");
         const list = j.ifaces || [];
         setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-            + list.map((i) => '<option value="' + esc(i.name) + '">C(' + esc(i.name)
-                + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
+            + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+                + " — " + hb(i.tx) + C(" gönderilmiş") + (i.default ? C(" (varsayılan rota)") : "")
+                + "</option>").join(""));
         setVal("e-bwif", secili);
-        setTxt("e-bwifhint", "Proxmox')ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
-            + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
+        setTxt("e-bwifhint", C("Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; ")
+            + C("VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç."));
     }
     catch { /* yok say */ }
 }
@@ -4216,7 +5034,8 @@ function progBox(p) {
 }
 function planCard(p) {
     const s = p.state || {};
-    return '<div class="plan' + (p.id === sel ? " sel" : "") + "\" onclick=\"pick('" + p.id + "')\">"
+    return '<div class="plan' + (p.id === sel ? " sel" : "") + '" data-plan="' + esc(p.id)
+        + "\" onclick=\"pick('" + p.id + "')\">"
         + "<h3>" + esc(p.name) + pillOf(p) + "</h3>"
         + progBox(p)
         + '<div class="row"><span>Kaynak</span><b>' + esc(p.src_dir)
@@ -4225,9 +5044,9 @@ function planCard(p) {
         + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
         + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
         + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
-        + '<div class="row"><span>Saklama</span><b>C(' + p.keep_days + " gün · min " + p.keep_count
-        + " set · çöp " + p.drive_trash_days + " gün</b></div>"
-        + ')<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
+        + '<div class="row"><span>Saklama</span><b>' + p.keep_days + C(" gün · min ") + p.keep_count
+        + C(" set · çöp ") + p.drive_trash_days + C(" gün") + "</b></div>"
+        + '<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
         + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
         + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
         + '<div class="pbtns" onclick="event.stopPropagation()">'
@@ -4264,9 +5083,9 @@ function detail(p) {
         + '<div class="grid">' + cards.map((c) => '<div class="card"><div class="k">' + c[0]
         + '</div><div class="v">' + c[1] + "</div></div>").join("") + "</div>"
         + '<h2>Google Drive kullanımı</h2><div class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>'
-        + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
-        + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
-        + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
+        + '<div class="small" style="margin-top:8px">' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
+        + C("%) · çöp: ") + hb(q.trashed || 0) + C(" · boş: ") + hb(q.free || 0) + "</div></div>"
+        + '<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
         + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
         + (b.slice(0, 40).map((x) => {
             const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
@@ -4300,17 +5119,20 @@ function render() {
         sec.value = dilAl();
     const tls = S.tls;
     setHtml("tlsrozet", tls && tls.aktif
-        ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
-        : '<span class="pill err" title=C("Trafik şifresiz — yalnızca VPN içinde kullan")>⚠ HTTP</span>');
+        ? '<span class="pill ok" title="' + esc(C("Bağlantı şifreli")) + '">🔒 HTTPS</span>'
+        : '<span class="pill err" title="' + esc(C("Trafik şifresiz — yalnızca VPN içinde kullan"))
+            + '">⚠ HTTP</span>');
     const g = S.guncelleme;
     setHtml("uprozet", g && g.yeni_var
-        ? '<span class="pill run" title=C("Yeni sürüm var: ' + esc(g.uzak || ")")
-            + '" style="cursor:pointer" onclick="openSettings()">⬆ C(' + esc(g.uzak || "") + " hazır</span>"
-        : ')<span class="small" title=C("Kurulu sürüm")>vC(' + esc(S.surum || "?") + "</span>");
+        ? '<span class="pill run" title="' + esc(C("Yeni sürüm var: ") + (g.uzak || ""))
+            + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + C(" hazır")
+            + "</span>"
+        : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
+            + "</span>");
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
-        || ')<div class="card">Henüz plan yok. Sağ üstten C("+ Yeni Plan") ile başla.</div>');
+        || '<div class="card">' + C("Henüz plan yok. Sağ üstten + Yeni Plan ile başla.") + "</div>");
     hesapSerit();
     setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
     ceviriUygula();
@@ -4386,7 +5208,7 @@ async function act(d, pid) {
     window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid) {
-    if (!confirm(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")))
+    if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz.")))
         return;
     const j = await api("/api/plan/delete?plan=" + encodeURIComponent(pid), { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -4446,6 +5268,7 @@ function wAdimGecerli(adim) {
 }
 function wAdim(yon) {
     if (yon > 0 && !wAdimGecerli(wAktif)) {
+        hataOdakla();
         flash(C("bu adımda eksik veya hatalı alan var"), false);
         return;
     }
@@ -4514,6 +5337,10 @@ function wHesapEkle() {
     fld("a-name").focus();
 }
 const PRESETS = {
+    az: { keep_days: 3, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
+        bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", min_age_min: 10,
+        vzdump_wait_min: 120, weekly_report: true, report_day: 1, report_at: "09:00",
+        report_days: 7, report_stale_days: 2, report_quota_warn: 90 },
     gunluk: { keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
         bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", min_age_min: 10,
         vzdump_wait_min: 60, weekly_report: true, report_day: 1, report_at: "09:00",
@@ -4554,8 +5381,36 @@ function preset(k) {
     setVal("e-bwsch", "");
     good("e-bwsch");
     ramHint();
+    saklamaIpucu();
     markDirty();
     flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
+}
+/** Saklama alanlarinin yardim metni yazilan degere gore guncellenir.
+ *  Sabit "14 gun" ornegi, alanda 3 yazarken yaniltiyordu. */
+function saklamaIpucu() {
+    const gun = Number(val("e-kd")) || 0;
+    const taban = Number(val("e-kc")) || 0;
+    const cop = Number(val("e-td")) || 0;
+    const gunluk = KAP && KAP.analiz && KAP.analiz.ok ? (KAP.analiz.gunluk || 0) : 0;
+    let a = gun === 0
+        ? C("Gün kuralı kapalı — yalnızca aşağıdaki set tabanı korur.")
+        : gun + " " + C("günden eski setler Google çöp kutusuna gönderilir.")
+            + " " + C("Günlük yedek alıyorsan Drive'da yaklaşık") + " " + gun + " " + C("set durur.");
+    if (gunluk)
+        a += " " + C("Ölçülene göre") + " ≈ " + hb(gunluk * gun) + ".";
+    setHtml("eg-kd", a);
+    let b2 = taban === 0
+        ? '<b style="color:#ffd479">' + C("0 riskli: gün kuralı bir VM/CT'nin tüm yedeklerini silebilir.") + "</b>"
+        : C("Bir VM/CT uzun süre yedeklenmese bile en yeni") + " <b>" + taban + "</b> "
+            + C("seti gün kuralından muaf tutulur.");
+    if (taban && gun && taban >= gun)
+        b2 += " " + C("Taban gün sayısından büyük ya da eşit: pratikte saklamayı taban belirler.");
+    setHtml("eg-kc", b2);
+    setHtml("eg-td", cop === 0
+        ? C("0 = çöpe uğramadan hemen kalıcı silinir; yanlış silmede geri dönüş olmaz.")
+        : C("Yanlış silme olursa") + " <b>" + cop + " " + C("gün") + "</b> "
+            + C("içinde Drive'ın çöp kutusundan geri alabilirsin.")
+            + (gunluk ? " " + C("Çöpte yaklaşık") + " " + hb(gunluk * cop) + " " + C("bekler.") : ""));
 }
 function ramHint() {
     const c = String(val("e-chunk") || "").match(/^(\d+(?:\.\d+)?)([KMG])$/i);
@@ -4606,10 +5461,12 @@ function openEditor(pid) {
     loadSmtpSelect(v.smtp_profile);
     void loadStorages();
     ramHint();
+    saklamaIpucu();
     Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
         .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
-    fld("e-kd").oninput = () => { kapasiteCiz(); markDirty(); };
-    fld("e-td").oninput = () => { kapasiteCiz(); markDirty(); };
+    fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
+    fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
+    fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
     fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
     fld("e-tr").oninput = () => { ramHint(); markDirty(); };
     hesapPaneliTasi("w-hesap-yuvasi", false);
@@ -4624,6 +5481,7 @@ function openEditor(pid) {
 function validatePlan() {
     // Alanlarin tamami tablodan dogrulanir (bkz. alanlar.ts).
     // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
+    hataTuruBaslat();
     let ok = alanlariDogrula();
     if (!val("e-acct"))
         ok = bad("e-acct", C("önce bir Google hesabı ekle")) && ok;
@@ -4644,6 +5502,7 @@ function validatePlan() {
 }
 async function savePlan() {
     if (!validatePlan()) {
+        hataOdakla();
         flash(C("form hatalı — kırmızı alanlara bak"), false);
         return;
     }
@@ -4663,6 +5522,7 @@ async function savePlan() {
         closeM("m-edit");
         sel = j.id || sel;
         remember();
+        taslakSil();
         void refresh();
     }
 }
@@ -4691,6 +5551,7 @@ async function kapasiteYukle(zorla) {
         return;
     }
     kapasiteCiz();
+    saklamaIpucu();
 }
 function kapasiteCiz() {
     if (!KAP)
@@ -4831,12 +5692,13 @@ async function renderAccounts() {
         const q = r.quota || {};
         const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
             + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
-        return '<div class="card" style="margin-bottom:8px"><div style="display:flex;'
+        return '<div class="card" data-hesap="' + esc(r.name) + '" style="margin-bottom:8px"><div style="display:flex;'
             + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
             + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
             + '<span style="flex:1"></span>'
             + "<button class=\"sm\" onclick=\"acctTest('" + r.name + "')\">Test</button>"
-            + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + C("')\">Sil</button></div>")
+            + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + "')\">" + C("Sil")
+            + "</button></div>"
             + '<div class="small" style="margin-top:6px">' + line + "</div></div>";
     }).join("") : '<div class="small">Henüz hesap yok.</div>');
 }
@@ -4846,7 +5708,7 @@ async function acctTest(n) {
     flash(j.msg || "", j.ok);
 }
 async function acctDel(n) {
-    if (!confirm("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz.")))
+    if (!await onay("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz.")))
         return;
     const j = await api("/api/remote/delete?name=" + encodeURIComponent(n), { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -4968,12 +5830,13 @@ function loadSmtpSelect(selId) {
 }
 function renderSmtp() {
     SMTP = (S && S.smtp) || [];
-    setHtml("s-list", SMTP.length ? SMTP.map((x) => '<div class="card" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
+    setHtml("s-list", SMTP.length ? SMTP.map((x) => '<div class="card" data-smtp="' + esc(x.id) + '" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
         + 'gap:8px;align-items:center;flex-wrap:wrap"><b>' + esc(x.name) + "</b>"
         + '<span style="flex:1"></span>'
-        + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + C("')\">Düzenle</button>")
+        + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + "')\">" + C("Düzenle") + "</button>"
         + "<button class=\"sm\" onclick=\"smtpTest('" + x.id + "')\">Test maili</button>"
-        + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + C("')\">Sil</button></div>")
+        + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + "')\">" + C("Sil")
+        + "</button></div>"
         + '<div class="small" style="margin-top:6px">' + esc(x.user || "-") + " · " + esc(x.host)
         + ":" + x.port + " · " + esc(x.security) + "</div></div>").join("")
         : '<div class="small">Henüz profil yok.</div>');
@@ -5036,7 +5899,7 @@ async function smtpSave() {
     }
 }
 async function smtpDel(id) {
-    if (!confirm("Profil silinsin mi?"))
+    if (!await onay(C("Profil silinsin mi?")))
         return;
     const j = await api("/api/smtp/delete?id=" + encodeURIComponent(id), { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -5045,7 +5908,7 @@ async function smtpDel(id) {
     loadSmtpSelect();
 }
 async function smtpTest(id) {
-    const to = prompt(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
+    const to = await sorMetin(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
     if (to === null)
         return;
     flash(C("gönderiliyor…"), true);
@@ -5158,7 +6021,7 @@ async function upKontrol() {
         : (j.yeni_var ? C("yeni sürüm var: v") + j.uzak : C("güncel: v") + j.surum), !j.hata);
 }
 async function upKur() {
-    if (!confirm(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
+    if (!await onay(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
         + C("Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?")))
         return;
     flash(C("indiriliyor ve doğrulanıyor…"), true);
@@ -5168,7 +6031,7 @@ async function upKur() {
         window.setTimeout(() => location.reload(), 6000);
 }
 async function upGeri() {
-    if (!confirm(C("Önceki sürüme dönülecek. Devam edilsin mi?")))
+    if (!await onay(C("Önceki sürüme dönülecek. Devam edilsin mi?")))
         return;
     const j = await api("/api/update/rollback", { method: "POST" });
     flash(j.msg || "", j.ok);
@@ -5176,30 +6039,227 @@ async function upGeri() {
         window.setTimeout(() => location.reload(), 6000);
 }
 /* ---------- baslangic ---------- */
+/** Kaydedilmemis degisiklik varsa uygulama ici onay sorar. */
+async function kapatmayiDene(m) {
+    if (m.id === "m-edit" && dirty
+        && !await onay(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?")))
+        return;
+    m.classList.remove("show");
+    if (m.id === "m-edit")
+        dirty = false;
+}
 Array.prototype.slice.call(document.querySelectorAll(".mask")).forEach((m) => {
     m.addEventListener("click", (e) => {
-        if (e.target !== m)
-            return;
-        if (m.id === "m-edit" && dirty
-            && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?")))
-            return;
-        m.classList.remove("show");
-        if (m.id === "m-edit")
-            dirty = false;
+        if (e.target !== m || m.id === "m-onay")
+            return; // onay penceresi disi tiklama kapatmaz
+        void kapatmayiDene(m);
     });
 });
 document.addEventListener("keydown", (e) => {
+    const acik = Array.prototype.slice.call(document.querySelectorAll(".mask.show"));
+    if (acik.some((m) => m.id === "m-onay")) {
+        if (e.key === "Enter")
+            onayKapat(true);
+        else if (e.key === "Escape")
+            onayKapat(false);
+        return;
+    }
     if (e.key !== "Escape")
         return;
-    Array.prototype.slice.call(document.querySelectorAll(".mask.show")).forEach((m) => {
-        if (m.id === "m-edit" && dirty
-            && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?")))
-            return;
-        m.classList.remove("show");
-    });
+    acik.forEach((m) => void kapatmayiDene(m));
 });
+/* ---------- sag tik menuleri ----------
+ * Kayitlar bir kez yapilir; listeler yenilendiginde tekrar baglamak gerekmez
+ * cunku dinleyici document uzerinde ve secici ile eslesiyor (bkz. menu.ts). */
+function planBul(id) {
+    return S ? S.plans.filter((p) => p.id === id)[0] : undefined;
+}
+/** Planin yalnizca etkin bayragini degistirir. save_plan ad ve hedefi zorunlu
+ *  gordugu icin onlari da yolluyoruz; gerisi sunucuda korunur. */
+async function planDurumDegistir(p) {
+    const j = await api("/api/plan/save", { method: "POST", body: JSON.stringify({ id: p.id, name: p.name, remote: p.remote, enabled: !p.enabled }) });
+    flash(j.ok ? (p.enabled ? C("plan duraklatıldı") : C("plan etkinleştirildi")) : (j.msg || ""), j.ok);
+    void refresh();
+}
+/** Mevcut plandan kopya: sihirbaz yerine dolu formu acar, id bos kalir. */
+function planKopyala(p) {
+    openEditor(null);
+    wSihirbaz = false;
+    wGoster();
+    alanlariDoldur(p);
+    const i = p.remote.indexOf(":");
+    setVal("e-acct", p.remote.slice(0, i));
+    setVal("e-folder", p.remote.slice(i + 1));
+    setVal("e-name", p.name + C(" (kopya)"));
+    setChk("e-enabled", false); // kopya kapali baslar, once gozden gecirilsin
+    Array.prototype.slice.call(el("e-wd").querySelectorAll("input")).forEach((c) => {
+        c.checked = (p.weekdays || []).indexOf(Number(c.value)) >= 0;
+    });
+    ramHint();
+    saklamaIpucu();
+    markDirty();
+    flash(C("kopya hazır — gözden geçirip kaydet"), true);
+}
+function planMenusu(kap) {
+    const p = planBul(kap.getAttribute("data-plan") || "");
+    if (!p)
+        return [];
+    const aliciVar = Boolean(p.report_mail_to || p.mail_to);
+    return [
+        { baslik: true, etiket: p.name },
+        { simge: "▶", etiket: "Yedeklemeyi başlat", pasif: p.running,
+            ipucu: p.running ? "bu plan zaten çalışıyor" : "", is: () => act("backup", p.id) },
+        { simge: p.enabled ? "⏸" : "✅", etiket: p.enabled ? "Planı duraklat" : "Planı etkinleştir",
+            ipucu: p.enabled ? "zamanlama durur, dosyalara dokunulmaz" : "",
+            is: () => planDurumDegistir(p) },
+        { ayrac: true },
+        { simge: "🧹", etiket: "Retention'ı şimdi çalıştır", pasif: p.running,
+            ipucu: "süresi dolan setleri Drive çöpüne taşır", is: () => act("prune", p.id) },
+        { simge: "🗑", etiket: "Çöpü boşalt", pasif: p.running,
+            ipucu: "çöpte süresi dolmuş dosyaları kalıcı siler", is: () => act("purgetrash", p.id) },
+        { simge: "↻", etiket: "Drive durumunu tazele", pasif: p.running,
+            is: () => act("refresh", p.id) },
+        { ayrac: true },
+        { simge: "📊", etiket: "Haftalık raporu şimdi gönder", pasif: !aliciVar || !p.weekly_report,
+            ipucu: !p.weekly_report ? "bu planda rapor kapalı"
+                : !aliciVar ? "önce plana mail adresi gir" : "", is: () => act("report", p.id) },
+        { simge: "✉", etiket: "Test maili gönder", pasif: !p.mail_to,
+            ipucu: p.mail_to ? "" : "önce plana mail adresi gir", is: () => act("testmail", p.id) },
+        { ayrac: true },
+        { simge: "✎", etiket: "Düzenle", is: () => openEditor(p.id) },
+        { simge: "⧉", etiket: "Kopyasını oluştur", is: () => planKopyala(p) },
+        { simge: "⬇", etiket: "Planı JSON olarak indir",
+            ipucu: "başka sunucuya taşımak için", is: () => dosyaIndir("plan-" + p.id + ".json", JSON.stringify(p, null, 2), "application/json") },
+        { simge: "📋", etiket: "Kaynak klasörü kopyala", is: () => panoyaYaz(p.src_dir, C("kaynak")) },
+        { simge: "📋", etiket: "Hedefi kopyala", is: () => panoyaYaz(p.remote, C("hedef")) },
+        { simge: "📄", etiket: "Bu planın loglarını göster", is: () => setLog(p.id) },
+        { ayrac: true },
+        { simge: "🗑", etiket: "Planı sil", tehlike: true, is: () => delPlan(p.id) },
+    ];
+}
+function hesapMenusu(kap) {
+    const ad = kap.getAttribute("data-hesap") || "";
+    const r = REM.filter((x) => x.name === ad)[0];
+    const q = (r && r.quota) || {};
+    return [
+        { baslik: true, etiket: ad },
+        { simge: "🔌", etiket: "Bağlantıyı test et", is: () => acctTest(ad) },
+        { simge: "↻", etiket: "Kotayı yenile", is: () => renderAccounts() },
+        { simge: "📋", etiket: "Hesap adını kopyala", is: () => panoyaYaz(ad, C("hesap adı")) },
+        { simge: "📋", etiket: "Kota bilgisini kopyala", pasif: !q.ok,
+            is: () => panoyaYaz(ad + ": " + hb(q.used || 0) + " / " + hb(q.total || 0)) },
+        { ayrac: true },
+        { simge: "🗑", etiket: "Hesabı kaldır", tehlike: true,
+            ipucu: "Drive'daki dosyalara dokunulmaz", is: () => acctDel(ad) },
+    ];
+}
+function smtpMenusu(kap) {
+    const id = kap.getAttribute("data-smtp") || "";
+    const x = SMTP.filter((y) => y.id === id)[0];
+    if (!x)
+        return [];
+    return [
+        { baslik: true, etiket: x.name },
+        { simge: "✎", etiket: "Düzenle", is: () => smtpEdit(id) },
+        { simge: "✉", etiket: "Test maili gönder", is: () => smtpTest(id) },
+        { simge: "📋", etiket: "Sunucu adresini kopyala",
+            is: () => panoyaYaz(x.host + ":" + x.port, C("sunucu")) },
+        { ayrac: true },
+        { simge: "🗑", etiket: "Profili sil", tehlike: true, is: () => smtpDel(id) },
+    ];
+}
+/** Imlecin durdugu log satirini dondurur. Tarayici caret API'si varsa metin
+ *  ofsetinden kesin bulunur; yoksa satir yuksekligiyle tahmin edilir. */
+function logSatiriBul(tum, olay) {
+    const d = document;
+    let ofset = -1;
+    try {
+        if (d.caretPositionFromPoint) {
+            const k = d.caretPositionFromPoint(olay.clientX, olay.clientY);
+            if (k)
+                ofset = k.offset;
+        }
+        else if (d.caretRangeFromPoint) {
+            const r = d.caretRangeFromPoint(olay.clientX, olay.clientY);
+            if (r)
+                ofset = r.startOffset;
+        }
+    }
+    catch { /* desteklenmiyorsa tahmine duseriz */ }
+    if (ofset >= 0 && ofset <= tum.length) {
+        const bas = tum.lastIndexOf("\n", Math.max(0, ofset - 1)) + 1;
+        const son = tum.indexOf("\n", ofset);
+        return tum.slice(bas, son < 0 ? tum.length : son);
+    }
+    const kutu = el("log");
+    const g = kutu.getBoundingClientRect();
+    const sy = parseFloat(getComputedStyle(kutu).lineHeight) || 16;
+    const satirlar = tum.split("\n");
+    const i = Math.floor((olay.clientY - g.top + kutu.scrollTop) / sy);
+    return satirlar[Math.max(0, Math.min(satirlar.length - 1, i))] || "";
+}
+function logMenusu(_kap, olay) {
+    const tum = el("log").textContent || "";
+    const satir = logSatiriBul(tum, olay);
+    const kaynak = LOGSRC === "all" ? C("tümü") : LOGSRC === "system" ? C("sistem") : LOGSRC;
+    return [
+        { baslik: true, etiket: C("Log — ") + kaynak },
+        { simge: "📋", etiket: "Bu satırı kopyala", pasif: !satir.trim(),
+            ipucu: satir.slice(0, 90), is: () => panoyaYaz(satir, C("satır")) },
+        { simge: "📋", etiket: "Görünen logu kopyala", is: () => panoyaYaz(tum) },
+        { simge: "⬇", etiket: "Log dosyası olarak indir",
+            is: () => dosyaIndir("pve-gdrive-" + LOGSRC + ".log", tum) },
+        { ayrac: true },
+        { simge: "↻", etiket: "Yenile", is: () => loadLog() },
+        { simge: "📄", etiket: "Sistem loglarına geç", pasif: LOGSRC === "system",
+            is: () => setLog("system") },
+        { simge: "📚", etiket: "Tüm logları göster", pasif: LOGSRC === "all", is: () => setLog("all") },
+    ];
+}
+/** Yedek ve cop tablolarindaki satirlar: dosya adiyla ugrasmak icin. */
+function satirMenusu(tr) {
+    const hucreler = Array.prototype.slice.call(tr.querySelectorAll("td"));
+    if (!hucreler.length)
+        return null;
+    const metinler = hucreler.map((td) => (td.textContent || "").trim());
+    // En uzun hucre dosya adidir (vzdump-qemu-100-...zst)
+    const dosya = metinler.filter((m) => m.indexOf("vzdump") === 0)[0] || "";
+    return [
+        { simge: "📋", etiket: "Dosya adını kopyala", pasif: !dosya,
+            ipucu: dosya, is: () => panoyaYaz(dosya, C("dosya adı")) },
+        { simge: "📋", etiket: "Satırı kopyala", is: () => panoyaYaz(metinler.join("  ")) },
+        { simge: "📋", etiket: "Tabloyu kopyala", is: () => {
+                const govde = tr.closest("table");
+                const s2 = Array.prototype.slice.call(govde ? govde.querySelectorAll("tr") : [])
+                    .map((r) => Array.prototype.slice.call(r.querySelectorAll("th,td"))
+                    .map((c) => (c.textContent || "").trim()).join("\t")).join("\n");
+                void panoyaYaz(s2, C("tablo"));
+            } },
+    ];
+}
+function genelMenu() {
+    return [
+        { simge: "➕", etiket: "Yeni plan", is: () => openEditor(null) },
+        { simge: "↻", etiket: "Şimdi yenile", is: () => refresh() },
+        { ayrac: true },
+        { simge: "👤", etiket: "Google hesapları", is: () => openAccounts() },
+        { simge: "✉", etiket: "SMTP profilleri", is: () => openSmtp() },
+        { simge: "⚙", etiket: "Ayarlar", is: () => openSettings() },
+    ];
+}
+function menuleriTanimla() {
+    sagTik("[data-plan]", planMenusu);
+    sagTik("[data-hesap]", hesapMenusu);
+    sagTik("[data-smtp]", smtpMenusu);
+    sagTik("#log", logMenusu);
+    sagTik(".panel table tbody tr", satirMenusu);
+    sagTik("#plans, .wrap > header, #detail", genelMenu);
+}
 dilBaslat();
-void refresh();
+surukleKur();
+menuKur();
+menuleriTanimla();
+void refresh().then(taslakSor);
 /**
  * Plan formu alan tablosu.
  *
@@ -5308,6 +6368,7 @@ function alanlariTopla() {
 /** Tabloya gore dogrular. adim verilirse yalnizca o adimin alanlari kontrol edilir. */
 function alanlariDogrula(adim) {
     var _a, _b;
+    hataTuruBaslat();
     let ok = true;
     for (const a of PLAN_ALANLARI) {
         if (!document.getElementById(a.id))

@@ -1,6 +1,13 @@
 <div class="wrap">
 <header>
-  <h1>🗄️ Proxmox → Google Drive Yedek</h1>
+  <span class="logo"><svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#161b22" stroke="#2d3d50" stroke-width="2"/>
+  <path d="M20 40 L32 18 L44 40 Z" fill="#e57000" opacity=".92"/>
+  <path d="M14 44 h36 a3 3 0 0 0 0-6 h-1.2a10 10 0 0 0-19.3-3.4A7 7 0 0 0 14 44Z" fill="#58a6ff" opacity=".95"/>
+  <path d="M32 46 v9 m0 0 -4.5-4.5 M32 55 l4.5-4.5" stroke="#7ee2a8" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg></span>
+  <h1>Proxmox → Google Drive Yedek</h1>
   <span id="tlsrozet"></span>
   <span id="uprozet"></span>
   <span class="muted" id="hinfo"></span>
@@ -32,12 +39,15 @@
   <div class="wbaslik"><b>1. Plan</b> <span class="small">Bu plana bir ad ver</span></div>
   <fieldset><legend>Hazır senaryolar</legend>
     <div class="btns">
-      <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Çoğu kurulum için doğru başlangıç.">📅 Günlük — 14 gün</button>
+      <button class="sm" onclick="preset('az')" title="Her gün 03:00, Drive'da 3 gün, çöpte 1 gün. En az yer kaplayan seçenek; son birkaç günü korur.">🗜️ Az yer — 3 gün</button>
+      <button class="sm" onclick="preset('gunluk')" title="Her gün 03:00, Drive'da 14 gün, çöpte 1 gün. Daha geniş geri dönüş penceresi, daha çok yer.">📅 Günlük — 14 gün</button>
       <button class="sm" onclick="preset('haftalik')" title="Her Pazar 05:00, Drive'da 180 gün, çöpte 7 gün, düşük hız. Uzun süreli arşiv.">🗄️ Haftalık arşiv — 6 ay</button>
       <button class="sm" onclick="preset('kritik')" title="Her gün 02:00, Drive'da 30 gün, VM/CT başına en az 7 set, çöpte 3 gün.">🔒 Kritik — 30 gün</button>
       <button class="sm" onclick="preset('test')" title="Her gün, 2 gün sakla, çöpte yarım gün. Kurulumu denemek için.">🧪 Test</button>
     </div>
-    <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.</div>
+    <div class="hint">Senaryo seçmek formu doldurur; sonra istediğini değiştirebilirsin. Kaydetmeden hiçbir şey uygulanmaz.<br>
+      <b>Gün sayısı arttıkça yer de artar.</b> 4. adımdaki kapasite paneli seçtiğin sürenin
+      kaç GB tuttuğunu ve kotanın yüzde kaçını kullanacağını anında gösterir.</div>
   </fieldset>
   <fieldset><legend>Genel</legend>
     <div class="f"><label class="tip" title="Listede ve mail konularında görünecek ad. Plan kimliği bu addan türetilir.">Plan adı</label>
@@ -93,13 +103,13 @@
     </div>
     <div class="f"><label class="tip" title="Bu günden eski yedek setleri Google çöp kutusuna gönderilir. Süre dosyanın adındaki tarihe göre hesaplanır.">Drive'da tut (gün)</label>
       <div><input type="number" min="0" id="e-kd"><div class="errmsg" id="err-kd"></div>
-        <div class="eg">14 gün + günlük yedek ≈ 14 set. Yer hesabı: günlük yedek boyutu × gün sayısı.</div></div></div>
+        <div class="eg" id="eg-kd">Bu süreden eski setler Google çöp kutusuna gönderilir.</div></div></div>
     <div class="f"><label class="tip" title="Güvenlik tabanı: VM/CT başına bu kadar set, gün sınırına bakılmadan korunur.">En az set (adet)</label>
       <div><input type="number" min="0" id="e-kc"><div class="errmsg" id="err-kc"></div>
-        <div class="eg">Bir VM 3 aydır yedeklenmiyorsa gün kuralı hepsini silerdi; bu ayar son <b>N</b> seti korur. <b>0 yazma.</b></div></div></div>
+        <div class="eg" id="eg-kc">Gün kuralından muaf güvenlik tabanı.</div></div></div>
     <div class="f"><label class="tip" title="Google çöp kutusunda bekleme süresi. Bu süre dolunca kalıcı silinir ve kota boşalır.">Çöpte bekle (gün)</label>
       <div><input type="number" min="0" step="0.5" id="e-td"><div class="errmsg" id="err-td"></div>
-        <div class="eg">Yanlış silme olursa bu süre içinde Drive'dan geri alabilirsin. <b>0</b> = çöpe uğramadan hemen kalıcı sil.</div></div></div>
+        <div class="eg" id="eg-td">Çöpte bekleme süresi.</div></div></div>
   </fieldset>
 </div>
 <div class="wstep" data-step="5" style="display:none">
@@ -419,4 +429,16 @@
     </div>
   </fieldset>
 </div>
+<div class="mask" id="m-onay"><div class="modal" style="max-width:440px">
+  <h2 id="onay-baslik">Onay</h2>
+  <div id="onay-metin" class="small" style="margin:10px 0 4px;line-height:1.6"></div>
+  <div id="onay-girdi-sar" style="display:none;margin-top:10px">
+    <input id="onay-girdi" autocomplete="off">
+  </div>
+  <div class="mbtns">
+    <button id="onay-hayir" onclick="onayKapat(false)">Vazgeç</button>
+    <button id="onay-evet" class="primary" onclick="onayKapat(true)">Tamam</button>
+  </div>
+</div></div>
+
 <div class="flash" id="flash"></div>

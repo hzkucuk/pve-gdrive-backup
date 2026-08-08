@@ -41,9 +41,13 @@ def main():
             print(f"HATA: {ad} icinde ''' var, Python ham dizesini bozar", file=sys.stderr)
             sys.exit(1)
 
+    # Favicon gomulu SVG data URI: dis kaynak yok, CSP'ye takilmaz.
+    favicon = oku(os.path.join(UI, "favicon.txt")).strip()
     html = ('<!doctype html><html lang="tr"><head><meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
-            "<title>Proxmox → Drive Yedek</title>\n<style>\n" + css + "\n</style></head><body>\n"
+            "<title>Proxmox → Drive Yedek</title>\n"
+            f'<link rel="icon" href="{favicon}">\n'
+            "<style>\n" + css + "\n</style></head><body>\n"
             + body + "\n<script>\n" + js + "\n</script></body></html>\n")
 
     src = oku(TARGET)

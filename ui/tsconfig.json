@@ -2,7 +2,11 @@
   "compilerOptions": {
     "target": "ES2019",
     "module": "none",
-    "lib": ["ES2019", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2019",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "outFile": "dist/app.js",
     "strict": true,
     "noImplicitAny": true,
@@ -13,5 +17,12 @@
     "removeComments": false,
     "sourceMap": false
   },
-  "files": ["src/types.ts", "src/en.ts", "src/dil.ts", "src/app.ts", "src/alanlar.ts"]
+  "files": [
+    "src/types.ts",
+    "src/en.ts",
+    "src/dil.ts",
+    "src/menu.ts",
+    "src/app.ts",
+    "src/alanlar.ts"
+  ]
 }

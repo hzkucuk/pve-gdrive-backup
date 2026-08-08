@@ -118,3 +118,40 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .kap-misafir td:last-child{text-align:right;color:#c9d4df}
 .kap-uyari{color:#ffd479;margin-top:8px;font-size:12px;line-height:1.5}
 .kap-hata{color:#ff9b9b}
+
+/* --- logo --- */
+.logo{display:inline-flex;width:34px;height:34px;flex:0 0 34px}
+.logo svg{width:100%;height:100%}
+.girislogo{width:56px;height:56px;margin:0 auto 10px;display:block}
+
+/* --- surukleme --- */
+.modal > h2{cursor:move;user-select:none}
+.modal > h2::before{content:"⠿";opacity:.35;margin-right:8px;font-size:13px;letter-spacing:-2px}
+.mask.suruklenen{transition:none}
+
+/* Dogrulama sonrasi odaklanan alan kisa sure vurgulanir */
+.odak{animation:odakYan 1.4s ease-out}
+@keyframes odakYan{
+  0%,55%{box-shadow:0 0 0 3px rgba(255,107,107,.55)}
+  100%{box-shadow:0 0 0 0 rgba(255,107,107,0)}
+}
+
+/* ---------- sag tik menusu ---------- */
+.ctx{position:fixed;z-index:900;min-width:230px;max-width:340px;padding:5px;
+  background:#161b22;border:1px solid #30363d;border-radius:10px;
+  box-shadow:0 12px 32px rgba(0,0,0,.55);font-size:13px;
+  animation:ctxGir .09s ease-out}
+@keyframes ctxGir{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.ctx hr{border:0;border-top:1px solid #232b36;margin:5px 6px}
+.ctx-baslik{padding:6px 10px 7px;color:#8b97a5;font-size:11px;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.ctx-oge{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:6px;
+  cursor:pointer;color:#e6edf3;white-space:nowrap}
+.ctx-oge:hover,.ctx-oge.on{background:#1f6feb;color:#fff}
+.ctx-oge.tehlike{color:#ff9b9b}
+.ctx-oge.tehlike:hover,.ctx-oge.tehlike.on{background:#8a2b2b;color:#fff}
+.ctx-oge.pasif{color:#5b6472;cursor:default}
+.ctx-oge.pasif:hover{background:transparent;color:#5b6472}
+.ctx-simge{width:17px;text-align:center;flex:0 0 auto;opacity:.9}
+.ctx-metin{overflow:hidden;text-overflow:ellipsis}

@@ -73,7 +73,85 @@ window.addEventListener("beforeunload", (e: BeforeUnloadEvent) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; return ""; }
   return undefined;
 });
-function markDirty(): void { dirty = true; }
+function markDirty(): void { dirty = true; taslakPlanla(); }
+
+/* ---------- F5 taslagi ----------
+ * beforeunload uyarisi yalnizca soruyor; "evet" dersen yazdiklarin gidiyordu.
+ * Acik formu araliklarla yerel olarak sakliyoruz, donunce geri yuklemeyi oneriyoruz.
+ * Sunucuya hicbir sey gitmez; taslak yalnizca bu tarayicida durur. */
+const TASLAK = "pg_taslak";
+let taslakZamanlayici = 0;
+
+/** #m-edit icindeki tum girdilerin anlik degeri. Alan tablosuna bagimli degil:
+ *  forma yeni bir alan eklendiginde taslak da kendiliginden kapsar. */
+function formAnlik(): Record<string, unknown> {
+  const o: Record<string, unknown> = {};
+  const kap = document.getElementById("m-edit");
+  if (!kap) return o;
+  Array.prototype.slice.call(kap.querySelectorAll("input,select,textarea"))
+    .forEach((g: HTMLInputElement) => {
+      if (!g.id || g.type === "file" || g.type === "password") return;
+      o[g.id] = g.type === "checkbox" || g.type === "radio" ? g.checked : g.value;
+    });
+  o.__gunler = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
+    .map((c: HTMLInputElement) => c.value);
+  return o;
+}
+
+function formGeriYukle(o: Record<string, unknown>): void {
+  for (const k of Object.keys(o)) {
+    if (k === "__gunler") continue;
+    const g = document.getElementById(k) as HTMLInputElement | null;
+    if (!g) continue;
+    if (g.type === "checkbox" || g.type === "radio") g.checked = Boolean(o[k]);
+    else g.value = String(o[k]);
+  }
+  const gunler = (o.__gunler as string[]) || [];
+  Array.prototype.slice.call(el("e-wd").querySelectorAll("input"))
+    .forEach((c: HTMLInputElement) => { c.checked = gunler.indexOf(c.value) >= 0; });
+}
+
+function taslakPlanla(): void {
+  if (taslakZamanlayici) return;                 // saniyede bir yaz, her tusa basista degil
+  taslakZamanlayici = window.setTimeout(() => {
+    taslakZamanlayici = 0;
+    if (!dirty || !el("m-edit").classList.contains("show")) return;
+    try {
+      localStorage.setItem(TASLAK, JSON.stringify({
+        pid: EDIT, sihirbaz: wSihirbaz, adim: wAktif,
+        zaman: Date.now(), alanlar: formAnlik(),
+      }));
+    } catch { /* kota dolu olabilir, taslak zorunlu degil */ }
+  }, 1000);
+}
+
+function taslakSil(): void {
+  try { localStorage.removeItem(TASLAK); } catch { /* yok say */ }
+}
+
+/** Acilista yarim kalmis duzenleme varsa geri yuklemeyi onerir. */
+async function taslakSor(): Promise<void> {
+  let t: { pid: string | null; sihirbaz: boolean; adim: number; zaman: number;
+           alanlar: Record<string, unknown> } | null = null;
+  try { t = JSON.parse(localStorage.getItem(TASLAK) || "null"); } catch { t = null; }
+  if (!t || !t.alanlar) return;
+  const yas = (Date.now() - (t.zaman || 0)) / 60000;
+  if (yas > 60 * 24) { taslakSil(); return; }    // bir gunden eski taslak ise yaramaz
+  if (t.pid && S && !S.plans.some((p) => p.id === t!.pid)) { taslakSil(); return; }
+  const ad = String(t.alanlar["e-name"] || "").trim();
+  const ne = t.pid ? C("Plan: ") + (ad || t.pid) : C("yeni plan");
+  const sure = yas < 1 ? C("az önce") : Math.round(yas) + C(" dakika önce");
+  if (!await onay(C("Yarım kalmış bir düzenleme var — ") + ne + " (" + sure + ").\n"
+                  + C("Kaydedilmemişti. Geri yüklensin mi?"),
+                  C("Yarım kalan düzenleme"), C("Geri yükle"), C("Sil"))) {
+    taslakSil(); return;
+  }
+  openEditor(t.pid);
+  formGeriYukle(t.alanlar);
+  if (t.sihirbaz) { wAktif = Math.max(1, Math.min(ADIMLAR.length, t.adim || 1)); wGoster(); }
+  ceviriUygula(); ramHint(); saklamaIpucu(); markDirty();
+  flash(C("taslak geri yüklendi — kaydetmedikçe uygulanmaz"), true);
+}
 
 try {
   sel = localStorage.getItem("pg_sel") || null;
@@ -102,7 +180,35 @@ function errBox(id: string): HTMLElement | null {
   return document.getElementById("err-" + id.replace("-", ""))
       || document.getElementById("err-" + id.replace(/^[a-z]-/, ""));
 }
+/** Dogrulama turunda ilk hatali alanin id'si. hataOdakla() bunu kullanir. */
+let ilkHataAlani: string | null = null;
+function hataTuruBaslat(): void { ilkHataAlani = null; }
+
+/** Hatali alan ekranin disinda kalabiliyordu: sihirbazda dogru adima gec,
+ *  alani ortala ve odagi ver ki kullanici neyi duzeltecegini gorsun. */
+function hataOdakla(): void {
+  const id = ilkHataAlani;
+  if (!id) return;
+  const e = document.getElementById(id) as HTMLElement | null;
+  if (!e) return;
+  if (wSihirbaz) {
+    const adim = ADIM_ALANLARI.findIndex((liste) => liste.indexOf(id) >= 0);
+    if (adim >= 0 && adim + 1 !== wAktif) { wAktif = adim + 1; wGoster(); }
+  }
+  const kutu = e.closest("details") as HTMLDetailsElement | null;
+  if (kutu && !kutu.open) kutu.open = true;
+  window.setTimeout(() => {
+    try { e.scrollIntoView({ block: "center", behavior: "smooth" }); }
+    catch { e.scrollIntoView(); }
+    try { (e as HTMLInputElement).focus({ preventScroll: true }); }
+    catch { (e as HTMLInputElement).focus(); }
+    e.classList.add("odak");
+    window.setTimeout(() => e.classList.remove("odak"), 1400);
+  }, 60);
+}
+
 function bad(id: string, msg: string): boolean {
+  if (!ilkHataAlani) ilkHataAlani = id;
   fld(id).classList.add("bad");
   const e = errBox(id);
   if (e) { e.textContent = msg; e.classList.add("show"); }
@@ -158,11 +264,12 @@ async function loadIfaces(secili: string): Promise<void> {
     const j = await api<{ default: string; ifaces: { name: string; tx: number; default: boolean }[] }>("/api/ifaces");
     const list = j.ifaces || [];
     setHtml("e-bwif", '<option value="">(otomatik: ' + esc(j.default || "-") + ")</option>"
-      + list.map((i) => '<option value="' + esc(i.name) + '">C(' + esc(i.name)
-        + " — " + hb(i.tx) + " gönderilmiş" + (i.default ? " (varsayılan rota)" : "") + "</option>").join(""));
+      + list.map((i) => '<option value="' + esc(i.name) + '">' + esc(i.name)
+        + " — " + hb(i.tx) + C(" gönderilmiş") + (i.default ? C(" (varsayılan rota)") : "")
+        + "</option>").join(""));
     setVal("e-bwif", secili);
-    setTxt("e-bwifhint", "Proxmox')ta köprü (vmbr0) yalnızca host trafiğini görebilir; "
-      + "VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç.");
+    setTxt("e-bwifhint", C("Proxmox'ta köprü (vmbr0) yalnızca host trafiğini görebilir; ")
+      + C("VM ve CT trafiğini de saymak için fiziksel veya bond arayüzünü seç."));
   } catch { /* yok say */ }
 }
 
@@ -232,7 +339,8 @@ function progBox(p: Plan): string {
 }
 function planCard(p: Plan): string {
   const s = p.state || ({} as PlanState);
-  return '<div class="plan' + (p.id === sel ? " sel" : "") + "\" onclick=\"pick('" + p.id + "')\">"
+  return '<div class="plan' + (p.id === sel ? " sel" : "") + '" data-plan="' + esc(p.id)
+    + "\" onclick=\"pick('" + p.id + "')\">"
     + "<h3>" + esc(p.name) + pillOf(p) + "</h3>"
     + progBox(p)
     + '<div class="row"><span>Kaynak</span><b>' + esc(p.src_dir)
@@ -241,9 +349,9 @@ function planCard(p: Plan): string {
     + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
     + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
     + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
-    + '<div class="row"><span>Saklama</span><b>C(' + p.keep_days + " gün · min " + p.keep_count
-    + " set · çöp " + p.drive_trash_days + " gün</b></div>"
-    + ')<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
+    + '<div class="row"><span>Saklama</span><b>' + p.keep_days + C(" gün · min ") + p.keep_count
+    + C(" set · çöp ") + p.drive_trash_days + C(" gün") + "</b></div>"
+    + '<div class="row"><span>Son çalışma</span><b>' + esc(s.last_run || "-") + "</b></div>"
     + (p.weekly_report ? '<div class="row"><span>Haftalık rapor</span><b>' + esc(p.next_report || "-") + "</b></div>" : "")
     + (s.summary ? '<div class="small" style="margin-top:6px">' + esc(s.summary) + "</div>" : "")
     + '<div class="pbtns" onclick="event.stopPropagation()">'
@@ -279,9 +387,9 @@ function detail(p: Plan | undefined): string {
     + '<div class="grid">' + cards.map((c) => '<div class="card"><div class="k">' + c[0]
       + '</div><div class="v">' + c[1] + "</div></div>").join("") + "</div>"
     + '<h2>Google Drive kullanımı</h2><div class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>'
-    + '<div class="small" style="margin-top:8px">C(' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
-    + "%) · çöp: " + hb(q.trashed || 0) + " · boş: " + hb(q.free || 0) + "</div></div>"
-    + ')<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
+    + '<div class="small" style="margin-top:8px">' + hb(used) + " / " + hb(total) + " (" + pct.toFixed(1)
+    + C("%) · çöp: ") + hb(q.trashed || 0) + C(" · boş: ") + hb(q.free || 0) + "</div></div>"
+    + '<div class="cols"><div class="panel"><h2>Yedekler (Drive)</h2><table><thead><tr><th>Tarih</th>'
     + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
     + (b.slice(0, 40).map((x) => {
         const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
@@ -313,17 +421,20 @@ function render(): void {
   if (sec && sunucuDil && sec.value !== dilAl()) sec.value = dilAl();
   const tls = S.tls;
   setHtml("tlsrozet", tls && tls.aktif
-    ? '<span class="pill ok" title=C("Bağlantı şifreli")>🔒 HTTPS</span>'
-    : '<span class="pill err" title=C("Trafik şifresiz — yalnızca VPN içinde kullan")>⚠ HTTP</span>');
+    ? '<span class="pill ok" title="' + esc(C("Bağlantı şifreli")) + '">🔒 HTTPS</span>'
+    : '<span class="pill err" title="' + esc(C("Trafik şifresiz — yalnızca VPN içinde kullan"))
+      + '">⚠ HTTP</span>');
   const g = S.guncelleme;
   setHtml("uprozet", g && g.yeni_var
-    ? '<span class="pill run" title=C("Yeni sürüm var: ' + esc(g.uzak || ")")
-      + '" style="cursor:pointer" onclick="openSettings()">⬆ C(' + esc(g.uzak || "") + " hazır</span>"
-    : ')<span class="small" title=C("Kurulu sürüm")>vC(' + esc(S.surum || "?") + "</span>");
+    ? '<span class="pill run" title="' + esc(C("Yeni sürüm var: ") + (g.uzak || ""))
+      + '" style="cursor:pointer" onclick="openSettings()">⬆ ' + esc(g.uzak || "") + C(" hazır")
+      + "</span>"
+    : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
+      + "</span>");
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
-    || ')<div class="card">Henüz plan yok. Sağ üstten C("+ Yeni Plan") ile başla.</div>');
+    || '<div class="card">' + C("Henüz plan yok. Sağ üstten + Yeni Plan ile başla.") + "</div>");
   hesapSerit();
   setHtml("detail", detail(ps.filter((p) => p.id === sel)[0]));
   ceviriUygula();
@@ -388,7 +499,7 @@ async function act(d: string, pid: string): Promise<void> {
   window.setTimeout(() => void refresh(), 900);
 }
 async function delPlan(pid: string): Promise<void> {
-  if (!confirm(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))) return;
+  if (!await onay(C("Plan silinsin mi? Drive'daki yedek dosyalarına dokunulmaz."))) return;
   const j = await api("/api/plan/delete?plan=" + encodeURIComponent(pid), { method: "POST" });
   flash(j.msg || "", j.ok);
   void refresh();
@@ -447,6 +558,7 @@ function wAdimGecerli(adim: number): boolean {
 
 function wAdim(yon: number): void {
   if (yon > 0 && !wAdimGecerli(wAktif)) {
+    hataOdakla();
     flash(C("bu adımda eksik veya hatalı alan var"), false);
     return;
   }
@@ -520,6 +632,10 @@ interface Preset {
   report_at: string; report_days: number; report_stale_days: number; report_quota_warn: number;
 }
 const PRESETS: Record<string, Preset> = {
+  az: { keep_days: 3, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
+    bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", min_age_min: 10,
+    vzdump_wait_min: 120, weekly_report: true, report_day: 1, report_at: "09:00",
+    report_days: 7, report_stale_days: 2, report_quota_warn: 90 },
   gunluk: { keep_days: 14, keep_count: 3, drive_trash_days: 1, run_at: "03:00", weekdays: [],
     bwlimit: "30M", transfers: 2, checkers: 4, drive_chunk: "64M", min_age_min: 10,
     vzdump_wait_min: 60, weekly_report: true, report_day: 1, report_at: "09:00",
@@ -549,9 +665,39 @@ function preset(k: string): void {
     c.checked = v.weekdays.indexOf(Number(c.value)) >= 0;
   });
   setVal("e-bwsch", ""); good("e-bwsch");
-  ramHint(); markDirty();
+  ramHint(); saklamaIpucu(); markDirty();
   flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
 }
+/** Saklama alanlarinin yardim metni yazilan degere gore guncellenir.
+ *  Sabit "14 gun" ornegi, alanda 3 yazarken yaniltiyordu. */
+function saklamaIpucu(): void {
+  const gun = Number(val("e-kd")) || 0;
+  const taban = Number(val("e-kc")) || 0;
+  const cop = Number(val("e-td")) || 0;
+  const gunluk = KAP && KAP.analiz && KAP.analiz.ok ? (KAP.analiz.gunluk || 0) : 0;
+
+  let a = gun === 0
+    ? C("Gün kuralı kapalı — yalnızca aşağıdaki set tabanı korur.")
+    : gun + " " + C("günden eski setler Google çöp kutusuna gönderilir.")
+      + " " + C("Günlük yedek alıyorsan Drive'da yaklaşık") + " " + gun + " " + C("set durur.");
+  if (gunluk) a += " " + C("Ölçülene göre") + " ≈ " + hb(gunluk * gun) + ".";
+  setHtml("eg-kd", a);
+
+  let b2 = taban === 0
+    ? '<b style="color:#ffd479">' + C("0 riskli: gün kuralı bir VM/CT'nin tüm yedeklerini silebilir.") + "</b>"
+    : C("Bir VM/CT uzun süre yedeklenmese bile en yeni") + " <b>" + taban + "</b> "
+      + C("seti gün kuralından muaf tutulur.");
+  if (taban && gun && taban >= gun)
+    b2 += " " + C("Taban gün sayısından büyük ya da eşit: pratikte saklamayı taban belirler.");
+  setHtml("eg-kc", b2);
+
+  setHtml("eg-td", cop === 0
+    ? C("0 = çöpe uğramadan hemen kalıcı silinir; yanlış silmede geri dönüş olmaz.")
+    : C("Yanlış silme olursa") + " <b>" + cop + " " + C("gün") + "</b> "
+      + C("içinde Drive'ın çöp kutusundan geri alabilirsin.")
+      + (gunluk ? " " + C("Çöpte yaklaşık") + " " + hb(gunluk * cop) + " " + C("bekler.") : ""));
+}
+
 function ramHint(): void {
   const c = String(val("e-chunk") || "").match(/^(\d+(?:\.\d+)?)([KMG])$/i);
   const t = Number(val("e-tr")) || 1;
@@ -594,11 +740,13 @@ function openEditor(pid: string | null): void {
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
     + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
   setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
-  void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages(); ramHint();
+  void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages();
+  ramHint(); saklamaIpucu();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
-  fld("e-kd").oninput = () => { kapasiteCiz(); markDirty(); };
-  fld("e-td").oninput = () => { kapasiteCiz(); markDirty(); };
+  fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
+  fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
+  fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
   fld("e-chunk").oninput = () => { ramHint(); markDirty(); };
   fld("e-tr").oninput = () => { ramHint(); markDirty(); };
   hesapPaneliTasi("w-hesap-yuvasi", false);
@@ -612,6 +760,7 @@ function openEditor(pid: string | null): void {
 function validatePlan(): boolean {
   // Alanlarin tamami tablodan dogrulanir (bkz. alanlar.ts).
   // Burada yalnizca birden fazla alani birlikte ilgilendiren kurallar kalir.
+  hataTuruBaslat();
   let ok = alanlariDogrula();
   if (!val("e-acct")) ok = bad("e-acct", C("önce bir Google hesabı ekle")) && ok; else good("e-acct");
   ok = vRx("e-folder", RX.folder, C('klasör adında : * ? " < > | olamaz')) && ok;
@@ -627,7 +776,7 @@ function validatePlan(): boolean {
 }
 
 async function savePlan(): Promise<void> {
-  if (!validatePlan()) { flash(C("form hatalı — kırmızı alanlara bak"), false); return; }
+  if (!validatePlan()) { hataOdakla(); flash(C("form hatalı — kırmızı alanlara bak"), false); return; }
   const wd = Array.prototype.slice.call(el("e-wd").querySelectorAll("input:checked"))
     .map((c: HTMLInputElement) => Number(c.value));
   const body: Record<string, unknown> = {
@@ -640,7 +789,7 @@ async function savePlan(): Promise<void> {
   flash(j.msg || "", j.ok);
   if (j.ok) {
     dirty = false; wSihirbaz = false; closeM("m-edit");
-    sel = j.id || sel; remember(); void refresh();
+    sel = j.id || sel; remember(); taslakSil(); void refresh();
   }
 }
 
@@ -666,7 +815,7 @@ async function kapasiteYukle(zorla?: boolean): Promise<void> {
       "/api/analiz?src=" + encodeURIComponent(src) + "&hesap=" + encodeURIComponent(hesap));
     kapAnahtar = anahtar;
   } catch { setTxt("kap-durum", C("ölçüm başarısız")); return; }
-  kapasiteCiz();
+  kapasiteCiz(); saklamaIpucu();
 }
 
 function kapasiteCiz(): void {
@@ -793,12 +942,13 @@ async function renderAccounts(): Promise<void> {
     const q = r.quota || {};
     const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
       + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
-    return '<div class="card" style="margin-bottom:8px"><div style="display:flex;'
+    return '<div class="card" data-hesap="' + esc(r.name) + '" style="margin-bottom:8px"><div style="display:flex;'
       + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
       + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
       + '<span style="flex:1"></span>'
       + "<button class=\"sm\" onclick=\"acctTest('" + r.name + "')\">Test</button>"
-      + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + C("')\">Sil</button></div>")
+      + "<button class=\"sm warn\" onclick=\"acctDel('" + r.name + "')\">" + C("Sil")
+      + "</button></div>"
       + '<div class="small" style="margin-top:6px">' + line + "</div></div>";
   }).join("") : '<div class="small">Henüz hesap yok.</div>');
 }
@@ -808,7 +958,7 @@ async function acctTest(n: string): Promise<void> {
   flash(j.msg || "", j.ok);
 }
 async function acctDel(n: string): Promise<void> {
-  if (!confirm("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz."))) return;
+  if (!await onay("'" + n + C("' kaldırılsın mı? Drive'daki dosyalara dokunulmaz."))) return;
   const j = await api("/api/remote/delete?name=" + encodeURIComponent(n), { method: "POST" });
   flash(j.msg || "", j.ok); void renderAccounts(); void loadRemotes();
 }
@@ -899,12 +1049,13 @@ function loadSmtpSelect(selId?: string): void {
 function renderSmtp(): void {
   SMTP = (S && S.smtp) || [];
   setHtml("s-list", SMTP.length ? SMTP.map((x) =>
-    '<div class="card" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
+    '<div class="card" data-smtp="' + esc(x.id) + '" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;'
     + 'gap:8px;align-items:center;flex-wrap:wrap"><b>' + esc(x.name) + "</b>"
     + '<span style="flex:1"></span>'
-    + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + C("')\">Düzenle</button>")
+    + "<button class=\"sm\" onclick=\"smtpEdit('" + x.id + "')\">" + C("Düzenle") + "</button>"
     + "<button class=\"sm\" onclick=\"smtpTest('" + x.id + "')\">Test maili</button>"
-    + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + C("')\">Sil</button></div>")
+    + "<button class=\"sm warn\" onclick=\"smtpDel('" + x.id + "')\">" + C("Sil")
+    + "</button></div>"
     + '<div class="small" style="margin-top:6px">' + esc(x.user || "-") + " · " + esc(x.host)
     + ":" + x.port + " · " + esc(x.security) + "</div></div>").join("")
     : '<div class="small">Henüz profil yok.</div>');
@@ -942,13 +1093,13 @@ async function smtpSave(): Promise<void> {
   if (j.ok) { smtpClear(); await refresh(); renderSmtp(); loadSmtpSelect(); }
 }
 async function smtpDel(id: string): Promise<void> {
-  if (!confirm("Profil silinsin mi?")) return;
+  if (!await onay(C("Profil silinsin mi?"))) return;
   const j = await api("/api/smtp/delete?id=" + encodeURIComponent(id), { method: "POST" });
   flash(j.msg || "", j.ok);
   await refresh(); renderSmtp(); loadSmtpSelect();
 }
 async function smtpTest(id: string): Promise<void> {
-  const to = prompt(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
+  const to = await sorMetin(C("Test maili hangi adrese gitsin?\n(boş bırakırsan gönderen adresine gider)"), "");
   if (to === null) return;
   flash(C("gönderiliyor…"), true);
   const j = await api("/api/smtp/test?id=" + encodeURIComponent(id) + "&to=" + encodeURIComponent(to),
@@ -1039,7 +1190,7 @@ async function upKontrol(): Promise<void> {
     : (j.yeni_var ? C("yeni sürüm var: v") + j.uzak : C("güncel: v") + j.surum), !j.hata);
 }
 async function upKur(): Promise<void> {
-  if (!confirm(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
+  if (!await onay(C("Güncelleme kurulacak.\n\nPlanların ve ayarların korunur, ikisinin de yedeği alınır.\n")
     + C("Arayüz birkaç saniye yeniden başlar. Devam edilsin mi?"))) return;
   flash(C("indiriliyor ve doğrulanıyor…"), true);
   const j = await api("/api/update/apply", { method: "POST" });
@@ -1047,29 +1198,233 @@ async function upKur(): Promise<void> {
   if (j.ok) window.setTimeout(() => location.reload(), 6000);
 }
 async function upGeri(): Promise<void> {
-  if (!confirm(C("Önceki sürüme dönülecek. Devam edilsin mi?"))) return;
+  if (!await onay(C("Önceki sürüme dönülecek. Devam edilsin mi?"))) return;
   const j = await api("/api/update/rollback", { method: "POST" });
   flash(j.msg || "", j.ok);
   if (j.ok) window.setTimeout(() => location.reload(), 6000);
 }
 
 /* ---------- baslangic ---------- */
+/** Kaydedilmemis degisiklik varsa uygulama ici onay sorar. */
+async function kapatmayiDene(m: HTMLElement): Promise<void> {
+  if (m.id === "m-edit" && dirty
+    && !await onay(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))) return;
+  m.classList.remove("show");
+  if (m.id === "m-edit") dirty = false;
+}
+
 Array.prototype.slice.call(document.querySelectorAll(".mask")).forEach((m: HTMLElement) => {
   m.addEventListener("click", (e: Event) => {
-    if (e.target !== m) return;
-    if (m.id === "m-edit" && dirty
-      && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))) return;
-    m.classList.remove("show");
-    if (m.id === "m-edit") dirty = false;
+    if (e.target !== m || m.id === "m-onay") return;   // onay penceresi disi tiklama kapatmaz
+    void kapatmayiDene(m);
   });
 });
 document.addEventListener("keydown", (e: KeyboardEvent) => {
+  const acik = Array.prototype.slice.call(
+    document.querySelectorAll(".mask.show")) as HTMLElement[];
+  if (acik.some((m) => m.id === "m-onay")) {
+    if (e.key === "Enter") onayKapat(true);
+    else if (e.key === "Escape") onayKapat(false);
+    return;
+  }
   if (e.key !== "Escape") return;
-  Array.prototype.slice.call(document.querySelectorAll(".mask.show")).forEach((m: HTMLElement) => {
-    if (m.id === "m-edit" && dirty
-      && !confirm(C("Kaydedilmemiş değişiklikler var, kapatılsın mı?"))) return;
-    m.classList.remove("show");
-  });
+  acik.forEach((m) => void kapatmayiDene(m));
 });
+/* ---------- sag tik menuleri ----------
+ * Kayitlar bir kez yapilir; listeler yenilendiginde tekrar baglamak gerekmez
+ * cunku dinleyici document uzerinde ve secici ile eslesiyor (bkz. menu.ts). */
+
+function planBul(id: string): Plan | undefined {
+  return S ? S.plans.filter((p) => p.id === id)[0] : undefined;
+}
+
+/** Planin yalnizca etkin bayragini degistirir. save_plan ad ve hedefi zorunlu
+ *  gordugu icin onlari da yolluyoruz; gerisi sunucuda korunur. */
+async function planDurumDegistir(p: Plan): Promise<void> {
+  const j = await api("/api/plan/save", { method: "POST", body: JSON.stringify(
+    { id: p.id, name: p.name, remote: p.remote, enabled: !p.enabled }) });
+  flash(j.ok ? (p.enabled ? C("plan duraklatıldı") : C("plan etkinleştirildi")) : (j.msg || ""), j.ok);
+  void refresh();
+}
+
+/** Mevcut plandan kopya: sihirbaz yerine dolu formu acar, id bos kalir. */
+function planKopyala(p: Plan): void {
+  openEditor(null);
+  wSihirbaz = false; wGoster();
+  alanlariDoldur(p as unknown as Record<string, unknown>);
+  const i = p.remote.indexOf(":");
+  setVal("e-acct", p.remote.slice(0, i)); setVal("e-folder", p.remote.slice(i + 1));
+  setVal("e-name", p.name + C(" (kopya)"));
+  setChk("e-enabled", false);          // kopya kapali baslar, once gozden gecirilsin
+  Array.prototype.slice.call(el("e-wd").querySelectorAll("input")).forEach((c: HTMLInputElement) => {
+    c.checked = (p.weekdays || []).indexOf(Number(c.value)) >= 0;
+  });
+  ramHint(); saklamaIpucu(); markDirty();
+  flash(C("kopya hazır — gözden geçirip kaydet"), true);
+}
+
+function planMenusu(kap: HTMLElement): MenuOge[] {
+  const p = planBul(kap.getAttribute("data-plan") || "");
+  if (!p) return [];
+  const aliciVar = Boolean(p.report_mail_to || p.mail_to);
+  return [
+    { baslik: true, etiket: p.name },
+    { simge: "▶", etiket: "Yedeklemeyi başlat", pasif: p.running,
+      ipucu: p.running ? "bu plan zaten çalışıyor" : "", is: () => act("backup", p.id) },
+    { simge: p.enabled ? "⏸" : "✅", etiket: p.enabled ? "Planı duraklat" : "Planı etkinleştir",
+      ipucu: p.enabled ? "zamanlama durur, dosyalara dokunulmaz" : "",
+      is: () => planDurumDegistir(p) },
+    { ayrac: true },
+    { simge: "🧹", etiket: "Retention'ı şimdi çalıştır", pasif: p.running,
+      ipucu: "süresi dolan setleri Drive çöpüne taşır", is: () => act("prune", p.id) },
+    { simge: "🗑", etiket: "Çöpü boşalt", pasif: p.running,
+      ipucu: "çöpte süresi dolmuş dosyaları kalıcı siler", is: () => act("purgetrash", p.id) },
+    { simge: "↻", etiket: "Drive durumunu tazele", pasif: p.running,
+      is: () => act("refresh", p.id) },
+    { ayrac: true },
+    { simge: "📊", etiket: "Haftalık raporu şimdi gönder", pasif: !aliciVar || !p.weekly_report,
+      ipucu: !p.weekly_report ? "bu planda rapor kapalı"
+           : !aliciVar ? "önce plana mail adresi gir" : "", is: () => act("report", p.id) },
+    { simge: "✉", etiket: "Test maili gönder", pasif: !p.mail_to,
+      ipucu: p.mail_to ? "" : "önce plana mail adresi gir", is: () => act("testmail", p.id) },
+    { ayrac: true },
+    { simge: "✎", etiket: "Düzenle", is: () => openEditor(p.id) },
+    { simge: "⧉", etiket: "Kopyasını oluştur", is: () => planKopyala(p) },
+    { simge: "⬇", etiket: "Planı JSON olarak indir",
+      ipucu: "başka sunucuya taşımak için", is: () => dosyaIndir(
+        "plan-" + p.id + ".json", JSON.stringify(p, null, 2), "application/json") },
+    { simge: "📋", etiket: "Kaynak klasörü kopyala", is: () => panoyaYaz(p.src_dir, C("kaynak")) },
+    { simge: "📋", etiket: "Hedefi kopyala", is: () => panoyaYaz(p.remote, C("hedef")) },
+    { simge: "📄", etiket: "Bu planın loglarını göster", is: () => setLog(p.id) },
+    { ayrac: true },
+    { simge: "🗑", etiket: "Planı sil", tehlike: true, is: () => delPlan(p.id) },
+  ];
+}
+
+function hesapMenusu(kap: HTMLElement): MenuOge[] {
+  const ad = kap.getAttribute("data-hesap") || "";
+  const r = REM.filter((x) => x.name === ad)[0];
+  const q = (r && r.quota) || {};
+  return [
+    { baslik: true, etiket: ad },
+    { simge: "🔌", etiket: "Bağlantıyı test et", is: () => acctTest(ad) },
+    { simge: "↻", etiket: "Kotayı yenile", is: () => renderAccounts() },
+    { simge: "📋", etiket: "Hesap adını kopyala", is: () => panoyaYaz(ad, C("hesap adı")) },
+    { simge: "📋", etiket: "Kota bilgisini kopyala", pasif: !q.ok,
+      is: () => panoyaYaz(ad + ": " + hb(q.used || 0) + " / " + hb(q.total || 0)) },
+    { ayrac: true },
+    { simge: "🗑", etiket: "Hesabı kaldır", tehlike: true,
+      ipucu: "Drive'daki dosyalara dokunulmaz", is: () => acctDel(ad) },
+  ];
+}
+
+function smtpMenusu(kap: HTMLElement): MenuOge[] {
+  const id = kap.getAttribute("data-smtp") || "";
+  const x = SMTP.filter((y) => y.id === id)[0];
+  if (!x) return [];
+  return [
+    { baslik: true, etiket: x.name },
+    { simge: "✎", etiket: "Düzenle", is: () => smtpEdit(id) },
+    { simge: "✉", etiket: "Test maili gönder", is: () => smtpTest(id) },
+    { simge: "📋", etiket: "Sunucu adresini kopyala",
+      is: () => panoyaYaz(x.host + ":" + x.port, C("sunucu")) },
+    { ayrac: true },
+    { simge: "🗑", etiket: "Profili sil", tehlike: true, is: () => smtpDel(id) },
+  ];
+}
+
+/** Imlecin durdugu log satirini dondurur. Tarayici caret API'si varsa metin
+ *  ofsetinden kesin bulunur; yoksa satir yuksekligiyle tahmin edilir. */
+function logSatiriBul(tum: string, olay: MouseEvent): string {
+  const d = document as unknown as {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  let ofset = -1;
+  try {
+    if (d.caretPositionFromPoint) {
+      const k = d.caretPositionFromPoint(olay.clientX, olay.clientY);
+      if (k) ofset = k.offset;
+    } else if (d.caretRangeFromPoint) {
+      const r = d.caretRangeFromPoint(olay.clientX, olay.clientY);
+      if (r) ofset = r.startOffset;
+    }
+  } catch { /* desteklenmiyorsa tahmine duseriz */ }
+  if (ofset >= 0 && ofset <= tum.length) {
+    const bas = tum.lastIndexOf("\n", Math.max(0, ofset - 1)) + 1;
+    const son = tum.indexOf("\n", ofset);
+    return tum.slice(bas, son < 0 ? tum.length : son);
+  }
+  const kutu = el("log");
+  const g = kutu.getBoundingClientRect();
+  const sy = parseFloat(getComputedStyle(kutu).lineHeight) || 16;
+  const satirlar = tum.split("\n");
+  const i = Math.floor((olay.clientY - g.top + kutu.scrollTop) / sy);
+  return satirlar[Math.max(0, Math.min(satirlar.length - 1, i))] || "";
+}
+
+function logMenusu(_kap: HTMLElement, olay: MouseEvent): MenuOge[] {
+  const tum = el("log").textContent || "";
+  const satir = logSatiriBul(tum, olay);
+  const kaynak = LOGSRC === "all" ? C("tümü") : LOGSRC === "system" ? C("sistem") : LOGSRC;
+  return [
+    { baslik: true, etiket: C("Log — ") + kaynak },
+    { simge: "📋", etiket: "Bu satırı kopyala", pasif: !satir.trim(),
+      ipucu: satir.slice(0, 90), is: () => panoyaYaz(satir, C("satır")) },
+    { simge: "📋", etiket: "Görünen logu kopyala", is: () => panoyaYaz(tum) },
+    { simge: "⬇", etiket: "Log dosyası olarak indir",
+      is: () => dosyaIndir("pve-gdrive-" + LOGSRC + ".log", tum) },
+    { ayrac: true },
+    { simge: "↻", etiket: "Yenile", is: () => loadLog() },
+    { simge: "📄", etiket: "Sistem loglarına geç", pasif: LOGSRC === "system",
+      is: () => setLog("system") },
+    { simge: "📚", etiket: "Tüm logları göster", pasif: LOGSRC === "all", is: () => setLog("all") },
+  ];
+}
+
+/** Yedek ve cop tablolarindaki satirlar: dosya adiyla ugrasmak icin. */
+function satirMenusu(tr: HTMLElement): MenuOge[] | null {
+  const hucreler = Array.prototype.slice.call(tr.querySelectorAll("td")) as HTMLElement[];
+  if (!hucreler.length) return null;
+  const metinler = hucreler.map((td) => (td.textContent || "").trim());
+  // En uzun hucre dosya adidir (vzdump-qemu-100-...zst)
+  const dosya = metinler.filter((m) => m.indexOf("vzdump") === 0)[0] || "";
+  return [
+    { simge: "📋", etiket: "Dosya adını kopyala", pasif: !dosya,
+      ipucu: dosya, is: () => panoyaYaz(dosya, C("dosya adı")) },
+    { simge: "📋", etiket: "Satırı kopyala", is: () => panoyaYaz(metinler.join("  ")) },
+    { simge: "📋", etiket: "Tabloyu kopyala", is: () => {
+        const govde = tr.closest("table");
+        const s2 = Array.prototype.slice.call(govde ? govde.querySelectorAll("tr") : [])
+          .map((r: HTMLElement) => Array.prototype.slice.call(r.querySelectorAll("th,td"))
+            .map((c: HTMLElement) => (c.textContent || "").trim()).join("\t")).join("\n");
+        void panoyaYaz(s2, C("tablo"));
+      } },
+  ];
+}
+
+function genelMenu(): MenuOge[] {
+  return [
+    { simge: "➕", etiket: "Yeni plan", is: () => openEditor(null) },
+    { simge: "↻", etiket: "Şimdi yenile", is: () => refresh() },
+    { ayrac: true },
+    { simge: "👤", etiket: "Google hesapları", is: () => openAccounts() },
+    { simge: "✉", etiket: "SMTP profilleri", is: () => openSmtp() },
+    { simge: "⚙", etiket: "Ayarlar", is: () => openSettings() },
+  ];
+}
+
+function menuleriTanimla(): void {
+  sagTik("[data-plan]", planMenusu);
+  sagTik("[data-hesap]", hesapMenusu);
+  sagTik("[data-smtp]", smtpMenusu);
+  sagTik("#log", logMenusu);
+  sagTik(".panel table tbody tr", satirMenusu);
+  sagTik("#plans, .wrap > header, #detail", genelMenu);
+}
+
 dilBaslat();
-void refresh();
+surukleKur();
+menuKur();
+menuleriTanimla();
+void refresh().then(taslakSor);

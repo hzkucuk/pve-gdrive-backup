@@ -18,7 +18,11 @@ TasksMax=128
 
 # --- Sertlestirme ---
 NoNewPrivileges=yes
-ProtectHome=yes
+# ProtectHome=yes KULLANILMAZ: rclone yapilandirmasi /root altinda yasar ve
+# bu ayar servisin onu gormesini engelliyordu -> "remote bulunamadi" ile sessiz
+# basarisizlik. Bunun yerine config /root disina alinir ve ev dizini gizlenir.
+ProtectHome=tmpfs
+Environment=RCLONE_CONFIG=/var/lib/pve-gdrive/rclone.conf
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
