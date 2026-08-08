@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.3.2"
+SURUM = "1.3.3"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -4063,6 +4063,13 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .uyari-kutu{border-color:#8a2b2b;background:#1f1414;margin-bottom:12px}
 .uyari-kutu code{background:#2a1a1a;padding:1px 5px;border-radius:4px}
 
+/* Baslikta oturum sahibi ve cikis */
+.oturum{display:flex;align-items:center;gap:7px;padding-left:10px;
+  margin-left:4px;border-left:1px solid #232b36}
+.oturum .kul{font-size:12px;color:#8b97a5;font-weight:600;max-width:130px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.oturum .kul:before{content:"👤 ";opacity:.7}
+
 </style></head><body>
 <div class="wrap">
 <header>
@@ -4086,6 +4093,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   </select>
   <button onclick="openSettings()" title="Hesaplar, mail profilleri, güvenlik ve gelişmiş ayarlar">⚙ Ayarlar</button>
   <button class="primary" onclick="openEditor(null)">+ Yeni Plan</button>
+  <span class="oturum">
+    <span class="kul" id="kullanici" title="Oturum sahibi"></span>
+    <button class="sm" onclick="logout()" title="Oturumu kapat">⎋ Çıkış</button>
+  </span>
 </header>
 
 <div class="hesaplar" id="hesapserit"></div>
@@ -5046,6 +5057,12 @@ const EN = {
     "Köprü (vmbr0) sayaçları VM'ler arası yerel trafiği de sayar — o trafik internete hiç çıkmaz, yükleme hızınla yarışmaz. Köprünün altındaki bond/fiziksel arayüz doğru ölçümü verir.": "A bridge (vmbr0) also counts VM-to-VM local traffic, which never reaches the internet and does not compete with your upload. The bond or physical interface under the bridge gives the correct measurement.",
     "Zamanlayici henuz hic calismadi.": "The scheduler has never run yet.",
     "Bağlandığın sunucu": "Server you are connecting to",
+    "Oturum sahibi": "Signed in as",
+    "Oturumu kapat": "Sign out",
+    "⎋ Çıkış": "⎋ Sign out",
+    "Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?": "You have unsaved changes. Sign out anyway?",
+    "Çıkış": "Sign out",
+    "Çık": "Sign out",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -5747,13 +5764,18 @@ function bwLinkKipi() {
     if (satir)
         satir.style.display = val("e-bwlmode") === "manuel" ? "" : "none";
 }
-function bwAutoToggle() {
+/** Yalnizca gorunumu ayarlar; "degisti" damgasi BIRAKMAZ.
+ *  openEditor formu kurarken bunu cagirir. */
+function bwAutoUygula() {
     const acik = chk("e-bwauto");
     el("bwauto-box").style.display = acik ? "" : "none";
     fld("e-bw").disabled = acik;
     fld("e-bwsch").disabled = acik;
-    markDirty();
 }
+/** Kullanici kutuyu tikladiginda. Onceden bu tek fonksiyon vardi ve openEditor
+ *  da onu cagiriyordu: her plan acilisi aninda "kaydedilmemis degisiklik var"
+ *  sayiliyor, hicbir sey degistirmeden kapatirken uyari cikiyordu. */
+function bwAutoToggle() { bwAutoUygula(); markDirty(); }
 async function loadIfaces(secili) {
     try {
         const j = await api("/api/ifaces");
@@ -5976,6 +5998,7 @@ function render() {
         : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
             + "</span>");
     saglikCiz();
+    kullaniciCiz();
     setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
         + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
     setHtml("plans", ps.map(planCard).join("")
@@ -6089,9 +6112,13 @@ function akisBaslat() {
                 location.reload();
                 return;
             }
-            // csrf yalnizca /api/status ile gelir; akis paketinde yoksa mevcudu koru
+            // csrf ve kullanici adi yalnizca /api/status ile gelir (oturuma bagli).
+            // Akis paketi public_status() uretir; oradan gelmeyeni mevcudundan koru,
+            // yoksa her canli guncellemede baslikta ad kaybolur.
             if (S && !y.csrf)
                 y.csrf = S.csrf;
+            if (S && !y.user)
+                y.user = S.user;
             S = y;
             akisDurumu(true);
             render();
@@ -6171,7 +6198,20 @@ async function delPlan(pid) {
     flash(j.msg || "", j.ok);
     void refresh();
 }
-async function logout() { await api("/logout", { method: "POST" }); location.reload(); }
+async function logout() {
+    if (dirty && !await onay(C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?"), C("Çıkış"), C("Çık"), C("Vazgeç")))
+        return;
+    await api("/logout", { method: "POST" });
+    location.reload();
+}
+/** Basliktaki kullanici adi ve cikis dugmesi. */
+function kullaniciCiz() {
+    const e = document.getElementById("kullanici");
+    if (!e || !S)
+        return;
+    e.textContent = S.user || "";
+    e.title = C("Oturum sahibi");
+}
 /* ---------- plan sihirbazi ---------- */
 const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
@@ -6413,7 +6453,7 @@ function openEditor(pid) {
     const rp = String(v.remote || C("gdrive:proxmox-yedek")).split(":");
     setVal("e-folder", rp.slice(1).join(":"));
     void loadIfaces(v.bw_auto_iface || "");
-    bwAutoToggle();
+    bwAutoUygula();
     setHtml("e-rday", WD.map((n, i) => '<option value="' + (i + 1) + '">' + n + "</option>").join(""));
     setVal("e-rday", v.report_day || 1);
     setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'

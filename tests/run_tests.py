@@ -630,6 +630,56 @@ def t_rapor():
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
     finally: o.temizle()
 
+@test("form acilisi tek basina 'degisti' saymaz", "arayuz")
+def t_temiz_acilis():
+    """Plan acilip hicbir sey degistirmeden kapatilinca uyari cikmamaliydi;
+    bwAutoToggle() kosulsuz markDirty() cagirdigi ve openEditor onu formu
+    kurarken kullandigi icin her acilis kirli sayiliyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        h = G.HTML
+        # Gorunum uygulama ile damga birbirinden ayrilmis olmali
+        dogru("function bwAutoUygula()" in h, "gorunum icin ayri fonksiyon olmali")
+        dogru("bwAutoUygula();" in h, "openEditor damgasiz surumu cagirmali")
+        # openEditor kurulum sirasinda damga birakmamali.
+        # Olay isleyicisi ATAMALARI (oninput/onchange) mesru: onlar ancak
+        # kullanici alana dokununca calisir. Onlari ayikla, kalanina bak.
+        i = h.index("function openEditor(")
+        govde = h[i:h.index("function validatePlan(", i)]
+        kurulum = [ln for ln in govde.split("\n")
+                   if "oninput" not in ln and "onchange" not in ln]
+        kalan = [ln.strip() for ln in kurulum if "markDirty" in ln or "bwAutoToggle(" in ln]
+        dogru(not kalan, f"openEditor kurulumunda damga birakan cagri: {kalan}")
+        dogru("dirty = false" in govde, "acilista damga sifirlanmali")
+        # Isleyiciler yine de bagli olmali, yoksa gercek degisiklik fark edilmez
+        dogru("oninput = markDirty" in govde, "alanlara isleyici baglanmali")
+    finally: o.temizle()
+
+@test("cikis dugmesi arayuzde var", "arayuz")
+def t_cikis_dugmesi():
+    """logout() fonksiyonu vardi ama hicbir yerden cagrilmiyordu: kullanici
+    oturumu arayuzden kapatamiyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        h = G.HTML
+        dogru('onclick="logout()"' in h, "cikis dugmesi olmali")
+        dogru('id="kullanici"' in h, "oturum sahibi gosterilmeli")
+        dogru("function kullaniciCiz()" in h, "kullanici adini yazan fonksiyon olmali")
+        dogru("kullaniciCiz();" in h, "render sirasinda cagrilmali")
+        # Kaydedilmemis degisiklik varken cikarken sormali
+        i = h.index("async function logout(")
+        dogru("dirty" in h[i:i + 400], "kirli formda cikis onay istemeli")
+        # Canli akis paketi oturum alanlarini icermez; arayuz mevcudunu korumali
+        dogru("user" not in G.public_status(),
+              "public_status oturuma bagli alan icermemeli")
+        # tsc tek satirlik if'i iki satira aciyor; bicime degil icerige bak
+        for alan in ("user", "csrf"):
+            dogru(f"y.{alan} = S.{alan}" in h,
+                  f"akis guncellemesinde {alan} korunmali")
+    finally: o.temizle()
+
 @test("login sayfasi surum ve sunucu bilgisi gosterir", "arayuz")
 def t_login_damga():
     """Sifreyi yazmadan once hangi surume ve hangi sunucuya girdigini,

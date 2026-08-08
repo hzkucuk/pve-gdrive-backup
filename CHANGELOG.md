@@ -2,6 +2,30 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.3.3 — 2026-08-08
+
+### Plan formu artık boşuna "değişti" demiyor
+
+Planı açıp hiçbir şey değiştirmeden kapatınca *"Kaydedilmemiş değişiklikler var,
+kapatılsın mı?"* uyarısı çıkıyordu. Sebep: `bwAutoToggle()` koşulsuz olarak
+"değişti" damgası bırakıyordu ve `openEditor` formu kurarken onu çağırıyordu —
+yani **her plan açılışı anında kirli sayılıyordu**. Görünümü uygulamak
+(`bwAutoUygula`) ile damga bırakmak artık ayrı.
+
+### Çıkış düğmesi
+
+`logout()` fonksiyonu vardı ama hiçbir yerden çağrılmıyordu; oturumu arayüzden
+kapatmak mümkün değildi. Başlığa oturum sahibinin adı ve **⎋ Çıkış** düğmesi
+eklendi. Kaydedilmemiş değişiklik varken çıkarken soruyor.
+
+### Canlı akışta kullanıcı adı kayboluyordu
+
+Akış paketi `public_status()` üretiyor; kullanıcı adı ve CSRF yalnızca
+`/api/status` ile geliyor. Akıştan gelmeyen bu alanlar artık mevcut değerinden
+korunuyor.
+
+Test: 68 → 70.
+
 ## 1.3.2 — 2026-08-08
 
 ### Giriş ekranında sürüm ve sunucu bilgisi

@@ -131,6 +131,7 @@ interface Status {
   saglik?: Saglik;
   guncelleme?: { uzak: string | null; yeni_var: boolean; otomatik: boolean; hata: string };
   csrf: string;
+  user?: string;
   login?: boolean;
 }
 

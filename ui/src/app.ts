@@ -258,13 +258,19 @@ function bwLinkKipi(): void {
   if (satir) satir.style.display = val("e-bwlmode") === "manuel" ? "" : "none";
 }
 
-function bwAutoToggle(): void {
+/** Yalnizca gorunumu ayarlar; "degisti" damgasi BIRAKMAZ.
+ *  openEditor formu kurarken bunu cagirir. */
+function bwAutoUygula(): void {
   const acik = chk("e-bwauto");
   el("bwauto-box").style.display = acik ? "" : "none";
   fld("e-bw").disabled = acik;
   fld("e-bwsch").disabled = acik;
-  markDirty();
 }
+
+/** Kullanici kutuyu tikladiginda. Onceden bu tek fonksiyon vardi ve openEditor
+ *  da onu cagiriyordu: her plan acilisi aninda "kaydedilmemis degisiklik var"
+ *  sayiliyor, hicbir sey degistirmeden kapatirken uyari cikiyordu. */
+function bwAutoToggle(): void { bwAutoUygula(); markDirty(); }
 interface IfaceBilgi {
   name: string; tx: number; rx: number;
   default: boolean; onerilen: boolean; kopru: boolean; hiz: number;
@@ -475,7 +481,7 @@ function render(): void {
       + "</span>"
     : '<span class="small" title="' + esc(C("Kurulu sürüm")) + '">v' + esc(S.surum || "?")
       + "</span>");
-  saglikCiz();
+  saglikCiz(); kullaniciCiz();
   setTxt("hinfo", ps.length + " plan" + (running ? " · " + running + " çalışıyor" : "")
     + (S.updated ? " · durum: " + S.updated : "") + (S.smtp_ready ? "" : " · mail profili yok"));
   setHtml("plans", ps.map(planCard).join("")
@@ -575,8 +581,11 @@ function akisBaslat(): void {
     try {
       const y = JSON.parse(e.data) as Status;
       if (y.login) { location.reload(); return; }
-      // csrf yalnizca /api/status ile gelir; akis paketinde yoksa mevcudu koru
+      // csrf ve kullanici adi yalnizca /api/status ile gelir (oturuma bagli).
+      // Akis paketi public_status() uretir; oradan gelmeyeni mevcudundan koru,
+      // yoksa her canli guncellemede baslikta ad kaybolur.
       if (S && !y.csrf) y.csrf = S.csrf;
+      if (S && !y.user) y.user = S.user;
       S = y; akisDurumu(true); render();
     } catch { /* bozuk paket: bir sonraki tazeleme duzeltir */ }
   });
@@ -641,7 +650,20 @@ async function delPlan(pid: string): Promise<void> {
   flash(j.msg || "", j.ok);
   void refresh();
 }
-async function logout(): Promise<void> { await api("/logout", { method: "POST" }); location.reload(); }
+async function logout(): Promise<void> {
+  if (dirty && !await onay(C("Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?"),
+                           C("Çıkış"), C("Çık"), C("Vazgeç"))) return;
+  await api("/logout", { method: "POST" });
+  location.reload();
+}
+
+/** Basliktaki kullanici adi ve cikis dugmesi. */
+function kullaniciCiz(): void {
+  const e = document.getElementById("kullanici");
+  if (!e || !S) return;
+  e.textContent = S.user || "";
+  e.title = C("Oturum sahibi");
+}
 
 /* ---------- plan sihirbazi ---------- */
 const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
@@ -876,7 +898,7 @@ function openEditor(pid: string | null): void {
   alanlariDoldur(v as unknown as Record<string, unknown>);
   const rp = String(v.remote || C("gdrive:proxmox-yedek")).split(":");
   setVal("e-folder", rp.slice(1).join(":"));
-  void loadIfaces(v.bw_auto_iface || ""); bwAutoToggle();
+  void loadIfaces(v.bw_auto_iface || ""); bwAutoUygula();
   setHtml("e-rday", WD.map((n, i) => '<option value="' + (i + 1) + '">' + n + "</option>").join(""));
   setVal("e-rday", v.report_day || 1);
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
