@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.7.2"
+SURUM = "1.7.3"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -3135,9 +3135,33 @@ def count_dumps(path):
         yut("count_dumps", e)
         return 0
 
+def gezinti_kokleri():
+    """Gozat penceresinin baslangic noktalari.
+
+    Sabit liste yetmiyordu: ZFS havuzu /USB_4T_R1 gibi kokte bagli oldugunda
+    hicbir kokun altina dusmuyor ve kullanici olusturdugu yedek klasorunu
+    gozattan bulamiyordu. Liste artik ortamdan turer:
+      ayardaki kokler + Proxmox depo yollari + ZFS baglama noktalari"""
+    kokler = [os.path.abspath(r) for r in (cfg().get("browse_roots") or ["/"])]
+    def ekle(y):
+        if not y: return
+        y = os.path.abspath(y)
+        # Zaten kapsanan yolu tekrar ekleme
+        if any(y == k or y.startswith(k + os.sep) for k in kokler): return
+        if os.path.isdir(y): kokler.append(y)
+    try:
+        for d in pve_storages():
+            ekle(d.get("kok_yol"))
+    except Exception as e: yut("gezinti_kokleri_depo", e)
+    try:
+        for z in zfs_havuzlari():
+            ekle(z.get("yol"))
+    except Exception as e: yut("gezinti_kokleri_zfs", e)
+    return kokler
+
 def browse(path):
-    """UI dizin gezgini. browse_roots disina cikilamaz."""
-    roots = [os.path.abspath(r) for r in (cfg().get("browse_roots") or ["/"])]
+    """UI dizin gezgini. Koklerin disina cikilamaz."""
+    roots = gezinti_kokleri()
     p = os.path.abspath(path or (roots[0] if roots else "/"))
     if not any(p == r or p.startswith(r + os.sep) for r in roots):
         p = roots[0] if roots else "/"
@@ -4992,8 +5016,11 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .uyari-kutu code{background:#2a1a1a;padding:1px 5px;border-radius:4px}
 
 /* Baslikta oturum sahibi ve cikis */
+/* Basliktaki oturum blogu. margin-left:auto sart: header flex-wrap oldugu
+   icin dar ekranda alt satira iniyor ve SOLA yapisiyordu; auto ile alt
+   satirda da saga hizali kalir. */
 .oturum{display:flex;align-items:center;gap:7px;padding-left:10px;
-  margin-left:4px;border-left:1px solid #232b36}
+  margin-left:auto;border-left:1px solid #232b36;flex-shrink:0}
 .oturum .kul{font-size:12px;color:#8b97a5;font-weight:600;max-width:130px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .oturum .kul:before{content:"👤 ";opacity:.7}
@@ -7689,7 +7716,9 @@ function openEditor(pid) {
     setVal("e-rday", v.report_day || 1);
     setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
         + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
-    setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
+    // Bu ipucu plan kaydedildigi andaki sayidir; canli analiz (e-srcanaliz)
+    // dogrusunu yazdigi icin ikisi celisiyordu. Yalnizca klasor yoksa uyar.
+    setTxt("e-srchint", p && !p.src_exists ? C("⚠ klasör bulunamadı") : "");
     void loadRemotes(rp[0]).then(() => yhDoldur(v.yedek_hedefler || []));
     loadSmtpSelect(v.smtp_profile);
     void loadStorages();
@@ -7974,7 +8003,13 @@ function setSrc(path) {
     markDirty();
     void kaynakAnaliz();
 }
-async function openBrowser() { await goDir(val("e-src") || ""); openM("m-browse"); }
+async function openBrowser() {
+    // Mevcut yoldan basla; yoksa ust klasorunden. Kullanici yazdigi yolu
+    // gozatta bulamiyordu cunku her seferinde ilk kokten aciliyordu.
+    const y = val("e-src").trim();
+    await goDir(y || "");
+    openM("m-browse");
+}
 async function goDir(p) {
     const j = await api("/api/browse?path=" + encodeURIComponent(p));
     cur = j.path;

@@ -1018,7 +1018,9 @@ function openEditor(pid: string | null): void {
   setVal("e-rday", v.report_day || 1);
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
     + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
-  setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
+  // Bu ipucu plan kaydedildigi andaki sayidir; canli analiz (e-srcanaliz)
+  // dogrusunu yazdigi icin ikisi celisiyordu. Yalnizca klasor yoksa uyar.
+  setTxt("e-srchint", p && !p.src_exists ? C("⚠ klasör bulunamadı") : "");
   void loadRemotes(rp[0]).then(() => yhDoldur((v.yedek_hedefler as string[]) || []));
   loadSmtpSelect(v.smtp_profile); void loadStorages();
   ramHint(); saklamaIpucu(); bwLinkKipi();
@@ -1278,7 +1280,13 @@ async function depoDuzelt(ad: string, eylem: string): Promise<void> {
 function setSrc(path: string): void {
   setVal("e-src", path); markDirty(); void kaynakAnaliz();
 }
-async function openBrowser(): Promise<void> { await goDir(val("e-src") || ""); openM("m-browse"); }
+async function openBrowser(): Promise<void> {
+  // Mevcut yoldan basla; yoksa ust klasorunden. Kullanici yazdigi yolu
+  // gozatta bulamiyordu cunku her seferinde ilk kokten aciliyordu.
+  const y = val("e-src").trim();
+  await goDir(y || "");
+  openM("m-browse");
+}
 async function goDir(p: string): Promise<void> {
   const j = await api<BrowseResult>("/api/browse?path=" + encodeURIComponent(p));
   cur = j.path;

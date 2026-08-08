@@ -1215,6 +1215,38 @@ def _boru_ve_tty_ile_kos(betik, saniye=6):
     os.close(usta)
     return cikti.decode("utf-8", "replace"), sonuc
 
+@test("gozat kokleri ortamdan turer", "depolar")
+def t_gezinti_kokleri():
+    """ZFS havuzu /USB_4T_R1 gibi KOKTE bagli oldugunda sabit kok listesinin
+    hicbirinin altina dusmuyor; kullanici olusturdugu yedek klasorunu
+    gozattan bulamiyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        zfs_yol = os.path.join(o.dizin, "USB_4T_R1", "yedek")
+        depo_yol = os.path.join(o.dizin, "depo2")
+        os.makedirs(zfs_yol); os.makedirs(depo_yol)
+        c = o.oku_cfg(); c["browse_roots"] = [o.dump]; o.yaz_cfg(c); G.cfg(force=True)
+        o.yamala(G, "pve_storages", lambda hepsi=True: [{"kok_yol": depo_yol}])
+        o.yamala(G, "zfs_havuzlari", lambda: [{"ad": "USB_4T_R1/yedek", "yol": zfs_yol}])
+        k = G.gezinti_kokleri()
+        dogru(o.dump in k, "ayardaki kok korunmali")
+        dogru(depo_yol in k, f"depo yolu eklenmeli: {k}")
+        dogru(zfs_yol in k, f"ZFS baglama noktasi eklenmeli: {k}")
+        # Artik oraya gezinilebilmeli
+        r = G.browse(zfs_yol)
+        esit(r["path"], zfs_yol, "ZFS klasorune girilebilmeli")
+        dogru(not r.get("error"), r.get("error"))
+        # Kapsanan yol tekrar eklenmemeli
+        o.yamala(G, "zfs_havuzlari", lambda: [{"ad": "x", "yol": os.path.join(o.dump, "alt")}])
+        os.makedirs(os.path.join(o.dump, "alt"), exist_ok=True)
+        dogru(len([x for x in G.gezinti_kokleri() if x.startswith(o.dump)]) == 1,
+              "zaten kapsanan yol tekrar eklenmemeli")
+        # Kok disina cikilamamali (guvenlik korunuyor mu)
+        dis = G.browse("/etc")
+        dogru(dis["path"] != "/etc", "koklerin disina cikilmamali")
+    finally: o.temizle()
+
 @test("proxmox linki iki not alanina da yazilir", "depolar")
 def t_proxmox_link():
     """Proxmox'ta iki ayri Notes var: Datacenter (/cluster/options) ve

@@ -2,6 +2,31 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.7.3 — 2026-08-08
+
+### Gözat penceresi ZFS klasörünü göremiyordu
+
+Gezinti kökleri sabit listeydi (`/var/lib/vz`, `/mnt/pve`, `/mnt`, `/srv`).
+ZFS havuzu `/USB_4T_R1` gibi **kökte** bağlandığında hiçbirinin altına düşmüyor
+ve kullanıcı kendi oluşturduğu yedek klasörünü gözattan bulamıyordu.
+
+Kökler artık ortamdan türer: ayardaki kökler **+ Proxmox depo yolları
++ ZFS bağlama noktaları**. Zaten kapsanan yol tekrar eklenmez. Köklerin dışına
+çıkma yasağı aynen duruyor — testle korunuyor.
+
+Gözat, yazılı olan yoldan açılıyor; her seferinde ilk kökten başlamıyor.
+
+### Başlıkta oturum bloğu sola kayıyordu
+
+Başlık `flex-wrap`; dar ekranda oturum bloğu alt satıra inip **sola** yapışıyordu.
+`margin-left:auto` ile alt satırda da sağda kalıyor.
+
+### Çelişen dosya sayısı
+
+Kaynak alanının altında iki sayı vardı: plan kaydedildiği andaki (`0 dosya
+bulundu`) ve canlı analizden gelen (`1 yedek dosyası`). Bayat olan kaldırıldı;
+klasör yoksa yalnızca uyarı çıkıyor.
+
 ## 1.7.2 — 2026-08-08
 
 ### Güncelleme kaynağı: release varlığı
