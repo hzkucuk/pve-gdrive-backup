@@ -2807,6 +2807,58 @@ def t_dagit_sabitler():
     i_sabit = d.find("butunluk --sabitle")
     dogru(0 <= i_restart < i_sabit, "yenileme servis yeniden baslatildiktan SONRA olmali")
 
+@test("komut paneli teshisleri calistirir", "komutlar")
+def t_komut_paneli():
+    o = Ortam()
+    try:
+        o.plan()
+        ist = o.sunucu(); G = ist.G
+        liste = json.load(ist.istek("/api/komutlar"))["komutlar"]
+        adlar = {k["ad"] for k in liste}
+        for beklenen in ("saglik", "butunluk", "plans", "status", "surum"):
+            dogru(beklenen in adlar, f"{beklenen} listede olmali: {adlar}")
+        for k in liste:
+            dogru(k["etiket"] and k["aciklama"], f"etiket/aciklama bos: {k}")
+        for ad in adlar:
+            j = json.load(ist.istek("/api/komut?ad=" + ad))
+            dogru(j["ok"], f"{ad} calismali: {j}")
+            dogru(str(j.get("cikti", "")).strip(), f"{ad} cikti uretmeli: {j}")
+        # plans ciktisi gercekten plani gostermeli
+        j = json.load(ist.istek("/api/komut?ad=plans"))
+        dogru("p1" in j["cikti"], f"plan id ciktida olmali: {j['cikti'][:120]}")
+    finally: o.temizle()
+
+@test("komut paneli yalnizca beyaz listeyi calistirir", "komutlar")
+def t_komut_beyaz_liste():
+    """Kullanici girdisi kabuga gecmemeli. Ad bir sozluk anahtaridir;
+    karsiligi onceden tanimli bir Python fonksiyonu."""
+    o = Ortam()
+    try:
+        o.plan()
+        ist = o.sunucu()
+        for kotu in ["", "rm -rf /", "saglik; id", "../../etc/passwd", "run",
+                     "prune", "purgetrash", "serve", "init", "__import__"]:
+            j = json.load(ist.istek("/api/komut?ad=" + urllib.parse.quote(kotu)))
+            dogru(not j["ok"], f"{kotu!r} calistirilmamali: {j}")
+            dogru("bilinmeyen" in j.get("msg", ""), f"acik ret bekleniyor: {j}")
+    finally: o.temizle()
+
+@test("yikici islemler komut panelinde YOK", "komutlar")
+def t_komut_yikici_yok():
+    """Sinif: kolaylik olsun diye eklenen 'tum planlarda calistir' dugmesi,
+    olmayan bir tehlike icat eder. Yikici isler plana ozeldir ve plan
+    kartinda durur."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        for yikici in ("run", "prune", "purgetrash", "emptytrash", "tick"):
+            dogru(yikici not in G.KOMUTLAR,
+                  f"'{yikici}' komut panelinde olmamali (plana ozel is)")
+        # Panelde nerede olduklari yine de yaziyor olmali
+        for ipucu in ("plan kartı", "Retention", "Çöpü boşalt"):
+            dogru(ipucu in G.HTML, f"'{ipucu}' yonlendirmesi arayuzde olmali")
+    finally: o.temizle()
+
 # ============================ KOSUCU ============================
 def main():
     gruplar = {}

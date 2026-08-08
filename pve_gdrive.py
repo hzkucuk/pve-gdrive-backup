@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.8.0"
+SURUM = "1.8.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -4003,6 +4003,73 @@ def captcha_svg(cid):
     out.append("</svg>")
     return "".join(out)
 
+# CLI'daki teshis komutlarinin arayuz karsiligi. Komutlarin hepsinin arayuzde
+# bir yeri vardi ama bes ayri yere dagilmisti; "su komutu calistirayim" diyen
+# kullanici nereye bakacagini bilmiyordu. Burasi tek liste.
+#
+# YALNIZCA salt-okunur teshisler calistirilir. Yikici olanlar (retention, cop
+# bosaltma, yedek baslatma) bilerek DISARIDA: onlar plana ozeldir ve plan
+# kartinda dururlar. "Tum planlarda calistir" diye kestirme bir dugme,
+# olmayan bir tehlikeyi icat etmek olurdu.
+def komut_saglik():
+    d, m = tick_sagligi()
+    yas = tick_yasi_dk()
+    satir = [f"zamanlayici : {d}"]
+    if yas is not None: satir.append(f"son tick    : {int(yas)} dk once")
+    if m: satir.append(f"uyari       : {m}")
+    return "\n".join(satir)
+
+def komut_butunluk():
+    d, m = butunluk_kontrol()
+    st = read_state()
+    return "\n".join([
+        f"dosya    : {betik_yolu()}",
+        f"su anki  : {betik_ozeti()}",
+        f"referans : {st.get('betik_sha256') or '(yok)'}"
+        + (f"  [{st.get('betik_sha_zaman')} / {st.get('betik_sha_sebep')}]"
+           if st.get('betik_sha_zaman') else ""),
+        f"durum    : {d}", m or ""]).strip()
+
+def komut_plans():
+    satir = []
+    for p in cfg().get("plans", []):
+        nr = next_run(p)
+        satir.append(f"{p['id']:16} {'ETKIN' if p.get('enabled') else 'KAPALI':6} "
+                     f"{p['src_dir']} -> {p['remote']}\n"
+                     f"{'':16} sakla {p['keep_days']}g / en az {p['keep_count']} set / "
+                     f"cop {p['drive_trash_days']}g | saat {p['run_at']} | "
+                     f"soguma {p.get('cooldown_hours', 0)}s\n"
+                     f"{'':16} sonraki: {nr.strftime(TS_FMT) if nr else '-'}")
+    return "\n".join(satir) or "tanimli plan yok"
+
+def komut_status():
+    return json.dumps(public_status(), ensure_ascii=False, indent=2)
+
+def komut_surum():
+    return f"surum   : {SURUM}\ndosya   : {betik_yolu()}\npython  : {sys.version.split()[0]}"
+
+# ad -> (etiket, aciklama, uretici)
+KOMUTLAR = {
+    "saglik":   ("Zamanlayıcı sağlığı", "Tick yaşıyor mu, son ne zaman çalıştı", komut_saglik),
+    "butunluk": ("Betik bütünlüğü", "Çalışan dosyanın özeti referansla aynı mı", komut_butunluk),
+    "plans":    ("Planlar", "Her planın kaynağı, hedefi, saklama ve sonraki çalışma", komut_plans),
+    "status":   ("Durum (JSON)", "Arayüzün okuduğu ham durum", komut_status),
+    "surum":    ("Sürüm", "Kurulu sürüm ve çalışan dosya", komut_surum),
+}
+
+def komut_calistir(ad):
+    """Yalnizca KOMUTLAR sozlugundeki ad calistirilir.
+
+    Kullanici girdisi hicbir zaman kabuga gecmez: ad bir sozluk anahtaridir,
+    karsiligi da onceden tanimli bir Python fonksiyonudur."""
+    kayit = KOMUTLAR.get(str(ad or ""))
+    if not kayit: return {"ok": False, "msg": f"bilinmeyen komut: {ad}"}
+    try:
+        return {"ok": True, "ad": ad, "etiket": kayit[0], "cikti": kayit[2]()}
+    except Exception as e:
+        yut("komut_calistir", e)
+        return {"ok": False, "msg": f"komut calisirken hata: {e}"}
+
 def public_status():
     C = cfg(); st = read_state(); plans = []
     for p in C.get("plans", []):
@@ -4342,6 +4409,11 @@ class H(BaseHTTPRequestHandler):
                                    if not k.startswith(SANAL_ONEK)]})
         elif p == "/api/storages":
             self._json({"storages": pve_storages(), "zfs": zfs_havuzlari()})
+        elif p == "/api/komutlar":
+            self._json({"komutlar": [{"ad": k, "etiket": v[0], "aciklama": v[1]}
+                                     for k, v in KOMUTLAR.items()]})
+        elif p == "/api/komut":
+            self._json(komut_calistir(q.get("ad", [""])[0]))
         elif p == "/api/yol-analiz":
             self._json(yol_analiz(unquote(q.get("path", [""])[0])))
         elif p == "/api/kaynak-dosyalar":
@@ -5183,6 +5255,10 @@ button:disabled,button[disabled]{opacity:.4;cursor:not-allowed;filter:grayscale(
 input[type=checkbox]{width:auto}
 /* Kaynak klasor dosya listesi. Uzun olabilir: kendi icinde kaydirilir ki
    sihirbaz adimi sayfayi asmasin. */
+/* Komut ciktisi: teshis metni, secilebilir ve kaydirilabilir olmali */
+.komut-cikti{margin-top:8px;max-height:300px;overflow:auto;background:#0b0e13;
+  border:1px solid #242a33;border-radius:7px;padding:8px 10px;font-size:11.5px;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#c9d6e2}
 .ksl-sar{max-height:320px;overflow:auto;margin-top:6px}
 .ksl-sar table{width:100%;border-collapse:collapse}
 .ksl-sar td{padding:3px 6px;border-bottom:1px solid #1b2027;vertical-align:top;
@@ -5813,6 +5889,15 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="eg">Yüklenen planlar <b>kapalı</b> gelir; hesap ve klasörü
           gözden geçirdikten sonra sen açarsın. Arayüz şifresi, TLS yolları ve
           izinli ağlar hiçbir zaman aktarılmaz — bunlar host'a özeldir.</div>
+      </div></div>
+    <div class="f"><label class="tip" title="Komut satırındaki teşhis komutlarının arayüz karşılığı.">Komutlar</label>
+      <div>
+        <div class="btns" id="komut-dugmeler"></div>
+        <pre id="komut-cikti" class="komut-cikti" style="display:none"></pre>
+        <div class="eg">Bunlar <b>salt okunur</b> teşhislerdir; hiçbir şeyi değiştirmez.
+          Yedekleme, retention ve çöp boşaltma bilerek burada değil — onlar plana özeldir,
+          <b>plan kartında</b> ve plana sağ tıkta dururlar.</div>
+        <div class="eg" id="komut-nerede"></div>
       </div></div>
     <div class="f"><label class="tip" title="Betiğin beklenen sha256 özetini şu anki dosyaya göre yeniler.">Betik bütünlüğü</label>
       <div>
@@ -8831,6 +8916,49 @@ async function ayarYukle(dosya) {
         renderSmtp();
     }
 }
+/* ---------- komutlar paneli ---------- */
+/** CLI'daki teshis komutlarinin hepsi arayuzde vardi ama bes ayri yere
+ *  dagilmisti. Burasi tek liste: neyin nerede oldugu da yazili. */
+const KOMUT_NEREDE = [
+    ["▶ Yedekle", C("plan kartı ve plana sağ tık")],
+    ["⏹ Yedeklemeyi durdur", C("çalışan planın kartı ve sağ tık")],
+    ["🧹 Retention", C("plan kartı — süresi dolan setleri çöpe taşır")],
+    ["🗑 Çöpü boşalt", C("plan kartı — çöpte süresi dolanları kalıcı siler")],
+    ["↻ Drive durumunu tazele", C("plana sağ tık")],
+    ["⬇ / ⬆ Ayarları taşı", C("bu bölümün üstü")],
+    ["🔒 Referansı yenile", C("hemen aşağıda, Betik bütünlüğü")],
+    ["Açık oturumlar", C("Ayarlar → Açık oturumlar")],
+    ["İzinli ağlar", C("Ayarlar → Güvenlik")],
+    ["Güncelleme", C("Ayarlar → Güncelleme")],
+];
+async function komutlariYukle() {
+    const kap = document.getElementById("komut-dugmeler");
+    if (!kap)
+        return;
+    setHtml("komut-nerede", "<b>" + C("Diğerleri nerede:") + "</b><br>"
+        + KOMUT_NEREDE.map((x) => "· <b>" + esc(x[0]) + "</b> — " + esc(x[1])).join("<br>"));
+    try {
+        const j = await api("/api/komutlar");
+        kap.innerHTML = (j.komutlar || []).map((k) => '<button class="sm" title="' + esc(k.aciklama) + '" onclick="komutCalistir(\''
+            + esc(k.ad) + '\')">' + esc(k.etiket) + "</button>").join("");
+    }
+    catch {
+        kap.textContent = C("komut listesi okunamadı");
+    }
+}
+async function komutCalistir(ad) {
+    const e = el("komut-cikti");
+    e.style.display = "";
+    e.textContent = C("çalışıyor…");
+    try {
+        const j = await api("/api/komut?ad=" + encodeURIComponent(ad));
+        e.textContent = j.ok ? (j.etiket || ad) + "\n" + "─".repeat(40) + "\n" + (j.cikti || "")
+            : "⚠ " + (j.msg || C("çalıştırılamadı"));
+    }
+    catch {
+        e.textContent = "⚠ " + C("çalıştırılamadı");
+    }
+}
 /** Betik ozetini su anki dosyaya gore yeniler.
  *  Onay ister: bu dugme uyariyi susturur, sebebini arastirmaz. */
 async function butunlukSabitle() {
@@ -8957,6 +9085,8 @@ function openSettings() {
     setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
     void pveLinkDurum();
     void oturumlariYukle();
+    void komutlariYukle();
+    void butunlukDurum();
     const df = el("s-dosya");
     df.onchange = () => { if (df.files && df.files[0])
         void ayarYukle(df.files[0]); df.value = ""; };

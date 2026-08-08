@@ -1692,6 +1692,47 @@ async function ayarYukle(dosya: File): Promise<void> {
   if (j.ok) { void refresh(); renderSmtp(); }
 }
 
+/* ---------- komutlar paneli ---------- */
+/** CLI'daki teshis komutlarinin hepsi arayuzde vardi ama bes ayri yere
+ *  dagilmisti. Burasi tek liste: neyin nerede oldugu da yazili. */
+const KOMUT_NEREDE: [string, string][] = [
+  ["▶ Yedekle", C("plan kartı ve plana sağ tık")],
+  ["⏹ Yedeklemeyi durdur", C("çalışan planın kartı ve sağ tık")],
+  ["🧹 Retention", C("plan kartı — süresi dolan setleri çöpe taşır")],
+  ["🗑 Çöpü boşalt", C("plan kartı — çöpte süresi dolanları kalıcı siler")],
+  ["↻ Drive durumunu tazele", C("plana sağ tık")],
+  ["⬇ / ⬆ Ayarları taşı", C("bu bölümün üstü")],
+  ["🔒 Referansı yenile", C("hemen aşağıda, Betik bütünlüğü")],
+  ["Açık oturumlar", C("Ayarlar → Açık oturumlar")],
+  ["İzinli ağlar", C("Ayarlar → Güvenlik")],
+  ["Güncelleme", C("Ayarlar → Güncelleme")],
+];
+
+async function komutlariYukle(): Promise<void> {
+  const kap = document.getElementById("komut-dugmeler");
+  if (!kap) return;
+  setHtml("komut-nerede", "<b>" + C("Diğerleri nerede:") + "</b><br>"
+    + KOMUT_NEREDE.map((x) => "· <b>" + esc(x[0]) + "</b> — " + esc(x[1])).join("<br>"));
+  try {
+    const j = await api<{ komutlar: { ad: string; etiket: string; aciklama: string }[] }>(
+      "/api/komutlar");
+    kap.innerHTML = (j.komutlar || []).map((k) =>
+      '<button class="sm" title="' + esc(k.aciklama) + '" onclick="komutCalistir(\''
+      + esc(k.ad) + '\')">' + esc(k.etiket) + "</button>").join("");
+  } catch { kap.textContent = C("komut listesi okunamadı"); }
+}
+
+async function komutCalistir(ad: string): Promise<void> {
+  const e = el("komut-cikti");
+  e.style.display = ""; e.textContent = C("çalışıyor…");
+  try {
+    const j = await api<{ ok: boolean; etiket?: string; cikti?: string; msg?: string }>(
+      "/api/komut?ad=" + encodeURIComponent(ad));
+    e.textContent = j.ok ? (j.etiket || ad) + "\n" + "─".repeat(40) + "\n" + (j.cikti || "")
+                         : "⚠ " + (j.msg || C("çalıştırılamadı"));
+  } catch { e.textContent = "⚠ " + C("çalıştırılamadı"); }
+}
+
 /** Betik ozetini su anki dosyaya gore yeniler.
  *  Onay ister: bu dugme uyariyi susturur, sebebini arastirmaz. */
 async function butunlukSabitle(): Promise<void> {
@@ -1807,6 +1848,7 @@ function openSettings(): void {
   setVal("g-tgtoken", "");
   setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
   void pveLinkDurum(); void oturumlariYukle();
+  void komutlariYukle(); void butunlukDurum();
   const df = el("s-dosya") as HTMLInputElement;
   df.onchange = () => { if (df.files && df.files[0]) void ayarYukle(df.files[0]); df.value = ""; };
   openM("m-set");

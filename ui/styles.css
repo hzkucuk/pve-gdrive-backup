@@ -74,6 +74,10 @@ button:disabled,button[disabled]{opacity:.4;cursor:not-allowed;filter:grayscale(
 input[type=checkbox]{width:auto}
 /* Kaynak klasor dosya listesi. Uzun olabilir: kendi icinde kaydirilir ki
    sihirbaz adimi sayfayi asmasin. */
+/* Komut ciktisi: teshis metni, secilebilir ve kaydirilabilir olmali */
+.komut-cikti{margin-top:8px;max-height:300px;overflow:auto;background:#0b0e13;
+  border:1px solid #242a33;border-radius:7px;padding:8px 10px;font-size:11.5px;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#c9d6e2}
 .ksl-sar{max-height:320px;overflow:auto;margin-top:6px}
 .ksl-sar table{width:100%;border-collapse:collapse}
 .ksl-sar td{padding:3px 6px;border-bottom:1px solid #1b2027;vertical-align:top;

@@ -2,6 +2,29 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.8.1 — 2026-08-09
+
+### Komutlar tek yerde toplandı
+
+Her CLI komutunun arayüzde karşılığı vardı ama **beş ayrı yere dağılmıştı**;
+"şu komutu çalıştırayım" diyen kullanıcı nereye bakacağını bilmiyordu.
+1.6.0'ın *"CLI işleri arayüze taşındı"* başlığı da yapılandan fazlasını vaat
+etmişti — altında yalnızca üç madde vardı.
+
+*Ayarlar → Bakım ve taşıma → Komutlar*: teşhis komutları düğmeyle çalışır ve
+çıktısı orada görünür (zamanlayıcı sağlığı, betik bütünlüğü, planlar, durum
+JSON'u, sürüm). Altında **"diğerleri nerede"** listesi var: yedekleme,
+retention, çöp boşaltma ve Drive tazeleme hangi ekranda bulunur.
+
+Yıkıcı işlemler panele **bilerek konmadı.** "Tüm planlarda retention çalıştır"
+gibi bir kestirme, olmayan bir tehlikeyi icat ederdi; onlar plana özeldir ve
+plan kartında dururlar.
+
+*Nasıl doğrulandı:* uç yalnızca beyaz listeyi çalıştırıyor — `rm -rf /`,
+`saglik; id`, `../../etc/passwd`, `run`, `prune` gibi 10 girdi denendi, hepsi
+"bilinmeyen komut" ile reddedildi. Kullanıcı girdisi hiçbir zaman kabuğa
+geçmiyor: ad bir sözlük anahtarı, karşılığı önceden tanımlı bir fonksiyon.
+
 ## 1.8.0 — 2026-08-09
 
 ### Bütünlük uyarısı kullanıcıyı terminale yolluyordu
