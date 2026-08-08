@@ -11,6 +11,12 @@ __pycache__/
 pve-gdrive.conf
 /etc-pve-gdrive.conf
 
+# Sohbet transcript'leri ve icinden cikan gorseller.
+# HAM SOHBET: bu projede Telegram jetonu, Proxmox root parolasi ve arayuz
+# sifresi konusuldu; ekran goruntuleri de token ve IP gosteriyor. Depo public.
+# Repoda kalmasini istedigin gorsel docs/gorseller/ altina ELLE kopyalanir.
+docs/_transcripts/
+
 # TypeScript
 ui/node_modules/
 ui/dist/

@@ -179,6 +179,20 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [x] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)
 - [ ] Geri yükleme tatbikatı: indir + sha256 doğrula, sonucu haftalık rapora yaz
 
+### 10. Oturum sonunda transcript'i yedekle
+
+`tools/transcript-yedekle.sh` çalıştır — `/clear` veya `/compact` **öncesi ve
+sonrası**. Claude Code'un `~/.claude/projects/` klasörü bize ait değil; sürüm
+yükseltmesi ya da disk temizliği onu götürebilir. İçinde yalnızca sohbet değil,
+ürün sahibinin paylaştığı ve üzerine işaretlediği ekran görüntüleri de var —
+bu projede kararların çoğu onlardan çıktı.
+
+**Transcript ham sohbettir ve depo public.** Burada Telegram jetonu, Proxmox
+root parolası ve arayüz şifresi konuşuldu. `docs/_transcripts/` `.gitignore`'da;
+betik her çalışmada gerçekten yok sayıldığını doğrular ve sayılmıyorsa
+kopyalamadan durur. Repoda kalmasını istediğin görsel `docs/gorseller/` altına
+**elle** kopyalanır — neyin yayınlandığı her zaman bilinçli bir karar olsun.
+
 ## Ortam
 
 - Proxmox host: `192.168.2.252`, PVE 8.4.19, SSH anahtarı `~/.ssh/pve_gdrive_key` (root)
