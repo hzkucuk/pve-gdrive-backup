@@ -1438,7 +1438,7 @@ def t_hatirla_kalici():
         kalici = G.new_session("root", "10.0.0.5", kalici=True)
         dogru(G.get_session(kalici, "10.0.0.5") is not None, "oturum acilmali")
         G.DEPO.sifirla()                       # servis yeniden basladi
-        dogru(G.get_session(kalici, "10.0.0.5") is None, "bellek gercekten bosalmali")
+        esit(len(G.SESSIONS), 0, "bellek gercekten bosalmali")
         dogru(G.DEPO.kalicilari_yukle() == 1, "yalnizca kalici oturum geri gelmeli")
         dogru(G.get_session(kalici, "10.0.0.5") is not None, "hatirlanan oturum yasamali")
         dogru(G.get_session(gecici, "10.0.0.5") is None, "gecici oturum yasamamali")
@@ -1520,9 +1520,31 @@ def t_hatirla_uctan_uca():
         esit(kimim(), "admin", "giristen hemen sonra oturum gecerli olmali")
 
         G.DEPO.sifirla()                      # servis yeniden basladi
-        esit(kimim(), "HTTP 401", "bellek gercekten bosalmali")
-        esit(G.DEPO.kalicilari_yukle(), 1, "oturum geri yuklenmeli")
+        esit(len(G.SESSIONS), 0, "bellek gercekten bosalmali")
+        G._KALICI_DAMGA["mtime"] = None       # yeni surec gibi davran
         esit(kimim(), "admin", "YENIDEN BASLATMADAN SONRA AYNI CEREZ GECERLI OLMALI")
+        dogru(len(G.SESSIONS) >= 1, "oturum bellege geri alinmis olmali")
+    finally: o.temizle()
+
+@test("baska surecin yazdigi oturum taninir", "guvenlik")
+def t_oturum_diskten_tazele():
+    """Dosya yalnizca acilista okunuyordu: baska bir surecin yazdigi gecerli
+    oturum icin calisan sunucu 401 donuyordu (canli sunucuda olculdu)."""
+    o = Ortam()
+    try:
+        G1 = o.modul()                       # "calisan sunucu"
+        G1.DEPO.kalicilari_yukle()
+        G2 = o.modul()                       # baska surec
+        tok = G2.new_session("admin", "10.0.0.5", kalici=True)
+        dogru(tok not in G1.SESSIONS, "sunucunun belleginde henuz yok")
+        dogru(G1.get_session(tok, "10.0.0.5") is not None,
+              "diskteki gecerli oturum taninmali")
+        # Ikinci cagri diski tekrar okumamali (damga degismedi)
+        once = dict(G1._KALICI_DAMGA)
+        dogru(G1.get_session(tok, "10.0.0.5") is not None, "hala gecerli olmali")
+        esit(G1._KALICI_DAMGA, once, "damga degismediyse tekrar okunmamali")
+        # Olmayan jeton icin de patlamamali
+        dogru(G1.get_session("boyle-bir-jeton-yok", "10.0.0.5") is None, "bilinmeyen jeton None")
     finally: o.temizle()
 
 @test("oturum adres baglama kipleri", "guvenlik")

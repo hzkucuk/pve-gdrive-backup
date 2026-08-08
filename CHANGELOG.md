@@ -2,6 +2,31 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.4.5 — 2026-08-08
+
+### Sunucu oturum dosyasını yalnızca açılışta okuyordu
+
+Ölçüldü: başka bir süreçte oluşturulup diske yazılan **geçerli** bir oturum için
+çalışan sunucu **401** döndürüyordu. Dosya yalnızca `serve()` başlarken
+okunuyordu; sonradan dosyaya giren hiçbir oturum tanınmıyordu.
+
+Artık bellekte bulunamayan bir jeton için dosyanın damgasına bakılıyor;
+değiştiyse oturumlar tazeleniyor. Damga aynıysa disk hiç okunmuyor, yani her
+isteğe maliyet binmiyor. Aynı sınav: **401 → 200**.
+
+### "Beni hatırla çalışmıyor" teşhisi
+
+Şikâyeti ikiye ayırmak için iki kayıt eklendi:
+
+- Tarayıcı çerez gönderdiği hâlde sunucu tanımıyorsa:
+  `TESHIS: tarayici oturum cerezi gonderdi ama sunucu tanimiyor (adres, host, jeton, bellekteki oturum sayisi)`.
+  Bu satır **yoksa** çerez hiç gelmiyordur — sorun tarayıcı veya adres tarafındadır.
+- Giriş kaydına `host=` eklendi. Çerez **host'a bağlıdır**: bir gün
+  `192.168.2.252:8787`, ertesi gün `pve.marmaralastik.local:8787` ile girilirse
+  tarayıcı iki ayrı çerez kavanozu kullanır ve oturum "unutulmuş" görünür.
+
+Test: 83 → 84.
+
 ## 1.4.4 — 2026-08-08
 
 ### "Beni hatırla" — üç ayrı kusur

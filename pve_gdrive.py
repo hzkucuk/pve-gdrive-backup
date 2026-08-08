@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.4.4"
+SURUM = "1.4.5"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -2489,6 +2489,8 @@ def rclone_remotes(force=False):
         res.append({"name": parts[0].strip(), "type": parts[1].strip()})
     return res
 
+_KALICI_DAMGA = {"mtime": None}   # oturum dosyasinin son gorulen damgasi
+_BILINMEYEN_CEREZ = {}   # jeton oneki -> son loglama zamani (teshis, spam olmasin)
 _KOTA_ONBELLEK = {}   # hesap adi -> {"veri": {...}, "zaman": ts}
 
 _KOTA_ISLER = set()
@@ -3277,11 +3279,34 @@ def ayni_kaynak(eski, yeni, kip):
     except Exception as e:
         yut("ayni_kaynak", e); return False
 
+def kalici_diskten_tazele():
+    """Oturum dosyasi degistiyse bellege al.
+
+    Dosya yalnizca acilista okunuyordu: baska bir surecin yazdigi (ya da
+    acilis ile giris arasinda olusan) gecerli bir oturum sunucu tarafindan
+    taninmiyordu - olculdu, 401 donuyordu. Sadece dosyanin damgasi degistiginde
+    okunur, her istekte degil."""
+    try:
+        yol = oturum_dosyasi()
+        d = os.stat(yol).st_mtime_ns
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        yut("kalici_diskten_tazele", e); return
+    if _KALICI_DAMGA.get("mtime") == d: return
+    _KALICI_DAMGA["mtime"] = d
+    n = DEPO.kalicilari_yukle()
+    if n: log(f"oturum deposu diskten tazelendi: {n} kalici oturum")
+
 def get_session(tok, ip):
     gc_sessions()
     kip = str(cfg().get("session_ip_bind") or "ip")
     with _SEC_LOCK:
         v = SESSIONS.get(tok)
+    if not v:
+        kalici_diskten_tazele()          # belki baska surec yazmistir
+        with _SEC_LOCK: v = SESSIONS.get(tok)
+    with _SEC_LOCK:
         if not v: return None
         # Hatirlanan oturumda kip ayardan gelir; normal oturum her zaman birebir baglidir.
         if not ayni_kaynak(v["ip"], ip, kip if v.get("kalici") else "ip"):
@@ -3474,7 +3499,24 @@ class H(BaseHTTPRequestHandler):
 
     def _session(self):
         m = re.search(r"pgs=([A-Za-z0-9_\-]+)", self.headers.get("Cookie", "") or "")
-        return get_session(m.group(1), client_ip(self)) if m else None
+        if not m:
+            return None
+        o = get_session(m.group(1), client_ip(self))
+        if o is None:
+            # "Beni hatirla calismiyor" sikayetini ikiye ayirmak icin sart:
+            # cerez HIC gelmiyor mu (tarayici saklamamis/gondermiyor), yoksa
+            # geliyor da sunucu mu tanimiyor (oturum dusmus)? Cerez geldiyse
+            # buraya duseriz. Ayni istemci icin dakikada bir yazilir.
+            simdi = time.time()
+            anahtar = m.group(1)[:8]
+            if simdi - _BILINMEYEN_CEREZ.get(anahtar, 0) > 60:
+                _BILINMEYEN_CEREZ[anahtar] = simdi
+                if len(_BILINMEYEN_CEREZ) > 50: _BILINMEYEN_CEREZ.clear()
+                log(f"TESHIS: tarayici oturum cerezi gonderdi ama sunucu tanimiyor "
+                    f"(adres={client_ip(self)} host={self.headers.get('Host', '?')} "
+                    f"jeton={anahtar}… yol={self.path[:40]}). "
+                    f"Bellekte {len(SESSIONS)} oturum var.")
+        return o
 
     def _auth(self, need_csrf=False):
         C = cfg()
@@ -3927,7 +3969,10 @@ def do_login(handler):
         "1", "true", "on", "evet", "yes")
     tok = new_session(C.get("ui_user", ""), ip, kalici=hatirla)
     omur = float(C.get("remember_days") or 30) * 86400 if hatirla else None
-    log(f"giris basarili: {C.get('ui_user')} ({ip})"
+    # Host da yazilir: cerez HOST'A baglidir. Bir gun IP ile, ertesi gun sunucu
+    # adiyla girilirse tarayici iki ayri cerez kavanozu kullanir ve oturum
+    # "unutulmus" gorunur. Logdan hangi adresle gelindigi anlasilsin.
+    log(f"giris basarili: {C.get('ui_user')} ({ip}) host={handler.headers.get('Host', '?')}"
         + (f" [hatirlaniyor, {int(C.get('remember_days') or 30)} gun]" if hatirla else ""))
     handler._send(302, "text/html; charset=utf-8", "",
                   [handler._cookie(tok, omur_sn=omur), ("Location", "/")])
@@ -4010,6 +4055,8 @@ def serve():
     ensure_hashed_pw()
     n = DEPO.kalicilari_yukle()
     if n: log(f"{n} hatirlanan oturum geri yuklendi")
+    try: _KALICI_DAMGA["mtime"] = os.stat(oturum_dosyasi()).st_mtime_ns
+    except Exception as e: yut("acilis_damga", e)
     # Eski surumler OAuth ciktisini /tmp altina, dunyaya okunabilir biraktiyordu.
     # Icinde jeton kalmis olabilir; acilista temizle.
     try:
