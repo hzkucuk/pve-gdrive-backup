@@ -2,6 +2,29 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.7.2 — 2026-08-08
+
+### Güncelleme kaynağı: release varlığı
+
+`raw.githubusercontent.com` ~5 dakika önbellekleniyor ve sorgu parametresiyle
+kırılmıyor — ölçüldü: release varlığı **1.7.1** verirken raw hâlâ **1.6.2**
+dönüyordu. Yani yeni sürüm yayınlandıktan sonra "Güncelle" dediğinde araç
+eskisini indirip *"zaten güncel"* diyebiliyordu.
+
+Varsayılan artık `releases/latest/download/pve_gdrive.py`: yayınlandığı an taze.
+Eski **varsayılanı** kullanan kurulumlar açılışta sessizce taşınır; kendi
+adresini yazmış olanlara dokunulmaz.
+
+## 1.7.1 — 2026-08-08
+
+### Proxmox linki iki not alanına da yazılır
+
+Proxmox'ta iki ayrı Notes var ve kolayca karıştırılıyor:
+`Datacenter → Notes` (`/cluster/options`) ve `Node → Notes`
+(`/nodes/<ad>/config`). Link yalnızca Datacenter'a yazılıyordu; Node'un altına
+bakan "eklenmemiş" sanıyordu. Artık ikisine birden yazılıyor, durum satırı
+hangisinde ekli olduğunu tek tek gösteriyor, kaldırma da ikisinden birden.
+
 ## 1.7.0 — 2026-08-08
 
 ### Kaynak seçici artık ortamı anlıyor

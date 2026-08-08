@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.7.1"
+SURUM = "1.7.2"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -69,7 +69,10 @@ GLOBAL_DEFAULTS = {
     # --- otomatik guncelleme ---
     "update_check": True,         # gunde bir yeni surum var mi diye bak
     "update_auto": False,         # bulununca kendiliginden kur (varsayilan: sadece bildir)
-    "update_url": "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py",
+    # Release varligi kullanilir, raw.githubusercontent DEGIL: raw ~5 dakika
+    # onbelleklenir (sorgu parametresiyle de kirilmiyor - olculdu) ve guncelleme
+    # yeni surumu gormeden "zaten guncel" der. Release varligi yayinlandigi an taze.
+    "update_url": "https://github.com/hzkucuk/pve-gdrive-backup/releases/latest/download/pve_gdrive.py",
     # Guncelleme indirilen betigi ROOT olarak calisan dosyanin uzerine yazar.
     # Bu yuzden adres serbest birakilamaz: arayuze giren biri adresi kendi
     # sunucusuna cevirip root kod calistirabilirdi. Yalnizca bu hostlar ve
@@ -295,6 +298,19 @@ def load_cfg():
     c["smtp_profiles"] = [norm_smtp(x) for x in c.get("smtp_profiles", [])]
     c["plans"] = [norm_plan(p) for p in c.get("plans", [])]
     return c
+
+ESKI_UPDATE_URL = "https://raw.githubusercontent.com/hzkucuk/pve-gdrive-backup/main/pve_gdrive.py"
+
+def update_url_tasi(C):
+    """Eski VARSAYILAN adresi yeni varsayilana tasir.
+
+    Kullanici kendi adresini yazdiysa dokunulmaz; yalnizca eski varsayilan
+    birebir esitse degistirilir. Sebep: raw.githubusercontent onbellegi
+    yuzunden guncelleme yeni surumu 5 dakika boyunca goremiyordu."""
+    if str(C.get("update_url") or "") == ESKI_UPDATE_URL:
+        C["update_url"] = GLOBAL_DEFAULTS["update_url"]
+        return True
+    return False
 
 def cfg(force=False):
     """Config onbellekli okunur. Onbellek tazelenince hata ayiklama bayragi da guncellenir."""
@@ -4498,6 +4514,11 @@ def serve():
     global TLS_AKTIF
     C = cfg()
     ensure_hashed_pw()
+    C0 = cfg()
+    if update_url_tasi(C0):
+        save_cfg(C0)
+        log("guncelleme adresi release varligina tasindi "
+            "(raw.githubusercontent onbellegi yeni surumu geciktiriyordu)")
     n = DEPO.kalicilari_yukle()
     if n: log(f"{n} hatirlanan oturum geri yuklendi")
     try: _KALICI_DAMGA["mtime"] = os.stat(oturum_dosyasi()).st_mtime_ns

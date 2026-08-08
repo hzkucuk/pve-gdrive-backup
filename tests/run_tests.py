@@ -1009,6 +1009,31 @@ def t_guncelleme_adresi():
               "acikca izin verilen host kabul edilmeli")
     finally: o.temizle()
 
+@test("guncelleme kaynagi bayat onbellek vermeyen adres", "guvenlik")
+def t_update_kaynak():
+    """raw.githubusercontent ~5 dakika onbelleklenir; olculdu: release varligi
+    1.7.1 verirken raw hala 1.6.2 donuyordu. Guncelleme yeni surumu gormeden
+    'zaten guncel' diyordu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        vars_url = G.GLOBAL_DEFAULTS["update_url"]
+        dogru("releases" in vars_url and "raw.githubusercontent" not in vars_url,
+              f"varsayilan release varligi olmali: {vars_url}")
+        dogru(G.guncelleme_adresi_gecerli(vars_url)[0],
+              "varsayilan adres izinli host listesinden gecmeli")
+        # Eski varsayilan tasinmali
+        c = G.cfg(); c["update_url"] = G.ESKI_UPDATE_URL; G.save_cfg(c)
+        C = G.cfg(force=True)
+        dogru(G.update_url_tasi(C), "eski varsayilan tasinmali")
+        esit(C["update_url"], vars_url, "yeni varsayilana gecmeli")
+        # Kullanicinin kendi adresine DOKUNULMAMALI
+        ozel = "https://github.com/baskasi/depo/releases/latest/download/pve_gdrive.py"
+        C2 = {"update_url": ozel}
+        dogru(not G.update_url_tasi(C2), "ozel adres tasinmamali")
+        esit(C2["update_url"], ozel, "ozel adres korunmali")
+    finally: o.temizle()
+
 @test("guncelleme ozeti sabitlenebilir", "guvenlik")
 def t_guncelleme_ozet():
     o = Ortam()
