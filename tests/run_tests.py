@@ -630,6 +630,58 @@ def t_rapor():
         dogru("qemu-100" in govde and "lxc-201" in govde, "misafirler listelenmeli")
     finally: o.temizle()
 
+@test("hesap eklenmediyse 'eklendi' denmez", "izleme")
+def t_remote_dogrulama():
+    """rclone rc=0 dondugu halde hesabin yazilmadigi bir durum yasandi:
+    log 'eklendi' dedi, hesap yoktu ve bu ancak saatler sonra fark edildi.
+    Cikis kodu kanit degil; dosyadan geri okunmali."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        G.RCLONE_CONF = os.path.join(o.dizin, "rclone.conf")
+        G.remote_quota = lambda n: {"ok": False, "error": "test"}
+        # rclone hep basarili donsun; asil soru dosyaya yazilip yazilmadigi
+        G.rclone = lambda a, timeout=None: (0, "", "")
+        yazildi = []
+        # remote_create once "zaten var mi" diye bakar, sonra dogrulama icin
+        # tekrar okur: ilk cagri bos, sonrakiler yazilanlari donsun
+        G.rclone_remotes = lambda force=False: list(yazildi)
+
+        r = G.remote_create("HAYALET", '{"access_token":"x"}')
+        dogru(not r["ok"], f"yazilmayan hesap basarili sayilmamali: {r}")
+        dogru("gorunmuyor" in r["msg"], f"sebep net olmali: {r['msg']}")
+
+        # Simdi rclone gercekten yazsin
+        def yazan(a, timeout=None):
+            if a[:2] == ["config", "create"]: yazildi.append({"name": a[2], "type": "drive"})
+            return (0, "", "")
+        G.rclone = yazan
+        r = G.remote_create("GERCEK", '{"access_token":"x"}')
+        dogru(r["ok"], f"yazilan hesap basarili olmali: {r}")
+        # Ayni adi tekrar eklemeye calisirsa reddedilmeli
+        dogru(not G.remote_create("GERCEK", '{"access_token":"x"}')["ok"],
+              "ayni ad iki kez eklenememeli")
+    finally: o.temizle()
+
+@test("rclone.conf degisiklikten once yedeklenir", "izleme")
+def t_rclone_conf_yedek():
+    o = Ortam()
+    try:
+        G = o.modul()
+        import os as _o
+        G.RCLONE_CONF = _o.path.join(o.dizin, "rclone.conf")   # /var/lib altina yazma
+        open(G.RCLONE_CONF, "w").write("[gdrive]\ntype = drive\n")
+        y = G.rclone_conf_yedekle("deneme")
+        dogru(y and _o.path.exists(y), f"yedek olusmali: {y}")
+        dogru("[gdrive]" in open(y).read(), "yedek icerigi dogru olmali")
+        esit(oct(_o.stat(y).st_mode)[-3:], "600", "yedek 600 olmali")
+        d = _o.path.dirname(y)
+        esit(oct(_o.stat(d).st_mode)[-3:], "700", "yedek dizini 700 olmali")
+        # dosya yoksa sessizce gecmeli, patlamasin
+        _o.remove(G.RCLONE_CONF)
+        esit(G.rclone_conf_yedekle("yok"), "", "config yoksa yedek de yok")
+    finally: o.temizle()
+
 @test("zamanlayici gecikmesi fark edilir", "izleme")
 def t_tick_sagligi():
     """Timer durursa hicbir yedek alinmaz ve tek belirtisi 'sonraki calisma'nin

@@ -2,6 +2,24 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.3.1 — 2026-08-08
+
+### rclone hesap yazımı doğrulanıyor
+
+Bir hesap eklendi, `rclone` çıkış kodu 0 döndü, log **"hesap eklendi"** yazdı —
+ve hesap yapılandırma dosyasında yoktu. Saatler sonra fark edildi; hangi yazmanın
+düşürdüğü geriye dönük kanıtlanamadı çünkü hiçbir kopya yoktu.
+
+- `remote_create` artık çıkış kodunu kanıt saymıyor: yazdıktan sonra dosyadan
+  geri okuyup hesabın gerçekten göründüğünü doğruluyor. Görünmüyorsa **hata**
+  dönüyor ve `RCLONE_CONFIG` yolunu loga yazıyor. `remote_delete` de aynı
+  şekilde silindiğini doğruluyor.
+- `rclone.conf`, değiştiren her işlemden **önce** zaman damgalı olarak
+  kopyalanıyor (`/var/lib/pve-gdrive/rclone-yedek/`, `0600`, dizin `0700`).
+  Kaç kopya tutulacağı: `rclone_conf_yedek_tut` (varsayılan 20).
+
+Test: 65 → 67.
+
 ## 1.3.0 — 2026-08-08
 
 Bu sürümün büyük kısmı, gerçek kurulumda ortaya çıkan sorunların düzeltilmesidir.

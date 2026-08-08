@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.3.0"
+SURUM = "1.3.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -134,6 +134,8 @@ GLOBAL_DEFAULTS = {
         "/nodes/{node}/disks/list", "/access/users", "/access/roles", "/access/acl",
     ],
     # --- canli olay akisi (SSE) ---
+    # rclone.conf her degisiklikten once kopyalanir; kac kopya tutulacagi
+    "rclone_conf_yedek_tut": 20,
     "sse_enabled": True,        # kapatilirsa arayuz eski yoklama moduna doner
     "sse_watch_ms": 1000,       # diskteki degisikligin ne siklikta taranacagi
     "sse_heartbeat_sec": 20,    # ters vekil baglantiyi kesmesin diye bos sinyal
@@ -2294,8 +2296,10 @@ def do_tick():
 AUTH_OUT = "/tmp/pve-gdrive-auth.out"
 _AUTH = {"proc": None, "url": None, "started": 0}
 
-def rclone_remotes():
-    """Yapilandirilmis rclone remote'lari. Her plan bunlardan birini hedef secer."""
+def rclone_remotes(force=False):
+    """Yapilandirilmis rclone remote'lari. Her plan bunlardan birini hedef secer.
+    force parametresi cagri yerinin niyetini belli eder: yazmadan sonra dogrulama."""
+    _ = force
     rc, out, err = rclone(["listremotes", "--long"])
     res = []
     if rc != 0: return res
@@ -2454,6 +2458,30 @@ def local_ip():
         yut("local_ip", e)
         return ""
 
+def rclone_conf_yedekle(sebep):
+    """Yapilandirmayi degistiren her islemden ONCE zaman damgali kopya alir.
+
+    2026-08-08: bir hesap eklendi, rclone rc=0 dondu, log 'eklendi' yazdi ve
+    hesap dosyada yoktu. Hangi yazmanin dusurdugu geriye donuk kanitlanamadi
+    cunku hicbir kopya yoktu. Artik var."""
+    try:
+        if not os.path.exists(RCLONE_CONF): return ""
+        d = os.path.join(os.path.dirname(RCLONE_CONF), "rclone-yedek")
+        os.makedirs(d, exist_ok=True); os.chmod(d, 0o700)
+        hedef = os.path.join(d, f"rclone.conf.{datetime.now():%Y%m%d-%H%M%S}.{slug(sebep)}")
+        shutil.copy2(RCLONE_CONF, hedef); os.chmod(hedef, 0o600)
+        tut = int(cfg().get("rclone_conf_yedek_tut") or 20)
+        for e in sorted(os.listdir(d), reverse=True)[tut:]:
+            try: os.remove(os.path.join(d, e))
+            except Exception as ex: yut("rclone_conf_yedekle", ex)
+        return hedef
+    except Exception as e:
+        yut("rclone_conf_yedekle", e); return ""
+
+def remote_var_mi(name):
+    """Dosyaya gercekten yazildi mi? rclone'un cikis kodu yeterli kanit degil."""
+    return any(r["name"] == name for r in rclone_remotes(force=True))
+
 def remote_create(name, token):
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(name or "")).strip()
     if not name: return {"ok": False, "msg": "gecersiz hesap adi"}
@@ -2463,15 +2491,24 @@ def remote_create(name, token):
     except Exception as e:
         yut("remote_create", e)
         return {"ok": False, "msg": "jeton gecerli JSON degil"}
+    yedek = rclone_conf_yedekle(f"ekle-{name}")
     # --non-interactive: rclone jetonu dogrulamak icin OAuth sunucusu acip asili kalmasin
     rc, out, err = rclone(["config", "create", name, "drive", "scope=drive.file",
                            f"token={token}", "--non-interactive"], timeout=60)
     if rc != 0: return {"ok": False, "msg": (err or out).strip()[:200]}
+    # Cikis kodu 0 olmasi yazildigini KANITLAMAZ. Dosyadan geri okuyup dogrula:
+    # aksi halde "eklendi" denir, hesap yoktur ve bu ancak yedek gununde anlasilir.
+    if not remote_var_mi(name):
+        log(f"UYARI: '{name}' eklendi gorundu ama yapilandirmada yok "
+            f"(RCLONE_CONFIG={RCLONE_CONF})"
+            + (f", yedek: {yedek}" if yedek else ""))
+        return {"ok": False, "msg": f"'{name}' yazilamadi: rclone basarili dedi ama hesap "
+                                    f"yapilandirmada gorunmuyor ({RCLONE_CONF}). Loga bak."}
     try: os.chmod(RCLONE_CONF, 0o600)
     except Exception as e: yut("remote_create", e)
     q = remote_quota(name)
     _KOTA_ONBELLEK.pop(name, None)
-    log(f"rclone hesabi eklendi: {name}")
+    log(f"rclone hesabi eklendi ve dogrulandi: {name}")
     return {"ok": True, "msg": f"'{name}' eklendi" + (
         f" ({human(q.get('used'))}/{human(q.get('total'))} kullanimda)" if q.get("ok") else
         " ama kota okunamadi: " + str(q.get("error", ""))[:80]), "name": name}
@@ -2479,10 +2516,14 @@ def remote_create(name, token):
 def remote_delete(name):
     used = [p["name"] for p in cfg().get("plans", []) if p["remote"].split(":")[0] == name]
     if used: return {"ok": False, "msg": "su planlar kullaniyor: " + ", ".join(used)}
+    yedek = rclone_conf_yedekle(f"sil-{name}")
     rc, out, err = rclone(["config", "delete", name])
     if rc != 0: return {"ok": False, "msg": (err or "").strip()[:200]}
+    if remote_var_mi(name):
+        return {"ok": False, "msg": f"'{name}' silinemedi: hala yapilandirmada gorunuyor"}
     _KOTA_ONBELLEK.pop(name, None)
-    log(f"rclone hesabi silindi: {name} (Drive'daki dosyalara dokunulmadi)")
+    log(f"rclone hesabi silindi: {name} (Drive'daki dosyalara dokunulmadi)"
+        + (f" | yedek: {yedek}" if yedek else ""))
     return {"ok": True, "msg": f"'{name}' silindi (Drive'daki dosyalar duruyor)"}
 
 # ---------- PROXMOX KESFI ----------
