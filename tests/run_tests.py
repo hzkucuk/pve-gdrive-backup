@@ -851,6 +851,117 @@ def t_betik_yolu_symlink():
              "sembolik baglanti cozulup gercek dosya donmeli")
     finally: o.temizle()
 
+@test("telegram mesaji dogru bicimde ve jeton sizmadan gider", "telegram")
+def t_telegram():
+    o = Ortam()
+    try:
+        G = o.modul()
+        JETON = "123456789:AABBccddEEffgghhIIjjkkLLmmnnOOppQQ"
+        c = G.cfg(); c["telegram_enabled"] = True; c["telegram_token"] = JETON
+        c["telegram_chat_id"] = "555"; G.save_cfg(c)
+
+        cagri = {}
+        class Yanit:
+            def read(_s): return b'{"ok":true}'
+            def __enter__(_s): return _s
+            def __exit__(_s, *a): return False
+        def sahte(istek, timeout=None):
+            cagri["url"] = istek.full_url
+            cagri["veri"] = istek.data.decode()
+            return Yanit()
+        o.yamala(G.urllib.request, "urlopen", sahte)
+
+        dogru(G.tg_gonder("merhaba"), "mesaj gitmeli")
+        dogru(cagri["url"].endswith("/sendMessage"), f"uc yanlis: {cagri['url']}")
+        dogru(JETON in cagri["url"], "jeton URL'de olmali (Bot API boyle)")
+        dogru("chat_id=555" in cagri["veri"], "sohbet id gonderilmeli")
+
+        # Kapaliyken hicbir sey gitmemeli
+        cagri.clear()
+        c = G.cfg(); c["telegram_enabled"] = False; G.save_cfg(c)
+        dogru(not G.tg_gonder("olmaz"), "kapaliyken gonderilmemeli")
+        dogru(not cagri, "kapaliyken istek bile atilmamali")
+
+        # Plan bazinda kapatma
+        c = G.cfg(); c["telegram_enabled"] = True; G.save_cfg(c)
+        dogru(not G.tg_gonder("x", {"telegram": False}), "plan kapattiysa gitmemeli")
+        dogru(G.tg_gonder("x", {"telegram": True, "telegram_chat_id": "999"}),
+              "plan kendi sohbetine yazabilmeli")
+        dogru("chat_id=999" in cagri["veri"], "planin sohbeti kullanilmali")
+
+        # Mesaj siniri
+        dogru(len(G.tg_kisalt("x" * 9000)) <= 3910, "uzun mesaj kirpilmali")
+        dogru("…" in G.tg_kisalt("x" * 9000), "kirpma isareti olmali")
+
+        # Jeton HICBIR YERDE disari cikmamali
+        dogru(JETON not in json.dumps(G.public_status()), "durum API'sinde jeton olmamali")
+        dogru(G.public_status()["telegram_jeton_var"] is True, "yalnizca 'var mi' bildirilmeli")
+        dogru(JETON not in json.dumps(G.disa_aktar(True)), "disa aktarimda jeton olmamali")
+        # Hata mesajinda da maskelenmeli
+        def patla(istek, timeout=None): raise RuntimeError(f"baglanti hatasi {JETON} reddedildi")
+        o.yamala(G.urllib.request, "urlopen", patla)
+        G.tg_gonder("x")
+        gunluk = open(G.cfg()["log_file"]).read()
+        dogru(JETON not in gunluk, "jeton LOGA yazilmamali")
+        dogru("<jeton>" in gunluk, "jeton maskelenerek yazilmali")
+    finally: o.temizle()
+
+@test("telegram jetonu ayar kaydinda korunur", "telegram")
+def t_telegram_jeton_korunur():
+    """Arayuz jetonu geri gostermez; bos gonderdiginde mevcut jeton
+    SILINMEMELI, yoksa her ayar kaydinda bildirim bozulurdu."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        JETON = "123456789:AABBccddEEffgghhIIjjkkLLmmnnOOppQQ"
+        c = G.cfg(); c["telegram_token"] = JETON; G.save_cfg(c)
+        G.save_settings({"telegram_enabled": True, "telegram_chat_id": "42"})
+        esit(G.cfg(force=True)["telegram_token"], JETON, "bos gonderimde jeton korunmali")
+        esit(G.cfg()["telegram_chat_id"], "42", "sohbet guncellenmeli")
+        r = G.save_settings({"telegram_token": "bozuk-jeton"})
+        dogru(not r["ok"], "gecersiz jeton reddedilmeli")
+        esit(G.cfg(force=True)["telegram_token"], JETON, "reddedilince eski jeton kalmali")
+    finally: o.temizle()
+
+@test("betik degisirse fark edilir", "guvenlik")
+def t_butunluk():
+    """Dosya izinleri yalnizca root'a acik, ama root olan degistirebilir.
+    Ikinci katman: ozet saklanir ve her tick'te karsilastirilir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        sahte = os.path.join(o.dizin, "betik.py")
+        open(sahte, "w").write("# ilk hal\n")
+        class Ana: __file__ = sahte
+        G.sys.modules["__main__"] = Ana
+
+        esit(G.butunluk_kontrol()[0], "referans-yok", "once referans olmamali")
+        dogru(G.butunluk_sabitle("test")["ok"], "referans alinmali")
+        esit(G.butunluk_kontrol()[0], "iyi", "degismeden iyi olmali")
+
+        open(sahte, "a").write("# birisi ekledi\n")     # betik degisti
+        d, m2 = G.butunluk_kontrol()
+        esit(d, "DEGISTI", "degisiklik yakalanmali")
+        dogru("INCELE" in m2 or "incele" in m2.lower(), f"mesaj uyarici olmali: {m2}")
+        esit(G.public_status()["saglik"]["butunluk"], "DEGISTI", "durum API'si bildirmeli")
+
+        # Bildirim yalnizca BIR KEZ: her tick'te mail yagmasin
+        yakalanan = []
+        o.yamala(G, "send_mail", lambda *a, **k: yakalanan.append(1) or True)
+        c = G.cfg(); c["failure_mail_to"] = "a@b.c"; G.save_cfg(c)
+        G.butunluk_izle(); G.butunluk_izle(); G.butunluk_izle()
+        esit(len(yakalanan), 1, f"tek bildirim olmali, {len(yakalanan)} gitti")
+
+        # Mesru guncellemeden sonra referans yenilenince alarm susmali
+        G.butunluk_sabitle("guncelleme")
+        esit(G.butunluk_kontrol()[0], "iyi", "referans yenilenince temiz olmali")
+
+        # Ilk calismada referans kendiliginden alinmali
+        G.put_state_root({"betik_sha256": "", "betik_sha_bildirilen": ""})
+        G.butunluk_izle()
+        esit(G.butunluk_kontrol()[0], "iyi", "ilk calismada referans alinmali")
+    finally: o.temizle()
+
 @test("guncelleme adresi keyfi bir sunucuya cevrilemez", "guvenlik")
 def t_guncelleme_adresi():
     """Guncelleme, indirdigi dosyayi ROOT olarak calisan betigin uzerine yazar.
@@ -1008,6 +1119,30 @@ def t_kurulum_kapsam():
         dogru(f"enable --now {birim}" in ik, f"{birim} etkinlestirilmeli")
     # Sablon birim ENABLE EDILMEMELI (OnFailure ile cagrilir)
     dogru("enable --now pve-gdrive-bildir" not in ik, "sablon birim enable edilmemeli")
+
+@test("bakim islemleri arayuzden yapilabiliyor", "arayuz")
+def t_bakim_arayuzu():
+    """CLI'da olan her sey arayuzde de olmali: ayar tasima, Proxmox linki,
+    oturum yonetimi."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        h = G.HTML
+        for parca in ("ayarIndir", "ayarYukle", "s-dosya", "pveLink", "pveLinkDurum",
+                      "oturumlariYukle", "oturumKapat", "s-oturumlar", "s-pvelink"):
+            dogru(parca in h, f"'{parca}' arayuzde bulunmali")
+        # Sunucu uclari da var mi
+        kaynak = open(BETIK).read()
+        for uc in ("/api/disa-aktar", "/api/ice-aktar", "/api/proxmox-link",
+                   "/api/oturumlar", "/api/oturum/kapat"):
+            dogru(f'"{uc}"' in kaynak, f"{uc} ucu tanimli olmali")
+        # Sirlar varsayilan olarak disari cikmamali
+        d = G.disa_aktar()
+        dogru(not d.get("_sirlar_dahil"), "varsayilan disa aktarim sirsiz olmali")
+        dogru(all(not x.get("pass") for x in d.get("smtp_profiles", [])),
+              "SMTP sifreleri varsayilan olarak cikmamali")
+        dogru("ui_pass" not in (d.get("ayarlar") or {}), "arayuz sifresi asla cikmamali")
+    finally: o.temizle()
 
 @test("kurulum ciktisindaki komutlar gercekten var", "kurulum")
 def t_kurulum_komutlari():

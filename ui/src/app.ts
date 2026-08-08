@@ -330,14 +330,26 @@ function saglikCiz(): void {
   const h = S && S.saglik;
   const kutu = document.getElementById("saglik");
   if (!kutu) return;
-  if (!h || h.tick === "iyi") { kutu.style.display = "none"; kutu.textContent = ""; return; }
+  const uyarilar: string[] = [];
+  if (h && h.butunluk === "DEGISTI") {
+    // Bu en agiri: calisan kod beklenenden farkli. Ustte ve kirmizi dursun.
+    uyarilar.push('<b>🛑 ' + esc(C("Çalışan betik değişmiş")) + "</b>"
+      + '<div class="small" style="margin-top:5px">' + esc(h.butunluk_mesaj || "") + "</div>"
+      + '<div class="small" style="margin-top:5px">'
+      + esc(C("Güncelleme yaptıysan normaldir; referansı yenile: "))
+      + "<code>pve-gdrive butunluk --sabitle</code></div>");
+  }
+  if (h && h.tick !== "iyi") {
+    uyarilar.push('<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
+                                                        : "Zamanlayıcı hiç çalışmadı"))
+      + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
+      + '<div class="small" style="margin-top:5px">'
+      + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>");
+  }
+  if (!uyarilar.length) { kutu.style.display = "none"; kutu.textContent = ""; return; }
   kutu.style.display = "";
   kutu.className = "card uyari-kutu";
-  kutu.innerHTML = '<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
-                                                         : "Zamanlayıcı hiç çalışmadı"))
-    + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
-    + '<div class="small" style="margin-top:5px">'
-    + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>";
+  kutu.innerHTML = uyarilar.join('<hr style="border:0;border-top:1px solid #4a2222;margin:9px 0">');
 }
 
 function progOf(p: Plan): string {
@@ -1412,6 +1424,120 @@ async function smtpTest(id: string): Promise<void> {
 }
 
 /* ---------- genel ayarlar ---------- */
+/** Telegram testi. Jeton kaydedilmemisse once kaydetmesi gerektigini soyle. */
+async function tgTest(): Promise<void> {
+  const e = document.getElementById("g-tgdurum");
+  const yaz = (t: string, iyi: boolean): void => {
+    if (e) { e.textContent = t; e.className = "small" + (iyi ? "" : " uyari-metin"); }
+  };
+  const jetonVar = Boolean(S && S.telegram_jeton_var) || Boolean(val("g-tgtoken").trim());
+  if (!jetonVar) { yaz(C("önce bot jetonunu gir ve kaydet"), false); return; }
+  if (val("g-tgtoken").trim()) {
+    yaz(C("önce Kaydet'e bas, sonra test et"), false); return;
+  }
+  yaz(C("gönderiliyor…"), true);
+  const j = await api("/api/telegram/test", { method: "POST",
+    body: JSON.stringify({ chat: val("g-tgchat").trim() }) });
+  yaz(j.msg || "", j.ok);
+  flash(j.msg || "", j.ok);
+}
+
+/* ---------- bakim: ayar tasima, Proxmox linki, oturumlar ---------- */
+
+/** Tarayici indirmesi: sunucu Content-Disposition ile dosya adini verir. */
+function ayarIndir(sirlarla: boolean): void {
+  if (sirlarla) {
+    void onay(C("İndirilecek dosya SMTP şifrelerini düz metin içerecek.\n"
+              + "Yalnızca güvendiğin bir yere kaydet."),
+              C("Şifrelerle indir"), C("İndir"), C("Vazgeç")).then((e) => {
+      if (e) window.location.href = "/api/disa-aktar?sirlar=1";
+    });
+    return;
+  }
+  window.location.href = "/api/disa-aktar";
+}
+
+function ayarYukleAc(): void { (el("s-dosya") as HTMLInputElement).click(); }
+
+async function ayarYukle(dosya: File): Promise<void> {
+  let veri: unknown;
+  try { veri = JSON.parse(await dosya.text()); }
+  catch { flash(C("dosya geçerli JSON değil"), false); return; }
+  const d = veri as { plans?: unknown[]; smtp_profiles?: unknown[]; _surum?: string };
+  const np = (d.plans || []).length, ns = (d.smtp_profiles || []).length;
+  const kip = await onay(
+    C("Dosyada ") + np + C(" plan, ") + ns + C(" mail profili var")
+    + (d._surum ? C(" (sürüm ") + esc(d._surum) + ")" : "") + ".\n"
+    + C("Mevcut planların korunsun mu, yoksa yerlerine bunlar mı geçsin?"),
+    C("Ayar yükle"), C("Ekle (mevcutlar kalsın)"), C("Vazgeç"));
+  if (!kip) return;
+  const j = await api("/api/ice-aktar", { method: "POST",
+    body: JSON.stringify({ veri, kip: "ekle" }) });
+  flash(j.msg || "", j.ok);
+  if (j.ok) { void refresh(); renderSmtp(); }
+}
+
+async function pveLinkDurum(): Promise<void> {
+  const e = document.getElementById("s-pvelink");
+  if (!e) return;
+  try {
+    const j = await api<{ ok: boolean; var: boolean; url: string; msg: string }>(
+      "/api/proxmox-link");
+    e.innerHTML = !j.ok ? esc(C("Durum okunamadı: ") + (j.msg || ""))
+      : j.var ? "✅ " + esc(C("Link ekli: ")) + "<code>" + esc(j.url) + "</code>"
+              : "○ " + esc(C("Link yok. Eklenecek adres: ")) + "<code>" + esc(j.url) + "</code>";
+  } catch { e.textContent = C("durum okunamadı"); }
+}
+
+async function pveLink(ekle: boolean): Promise<void> {
+  const j = await api("/api/proxmox-link", { method: "POST",
+    body: JSON.stringify({ ekle }) });
+  flash(j.msg || "", j.ok);
+  void pveLinkDurum();
+}
+
+interface OturumSatir {
+  onek: string; kullanici: string; adres: string;
+  olusma: string; kalan_gun: number; bu_mu: boolean;
+}
+
+async function oturumlariYukle(): Promise<void> {
+  const kutu = document.getElementById("s-oturumlar");
+  if (!kutu) return;
+  try {
+    const j = await api<{ oturumlar: OturumSatir[];
+                          ayarlar: Record<string, unknown> }>("/api/oturumlar");
+    const o = j.oturumlar || [];
+    kutu.innerHTML = !o.length
+      ? '<div class="small">' + C("Hatırlanan açık oturum yok.") + "</div>"
+      : '<table><thead><tr><th>' + C("Cihaz") + "</th><th>" + C("Adres")
+        + "</th><th>" + C("Açılış") + '</th><th class="r">' + C("Kalan")
+        + "</th><th></th></tr></thead><tbody>"
+        + o.map((x) => "<tr><td>" + (x.bu_mu ? "<b>" + C("bu tarayıcı") + "</b>"
+            : '<code class="small">' + esc(x.onek) + "…</code>")
+          + "</td><td>" + esc(x.adres) + "</td><td>" + esc(x.olusma)
+          + '</td><td class="r">' + x.kalan_gun + C(" gün") + "</td><td>"
+          + (x.bu_mu ? "" : '<button class="sm warn" onclick="oturumKapat(\''
+              + esc(x.onek) + "')\">" + C("Kapat") + "</button>")
+          + "</td></tr>").join("") + "</tbody></table>"
+        + '<div class="small" style="margin-top:6px">'
+        + C("Hatırlama: ") + (j.ayarlar.remember_enabled ? C("açık") : C("kapalı"))
+        + " · " + esc(String(j.ayarlar.remember_days)) + C(" gün")
+        + " · " + C("adres bağlama: ") + esc(String(j.ayarlar.session_ip_bind || "ip"))
+        + " · SameSite: " + esc(String(j.ayarlar.cookie_samesite || "Lax")) + "</div>";
+    ceviriUygula();
+  } catch { kutu.textContent = C("okunamadı"); }
+}
+
+async function oturumKapat(onek: string | null, hepsi?: boolean): Promise<void> {
+  if (hepsi && !await onay(C("Bu tarayıcı dışındaki tüm hatırlanan oturumlar kapatılsın mı?"),
+                           C("Oturumlar"), C("Kapat"), C("Vazgeç"))) return;
+  const j = await api("/api/oturum/kapat", { method: "POST",
+    body: JSON.stringify(hepsi ? { hepsi: true } : { onek }) });
+  flash(j.msg || "", j.ok);
+  void oturumlariYukle();
+}
+
 function openSettings(): void {
   const s = S ? S.settings : null;
   if (!s) return;
@@ -1434,6 +1560,13 @@ function openSettings(): void {
     ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
       + "</b> · veren: " + esc(c ? c.veren : "-") + C(" · bitiş: ") + esc(c ? c.bitis : "-")
     : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
+  setChk("g-tg", Boolean((s as unknown as Record<string, unknown>).telegram_enabled));
+  setVal("g-tgchat", String((s as unknown as Record<string, unknown>).telegram_chat_id || ""));
+  setVal("g-tgtoken", "");
+  setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
+  void pveLinkDurum(); void oturumlariYukle();
+  const df = el("s-dosya") as HTMLInputElement;
+  df.onchange = () => { if (df.files && df.files[0]) void ayarYukle(df.files[0]); df.value = ""; };
   openM("m-set");
 }
 async function saveSettings(): Promise<void> {
@@ -1468,6 +1601,10 @@ async function saveSettings(): Promise<void> {
     browse_roots: val("g-roots").split(",").map((x) => x.trim()).filter(Boolean),
   };
   if (val("g-pass")) b.ui_pass = val("g-pass");
+  b.telegram_enabled = chk("g-tg");
+  b.telegram_chat_id = val("g-tgchat").trim();
+  // Jeton yalnizca YENI girildiyse gonderilir; bos ise sunucudaki korunur
+  if (val("g-tgtoken").trim()) b.telegram_token = val("g-tgtoken").trim();
   const j = await api("/api/settings/save", { method: "POST", body: JSON.stringify(b) });
   flash(j.msg || "", j.ok);
   if (j.ok) { closeM("m-set"); void refresh(); }

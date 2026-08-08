@@ -383,3 +383,49 @@ farklı bir akış ister — listede yoktur.
 rclone'un tanımadığı bir sağlayıcı listede pasif görünür. Bu tespit
 **açık tarafa** düşer: `rclone config providers` çıktısı okunamazsa hiçbir
 sağlayıcı gizlenmez, çünkü bir tespit hatası çalışan sağlayıcıyı saklamamalı.
+
+## Telegram bildirimi
+
+Mail bazen geç gelir ya da spam'e düşer. Telegram anlık.
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `telegram_enabled` | `false` | Kapalıyken hiçbir mesaj gönderilmez |
+| `telegram_token` | — | @BotFather jetonu. **Sır**: dışa aktarımda, durum API'sinde ve logda görünmez |
+| `telegram_chat_id` | — | Kişi veya grup id'si (grup eksi ile başlar) |
+| `telegram` (plan) | `true` | Bu plan Telegram'a yazsın mı |
+| `telegram_chat_id` (plan) | — | Plan kendi sohbetine yazabilir |
+
+Mesaj düşen olaylar: yedek bitişi (başarılı/hata/atlandı), haftalık rapor, systemd
+birimi çökmesi, betik bütünlük uyarısı. Mesaj 4096 karakter sınırına göre ortadan
+kırpılır. Ağ hatası hiçbir zaman yedeklemeyi bozmaz.
+
+Jeton URL'in parçası olduğu için (Bot API böyle) hata mesajlarında `<jeton>`
+olarak maskelenir — testle korunuyor.
+
+## Betik bütünlüğü
+
+Dosya izinleri yalnızca root'a açık, ama root olan değiştirebilir. İkinci katman:
+betiğin sha256 özeti saklanır ve **her tick'te** karşılaştırılır.
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `butunluk_mail` | `true` | Beklenmedik değişiklikte mail (+ Telegram) |
+
+- Meşru güncelleme referansı kendiliğinden yeniler, alarm üretmez.
+- Uyarı **bir kez** gönderilir; her turda tekrarlanmaz.
+- Arayüzde kırmızı kutu, haftalık raporda uyarı satırı.
+- `pve-gdrive butunluk` durumu gösterir, `--sabitle` referansı yeniler.
+
+## Arayüzden yapılabilenler (eski CLI işleri)
+
+| İş | Nerede |
+|---|---|
+| Ayarları dışa/içe aktar | Ayarlar → Bakım ve taşıma |
+| Proxmox Notes linki ekle/kaldır | Ayarlar → Bakım ve taşıma |
+| Açık "beni hatırla" oturumları, tek tek veya toplu kapatma | Ayarlar → Açık oturumlar |
+| Zamanlayıcı ve bütünlük durumu | Ana ekranda uyarı kutusu |
+
+Dışa aktarılan dosya **sır içermez**: SMTP şifreleri, arayüz şifresi, Google
+jetonları ve Telegram jetonu çıkmaz. "Şifrelerle indir" yalnızca SMTP şifrelerini
+ekler. Yüklenen planlar **kapalı** gelir.

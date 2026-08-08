@@ -2,6 +2,40 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.6.0 — 2026-08-08
+
+### Telegram bildirimi
+
+Mail bazen geç gelir ya da spam'e düşer. Telegram anlık ve ek bağımlılık
+gerektirmiyor — Bot API düz bir HTTPS çağrısı.
+
+Mesaj düşen olaylar: yedek bitişi, haftalık rapor, systemd birimi çökmesi,
+bütünlük uyarısı. Plan bazında kapatılabilir, plan kendi sohbetine yazabilir.
+
+Jeton **sır olarak** ele alınıyor: dışa aktarımda, durum API'sinde ve logda
+görünmez; Bot API jetonu URL'e koyduğu için hata mesajlarında `<jeton>` olarak
+maskelenir. Arayüz jetonu geri göstermez — boş bırakılırsa mevcut korunur
+(yoksa her ayar kaydında bildirim bozulurdu). Hepsi testle korunuyor.
+
+### Betik bütünlüğü
+
+"Bu betiği kimse değiştiremez di mi?" sorusunun tam cevabı: izinler yalnızca
+root'a açık, ama root olan değiştirebilir. Artık betiğin sha256'sı saklanıp
+**her tick'te** karşılaştırılıyor. Değişiklik olursa arayüzde kırmızı kutu,
+mail, Telegram ve haftalık raporda uyarı — **bir kez**, her turda değil.
+Meşru güncelleme referansı kendiliğinden yeniliyor.
+`pve-gdrive butunluk [--sabitle]`.
+
+### CLI işleri arayüze taşındı
+
+- **Ayarları dışa/içe aktar** — indir/yükle düğmeleri. Dosya sır içermez;
+  planlar kapalı gelir.
+- **Proxmox Notes linki** — ekle/kaldır düğmesi, mevcut durum gösterimi.
+- **Açık oturumlar** — hangi cihaz, hangi adres, kalan süre; tek tek veya
+  "bu tarayıcı hariç hepsi" kapatma.
+
+Test: 86 → 90.
+
 ## 1.5.0 — 2026-08-08
 
 ### Kurulum betiği eksik kalmıştı

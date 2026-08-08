@@ -425,6 +425,70 @@
           arayüzü bu ayardan etkilenmez</b>, yanlış yazarsan config dosyasından geri alabilirsin.
           Boş liste = herkese açık.</div></div></div>
   </fieldset>
+  <fieldset><legend>Telegram bildirimi</legend>
+    <div class="eg" style="margin-bottom:8px">Mail bazen geç gelir ya da spam'e düşer.
+      Telegram anlık: yedek biter bitmez, servis çökünce, betik değişince mesaj düşer.
+      Botu <b>@BotFather</b>'dan oluşturup jetonu buraya yapıştır.</div>
+    <div class="frm">
+      <label for="g-tg">Telegram bildirimi</label>
+      <div><label class="chk"><input type="checkbox" id="g-tg"> <span>Açık</span></label>
+        <div class="eg">Kapalıyken hiçbir mesaj gönderilmez.</div></div>
+      <label for="g-tgtoken">Bot jetonu</label>
+      <div><input id="g-tgtoken" type="password" placeholder="123456789:AAE..." autocomplete="off">
+        <div class="errmsg" id="err-tgtoken"></div>
+        <div class="eg" id="g-tgtokenhint">Bu alan <b>hiçbir zaman geri gösterilmez</b>.
+          Boş bırakırsan mevcut jeton korunur.</div></div>
+      <label for="g-tgchat">Sohbet (chat id)</label>
+      <div><input id="g-tgchat" placeholder="123456789">
+        <div class="eg">Kişisel sohbette kendi id'in, grupta grup id'si (eksi ile başlar).
+          Bilmiyorsan bota bir mesaj at, sonra
+          <code>api.telegram.org/bot&lt;jeton&gt;/getUpdates</code> adresinden gör.</div></div>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="tgTest()">✈ Test mesajı gönder</button>
+      <span class="small" id="g-tgdurum"></span>
+    </div>
+    <div class="eg" style="margin-top:8px">Plan bazında kapatılabilir; bir plan kendi
+      sohbetine de yazabilir (plan düzenlemede <b>Bildirim</b> adımı).</div>
+  </fieldset>
+  <fieldset><legend>Bakım ve taşıma</legend>
+    <div class="f"><label class="tip" title="Planları ve mail profillerini başka bir kuruluma taşı.">Ayarları taşı</label>
+      <div>
+        <div class="btns">
+          <button class="sm" onclick="ayarIndir(false)">⬇ Ayarları indir</button>
+          <button class="sm" onclick="ayarIndir(true)">⬇ Şifrelerle indir</button>
+          <button class="sm" onclick="ayarYukleAc()">⬆ Ayar dosyası yükle</button>
+          <input type="file" id="s-dosya" accept=".json,application/json" style="display:none">
+        </div>
+        <div class="eg">İndirilen dosya <b>sır içermez</b>: SMTP şifreleri, arayüz şifresi ve
+          Google jetonları çıkmaz. Hedef kurulumda hesapları yeniden yetkilendirir,
+          mail şifrelerini yeniden girersin. "Şifrelerle indir" yalnızca SMTP şifrelerini
+          ekler — dosyayı koru.</div>
+        <div class="eg">Yüklenen planlar <b>kapalı</b> gelir; hesap ve klasörü
+          gözden geçirdikten sonra sen açarsın. Arayüz şifresi, TLS yolları ve
+          izinli ağlar hiçbir zaman aktarılmaz — bunlar host'a özeldir.</div>
+      </div></div>
+    <div class="f"><label class="tip" title="Proxmox arayüzünde Datacenter → Notes alanına tıklanabilir link koyar.">Proxmox linki</label>
+      <div>
+        <div class="btns">
+          <button class="sm" onclick="pveLink(true)">🔗 Proxmox'a link ekle</button>
+          <button class="sm warn" onclick="pveLink(false)">Kaldır</button>
+        </div>
+        <div class="eg" id="s-pvelink">durum okunuyor…</div>
+        <div class="eg">Proxmox'un hiçbir dosyasına dokunulmaz, yalnızca
+          <b>Datacenter → Notes</b> alanı güncellenir; sürüm yükseltmelerinde kaybolmaz.</div>
+      </div></div>
+  </fieldset>
+  <fieldset><legend>Açık oturumlar</legend>
+    <div class="eg" style="margin-bottom:8px">"Beni hatırla" ile açılmış oturumlar.
+      Bir cihazı kaybettiysen buradan kapat. <b>Çıkış yapmak hatırlanan oturumu siler</b> —
+      hatırlamayı denemek için çıkışa basma, sekmeyi kapatıp tekrar aç.</div>
+    <div id="s-oturumlar">yükleniyor…</div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="oturumlariYukle()">↻ Yenile</button>
+      <button class="sm warn" onclick="oturumKapat(null, true)">Diğer tüm oturumları kapat</button>
+    </div>
+  </fieldset>
   <fieldset><legend>Gelişmiş</legend>
     <div class="f"><label class="tip" title="Klasör seçici yalnızca bu köklerin altını gösterir.">Gezinme kökleri</label>
       <div><input id="g-roots"><div class="hint">Virgülle ayır. Örnek: <code>/var/lib/vz, /mnt/pve, /mnt</code></div></div></div>

@@ -97,6 +97,8 @@ interface Plan {
 interface Saglik {
   tick: "iyi" | "gecikmis" | "bilinmiyor";
   tick_mesaj: string; tick_son: string | null; tick_yas_dk: number;
+  butunluk?: "iyi" | "DEGISTI" | "referans-yok" | "okunamadi";
+  butunluk_mesaj?: string;
 }
 
 interface Settings {
@@ -108,6 +110,7 @@ interface Settings {
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;
   update_check: boolean; update_auto: boolean; update_url: string; update_backup_keep: number;
   allow_networks: string[];
+  telegram_enabled?: boolean; telegram_chat_id?: string;
   failure_mail?: boolean; failure_mail_to?: string; tick_uyari_dk?: number;
   sse_enabled?: boolean; sse_watch_ms?: number;
   sse_heartbeat_sec?: number; sse_max_clients?: number;
@@ -131,6 +134,7 @@ interface Status {
   tls?: { aktif: boolean; sertifika: { konu: string; veren: string; bitis: string } | null };
   hesaplar?: { name: string; type: string; quota: Quota; pct: number | null }[];
   surum?: string;
+  telegram_jeton_var?: boolean;
   saglik?: Saglik;
   guncelleme?: { uzak: string | null; yeni_var: boolean; otomatik: boolean; hata: string };
   csrf: string;

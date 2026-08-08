@@ -16,6 +16,7 @@ Komutlar:
   python3 pve_gdrive.py saglik            # zamanlayici yasiyor mu (cikis kodu 0/1)
   python3 pve_gdrive.py oturumlar         # kayitli "beni hatirla" oturumlari
   python3 pve_gdrive.py version           # surum
+  python3 pve_gdrive.py butunluk          # betik degismis mi (--sabitle: referansi yenile)
   python3 pve_gdrive.py plans             # planlari listeler
   python3 pve_gdrive.py aglar             # izinli aglari gosterir/duzenler (kurtarma)
   python3 pve_gdrive.py disa-aktar        # plan/mail ayarlarini JSON olarak yazar
@@ -23,14 +24,14 @@ Komutlar:
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
 import hashlib, secrets, random, ssl, ipaddress, shutil, tempfile, io
-import urllib.request, html as _html
+import urllib.request, urllib.parse, html as _html
 from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.5.0"
+SURUM = "1.6.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -110,11 +111,16 @@ GLOBAL_DEFAULTS = {
     "snapshot_max_rows": 200,   # state.json'a yazilacak azami yedek/cop satiri (toplamlar tam kalir)
     "stats_interval_sec": 5,    # rclone ilerleme bildirim sikligi (UI bunu gosterir)
     # --- servis izleme ---
+    # --- telegram ---
+    "telegram_enabled": False,
+    "telegram_token": "",         # BotFather'dan alinan jeton (SIR)
+    "telegram_chat_id": "",       # kisi ya da grup id'si
     "failure_mail": True,         # systemd birimi cokunce mail at
     "failure_mail_to": "",        # bos ise ilk planin alicisi kullanilir
     "failure_smtp_profile": "",
     "failure_mail_lines": 40,     # maile eklenecek gunluk satiri
     "tick_uyari_dk": 20,          # bu kadar dakikadir tick gelmediyse uyar
+    "butunluk_mail": True,        # betik beklenmedik degisirse mail at
     # --- host yapilandirma yedegi ---
     # vzdump diskleri alir, host yapilandirmasini almaz. Bu kucuk arsiv
     # "diskleri nereye geri yukleyecegim" sorusunun cevabidir.
@@ -174,6 +180,8 @@ PLAN_DEFAULTS = {
     "host_config_enabled": True, "host_config_json": True, "host_config_keep_count": 30,
     # Birincil hedef calismazsa sirayla denenecek yedek hedefler ("hesap:klasor").
     "yedek_hedefler": [],
+    "telegram": True,             # bu plan Telegram'a bildirim gondersin mi
+    "telegram_chat_id": "",       # bos = genel ayardaki sohbet
     "id": "",
     "name": "Yeni plan",
     "enabled": True,
@@ -534,6 +542,79 @@ def log(msg, plan=None):
 #   1) systemd OnFailure= -> birim cokunce hemen mail
 #   2) her tick "yasiyorum" damgasi birakir; damga eskirse arayuz ve rapor uyarir
 
+# ---------- BUTUNLUK ----------
+# "Bu betigi kimse degistiremez di mi?" sorusunun tam cevabi: dosya izinleri
+# yalnizca root'a acik, ama root olan degistirebilir. O yuzden ikinci katman:
+# betigin ozeti saklanir ve her tick'te karsilastirilir. Beklenmedik bir
+# degisiklik sessiz kalmaz.
+
+def betik_ozeti(yol=None):
+    try:
+        with open(yol or betik_yolu(), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception as e:
+        yut("betik_ozeti", e); return ""
+
+def butunluk_sabitle(sebep="elle"):
+    oz = betik_ozeti()
+    if not oz: return {"ok": False, "msg": "betik okunamadi"}
+    put_state_root({"betik_sha256": oz, "betik_sha_zaman": now_str(),
+                    "betik_sha_sebep": sebep, "betik_yolu": betik_yolu()})
+    log(f"butunluk referansi guncellendi ({sebep}): {oz[:16]}…")
+    return {"ok": True, "msg": f"referans alindi: {oz[:16]}…", "sha256": oz}
+
+def butunluk_kontrol():
+    """(durum, mesaj). durum: iyi | DEGISTI | referans-yok | okunamadi"""
+    st = read_state()
+    beklenen = str(st.get("betik_sha256") or "")
+    simdiki = betik_ozeti()
+    if not simdiki: return "okunamadi", M("Betik okunamadi.")
+    if not beklenen: return "referans-yok", M("Butunluk referansi henuz alinmadi.")
+    if simdiki == beklenen: return "iyi", ""
+    return "DEGISTI", (M("Calisan betik degismis. Beklenen {b}…, bulunan {s}…. "
+                         "Guncelleme yaptiysan normaldir; yapmadiysan INCELE.")
+                       .replace("{b}", beklenen[:12]).replace("{s}", simdiki[:12]))
+
+def butunluk_izle():
+    """Her tick'te calisir. Degisiklik yalnizca BIR KEZ bildirilir; her turda
+    mail yagmasin diye bildirilen ozet kaydedilir."""
+    durum, mesaj = butunluk_kontrol()
+    if durum == "referans-yok":
+        butunluk_sabitle("ilk calisma"); return
+    if durum != "DEGISTI": return
+    st = read_state()
+    simdiki = betik_ozeti()
+    if st.get("betik_sha_bildirilen") == simdiki: return      # zaten haber verildi
+    put_state_root({"betik_sha_bildirilen": simdiki})
+    log(f"GUVENLIK: {mesaj}")
+    C = cfg()
+    alici = C.get("failure_mail_to") or next(
+        (p.get("mail_to") for p in C.get("plans", []) if p.get("mail_to")), "")
+    if C.get("butunluk_mail", True) and alici:
+        govde = "\n".join([
+            "[HATA] Calisan betik degismis", "=" * 58, "",
+            "OZET",
+            f"  Dosya        : {betik_yolu()}",
+            f"  Beklenen     : {st.get('betik_sha256', '')}",
+            f"  Bulunan      : {simdiki}",
+            f"  Referans     : {st.get('betik_sha_zaman', '-')} ({st.get('betik_sha_sebep', '-')})",
+            f"  Sunucu       : {os.uname().nodename}",
+            f"  Zaman        : {now_str()}", "",
+            "UYARILAR",
+            "  ! Guncelleme yaptiysan bu normaldir; referansi yenile:",
+            "      pve-gdrive butunluk --sabitle",
+            "  ! Guncelleme YAPMADIYSAN dosyayi ve erisim kayitlarini incele.", "",
+            f"Log: {C.get('log_file')}",
+        ])
+        send_mail(alici, f"[Proxmox Yedek] BUTUNLUK UYARISI - {os.uname().nodename}",
+                  metni_cevir(govde), C.get("failure_smtp_profile"), durum="HATA")
+    tg_gonder(tg_metin("BUTUNLUK UYARISI", [
+        f"Sunucu  : {os.uname().nodename}", f"Dosya   : {betik_yolu()}",
+        f"Beklenen: {st.get('betik_sha256', '')[:24]}…",
+        f"Bulunan : {simdiki[:24]}…", "",
+        "Guncelleme yaptiysan normaldir.",
+        "Yapmadiysan dosyayi ve erisim kayitlarini incele."], "HATA"))
+
 def tick_damgasi_yaz():
     put_state_root({"last_tick": now_str(), "last_tick_epoch": int(time.time())})
 
@@ -609,6 +690,9 @@ def birim_bildir(birim):
         log(f"birim hatasi ({birim}) - bildirilecek mail adresi yok"); return 1
     konu = f"[Proxmox Yedek] SERVIS HATASI - {birim}"
     ok = send_mail(alici, konu, metni_cevir(govde), profil, durum="HATA")
+    tg_gonder(tg_metin(f"SERVIS HATASI — {birim}",
+                       [f"Sunucu: {os.uname().nodename}", f"Zaman : {now_str()}", "",
+                        *satirlar[-8:]], "HATA"))
     log(f"birim hatasi bildirildi: {birim} -> {alici}" if ok
         else f"birim hatasi bildirilemedi: {birim}")
     return 0 if ok else 1
@@ -1426,6 +1510,8 @@ def build_report(p):
 
     tick_durum, tick_mesaj = tick_sagligi()
     if tick_durum != "iyi": uyari.append(tick_mesaj)
+    bt_durum, bt_mesaj = butunluk_kontrol()
+    if bt_durum == "DEGISTI": uyari.append(bt_mesaj)
     if s.get("status") == "HATA": uyari.append("Son calisma HATA ile bitti.")
     stale = int(p.get("report_stale_days") or 0)
     if stale and s.get("last_run"):
@@ -1463,6 +1549,9 @@ def send_report(p, trigger="zamanlanmis"):
     konu += (f" ({n} " + ("warning" if not dil_tr() else "uyari") + ")") if n else ""
     ok = send_mail(to, konu, metni_cevir(body), p.get("smtp_profile"),
                    durum="HATA" if n else "basarili")
+    tg_gonder(tg_metin(f"Haftalik rapor — {p['name']}",
+                       [x for x in body.split("\n")[:22]],
+                       "HATA" if n else "basarili"), p)
     if ok:
         put_pstate(p["id"], {"last_report": now_str(), "last_report_warn": n})
         log(f"haftalik rapor gonderildi ({n} uyari) -> {to}", p["id"])
@@ -2105,6 +2194,78 @@ def send_mail(to, subject, body, profile=None, durum=None):
     except Exception as e:
         log(f"mail HATA [{prof['id']}]: {e}"); return False
 
+# ---------- TELEGRAM ----------
+# Mail bazen gec gelir ya da spam'e duser; anlik bildirim icin Telegram.
+# Ek bagimlilik yok: Bot API duz bir HTTPS cagrisi.
+TG_API = "https://api.telegram.org"
+RE_TG_TOKEN = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
+
+def tg_ayar(p=None):
+    """(token, chat_id, acik). Plan kendi chat'ini verebilir; vermezse genel ayar."""
+    C = cfg()
+    token = str(C.get("telegram_token") or "").strip()
+    chat = str((p or {}).get("telegram_chat_id") or C.get("telegram_chat_id") or "").strip()
+    acik = bool(C.get("telegram_enabled")) and bool(token) and bool(chat)
+    if p is not None and not p.get("telegram", True): acik = False
+    return token, chat, acik
+
+def tg_kisalt(metin, sinir=3900):
+    """Telegram mesaj siniri 4096 karakter; ortadan kirpip iki ucu korur."""
+    if len(metin) <= sinir: return metin
+    bas = sinir // 2
+    return metin[:bas] + "\n…\n" + metin[-(sinir - bas):]
+
+def tg_gonder(metin, p=None, sessiz=False):
+    """Telegram'a mesaj yollar. Hata ASLA cagiran isi bozmaz."""
+    token, chat, acik = tg_ayar(p)
+    if not acik: return False
+    veri = urllib.parse.urlencode({
+        "chat_id": chat, "text": tg_kisalt(metin),
+        "parse_mode": "HTML", "disable_web_page_preview": "true",
+        "disable_notification": "true" if sessiz else "false",
+    }).encode()
+    try:
+        istek = urllib.request.Request(f"{TG_API}/bot{token}/sendMessage", data=veri,
+                                       headers={"User-Agent": f"pve-gdrive/{SURUM}"})
+        with urllib.request.urlopen(istek, timeout=20) as y:
+            ok = json.loads(y.read().decode("utf-8", "replace")).get("ok", False)
+        if ok: log("telegram bildirimi gonderildi", (p or {}).get("id"))
+        else: log("telegram bildirimi reddedildi (ok=false)", (p or {}).get("id"))
+        return bool(ok)
+    except Exception as e:
+        # Jeton loga DUSMEZ: hata metninde gecebilir, o yuzden maskeleriz
+        log(f"telegram HATA: {str(e).replace(token, '<jeton>')[:200]}", (p or {}).get("id"))
+        return False
+
+def tg_test(chat=None):
+    token, varsayilan, _ = tg_ayar()
+    if not token: return {"ok": False, "msg": "Telegram jetonu girilmemis"}
+    if not RE_TG_TOKEN.match(token):
+        return {"ok": False, "msg": "jeton bicimi hatali (ornek: 123456789:AAE...)"}
+    hedef = str(chat or varsayilan or "").strip()
+    if not hedef: return {"ok": False, "msg": "sohbet (chat id) girilmemis"}
+    veri = urllib.parse.urlencode({
+        "chat_id": hedef,
+        "text": (f"<b>pve-gdrive-backup</b> test\n{os.uname().nodename} · v{SURUM}\n"
+                 f"{now_str()}\n\nBildirimler buraya dusecek."),
+        "parse_mode": "HTML"}).encode()
+    try:
+        istek = urllib.request.Request(f"{TG_API}/bot{token}/sendMessage", data=veri)
+        with urllib.request.urlopen(istek, timeout=20) as y:
+            c = json.loads(y.read().decode("utf-8", "replace"))
+        if c.get("ok"):
+            log(f"telegram testi basarili -> {hedef}")
+            return {"ok": True, "msg": "test mesaji gonderildi"}
+        return {"ok": False, "msg": "Telegram reddetti: "
+                + str(c.get("description") or "")[:150]}
+    except Exception as e:
+        return {"ok": False, "msg": str(e).replace(token, "<jeton>")[:180]}
+
+def tg_metin(baslik, satirlar, durum=None):
+    simge = {"basarili": "✅", "HATA": "🛑", "atlandi": "⏸"}.get(durum, "ℹ️")
+    govde = "\n".join(f"{_html.escape(str(x))}" for x in satirlar if str(x).strip())
+    return f"{simge} <b>{_html.escape(baslik)}</b>\n<pre>{govde}</pre>"
+
 def notify_wanted(p, status):
     return bool(p.get({"basarili": "notify_success", "HATA": "notify_failure",
                        "atlandi": "notify_skipped"}.get(status, "notify_failure"), False))
@@ -2121,6 +2282,17 @@ def maybe_report(p, status, summary, snap, detay=None):
            f"[Proxmox Yedek] {p['name']} - {status}"
     konu += (f" ({uyari} " + ("warning" if not dil_tr() else "uyari") + ")") if uyari else ""
     send_mail(p.get("mail_to", ""), konu, metni_cevir(body), p.get("smtp_profile"), durum=status)
+    # Telegram: mail kadar detay degil, bakinca durumu anlatan ozet
+    tg_gonder(tg_metin(f"{p['name']} — {status}", [
+        f"Zaman   : {now_str()}",
+        f"Yuklenen: {detay.get('uploaded', 0)} dosya",
+        f"Cope    : {detay.get('moved', 0)} · kalici silinen: {detay.get('purged', 0)}",
+        f"Sure    : {detay.get('dur', '-')} sn",
+        (f"Hedef   : {detay.get('aktif')}" if detay.get("yedege_dustu") else ""),
+        ("! Birincil hedef calismadi, yedege yazildi" if detay.get("yedege_dustu") else ""),
+        ("! RETENTION ATLANDI - hicbir yedek silinmedi" if detay.get("skipped") else ""),
+        f"{uyari} uyari" if uyari else "",
+    ], status), p)
 
 def build_run_mail(p, status, summary, snap, detay):
     """Tek bir calismanin detayli raporu: ne yapildi, ne silindi, ne durumda."""
@@ -2352,6 +2524,8 @@ def do_run(pid, trigger="zamanlanmis"):
 def do_tick():
     """systemd timer bunu sik araliklarla cagirir; vakti gelen planlari calistirir."""
     tick_damgasi_yaz()      # "yasiyorum": timer durursa arayuz ve rapor fark etsin
+    try: butunluk_izle()    # betik beklenmedik sekilde degistiyse haber ver
+    except Exception as e: yut("butunluk_izle", e)
     st = read_state(); ran = []
     for p in cfg().get("plans", []):
         try:
@@ -2942,6 +3116,9 @@ def guncelleme_uygula(zorla=False):
         except Exception as e: yut("guncelleme_uygula", e)
         # 3) Yerine koy (atomik) ve servisi yeniden baslat
         os.replace(gecici, hedef)
+        # Mesru degisiklik alarm uretmesin: referans hemen yenilenir
+        try: butunluk_sabitle(f"guncelleme {SURUM} -> {uzak}")
+        except Exception as e: yut("guncelleme_butunluk", e)
         log(f"guncelleme kuruldu: {SURUM} -> {uzak} (yedek: {prog_yedek})")
         yedek_temizle(yd)
         nasil = servisi_yeniden_baslat()
@@ -3317,6 +3494,7 @@ def get_session(tok, ip):
                 f"({v['ip']} -> {ip}), reddedildi")
             return None
         v["last"] = time.time()
+        v["_tok"] = tok           # "bu oturum benim" karari icin
         return v
 
 # --- CAPTCHA (disa bagimliligi yok, SVG olarak uretilir) ---
@@ -3376,8 +3554,13 @@ def public_status():
                       "src_exists": os.path.isdir(p["src_dir"]),
                       "src_dumps": count_dumps(p["src_dir"])})
     tick_durum, tick_mesaj = tick_sagligi()
+    bt_durum, bt_mesaj = butunluk_kontrol()
+    # Jeton ASLA disari verilmez; yalnizca tanimli olup olmadigi
+    _tg_var = bool(str(C.get("telegram_token") or "").strip())
     return {"plans": plans, "updated": st.get("updated"),
+            "telegram_jeton_var": _tg_var,
             "saglik": {"tick": tick_durum, "tick_mesaj": tick_mesaj,
+                       "butunluk": bt_durum, "butunluk_mesaj": bt_mesaj,
                        "tick_son": st.get("last_tick"),
                        "tick_yas_dk": round(tick_yasi_dk() or 0, 1)},
             "settings": {k: C.get(k) for k in
@@ -3392,7 +3575,8 @@ def public_status():
                           "update_izinli_hostlar", "update_sha256", "debug",
                           "quota_cache_min", "dil",
                           "failure_mail", "failure_mail_to", "failure_smtp_profile",
-                          "failure_mail_lines", "tick_uyari_dk",
+                          "failure_mail_lines", "tick_uyari_dk", "butunluk_mail",
+                          "telegram_enabled", "telegram_chat_id",
                           "sse_enabled", "sse_watch_ms", "sse_heartbeat_sec", "sse_max_clients",
                           "sse_ping_sec",
                           "remember_enabled", "remember_days", "session_ip_bind",
@@ -3663,6 +3847,22 @@ class H(BaseHTTPRequestHandler):
                 cevap["oneri"] = saklama_oneri(a, kota)
                 cevap["oneri_pay_pct"] = int(cfg().get("oneri_pay_pct") or 60)
             self._json(cevap)
+        elif p == "/api/disa-aktar":
+            # Sirlar varsayilan olarak CIKMAZ; acikca istenirse ve loga yazilarak
+            sirlar = q.get("sirlar", [""])[0] == "1"
+            if sirlar: log(f"GUVENLIK: ayarlar SIRLARLA disa aktarildi ({client_ip(self)})")
+            veri = json.dumps(disa_aktar(sirlar), ensure_ascii=False, indent=2)
+            ad = f"pve-gdrive-ayarlar-{datetime.now():%Y%m%d-%H%M%S}.json"
+            self._send(200, "application/json; charset=utf-8", veri,
+                       [("Content-Disposition", f'attachment; filename="{ad}"')])
+        elif p == "/api/oturumlar":
+            self._json({"ok": True, "oturumlar": oturum_listesi((self.sess or {}).get("_tok")),
+                        "ayarlar": {k: cfg().get(k) for k in
+                                    ("remember_enabled", "remember_days",
+                                     "session_ip_bind", "cookie_samesite")}})
+        elif p == "/api/proxmox-link":
+            _m, var, hata = proxmox_link_oku()
+            self._json({"ok": not hata, "var": var, "url": proxmox_link_url(), "msg": hata})
         elif p == "/api/saglayicilar":
             self._json({"saglayicilar": saglayici_listesi()})
         elif p == "/api/ifaces":
@@ -3705,6 +3905,30 @@ class H(BaseHTTPRequestHandler):
             self._json(save_plan(self._body()))
         elif path == "/api/plan/delete":
             self._json(delete_plan(pid))
+        elif path == "/api/ice-aktar":
+            b2 = self._body()
+            kip = "degistir" if b2.get("kip") == "degistir" else "ekle"
+            try:
+                veri = b2.get("veri")
+                if isinstance(veri, str): veri = json.loads(veri)
+            except Exception as e:
+                self._json({"ok": False, "msg": f"dosya cozulemedi: {e}"}); return
+            self._json(ice_aktar(veri, kip))
+        elif path == "/api/telegram/test":
+            self._json(tg_test(self._body().get("chat")))
+        elif path == "/api/proxmox-link":
+            self._json(proxmox_link_yaz(self._body().get("ekle", True)))
+        elif path == "/api/oturum/kapat":
+            b2 = self._body()
+            benim = (self.sess or {}).get("_tok")
+            if b2.get("hepsi"):
+                n = 0
+                with _SEC_LOCK:
+                    hedef = [t for t, v in SESSIONS.items() if v.get("kalici") and t != benim]
+                for t in hedef: n += oturum_kapat(t[:10], haric=benim)["ok"] and 1 or 0
+                self._json({"ok": True, "msg": f"{n} oturum kapatildi (bu oturum haric)"})
+            else:
+                self._json(oturum_kapat(str(b2.get("onek") or "")[:16], haric=benim))
         elif path == "/api/remote/auth/start":
             self._json(auth_start(self._body().get("tur") or q.get("tur", ["drive"])[0]))
         elif path == "/api/remote/auth/finish":
@@ -3862,10 +4086,20 @@ def save_settings(data):
     if "cookie_secure" in data: C["cookie_secure"] = bool(data["cookie_secure"])
     if str(data.get("cookie_samesite", "")) in ("Lax", "Strict", "None"):
         C["cookie_samesite"] = data["cookie_samesite"]
-    for k in ("failure_mail_to", "failure_smtp_profile"):
+    for k in ("failure_mail_to", "failure_smtp_profile", "telegram_chat_id"):
         if k in data: C[k] = str(data[k] or "")
+    if "telegram_enabled" in data: C["telegram_enabled"] = bool(data["telegram_enabled"])
+    if "telegram_token" in data:
+        t = str(data["telegram_token"] or "").strip()
+        # Bos gelirse mevcut jeton KORUNUR: arayuz jetonu hic geri gondermez,
+        # yoksa her ayar kaydinda jeton silinirdi.
+        if t and t != "********":
+            if not RE_TG_TOKEN.match(t):
+                return {"ok": False, "msg": "Telegram jetonu bicimi hatali "
+                                            "(ornek: 123456789:AAE...)"}
+            C["telegram_token"] = t
     for k in ("update_check", "update_auto", "debug", "remember_enabled", "lan_hep_acik",
-              "sse_enabled", "failure_mail"):
+              "sse_enabled", "failure_mail", "butunluk_mail"):
         if k in data: C[k] = bool(data[k])
     if str(data.get("session_ip_bind", "")) in ("ip", "ag", "yok"):
         C["session_ip_bind"] = data["session_ip_bind"]
@@ -4145,6 +4379,78 @@ def disa_aktar(sirlar=False):
             "remember_enabled", "remember_days", "session_timeout_min",
             "update_check", "update_auto", "scheduler_interval_sec")},
     }
+
+def proxmox_link_url():
+    C = cfg()
+    tls = bool(C.get("ssl_cert") and C.get("ssl_key")
+               and os.path.exists(str(C.get("ssl_cert"))))
+    return f"{'https' if tls else 'http'}://{local_ip() or os.uname().nodename}:{C.get('ui_port', 8787)}"
+
+PVE_LINK_IM = "<!-- pve-gdrive -->"
+
+def proxmox_link_oku():
+    """Datacenter Notes'taki mevcut metin ve linkimiz orada mi."""
+    if not shutil.which("pvesh"): return None, False, "pvesh yok (Proxmox host'u degil)"
+    try:
+        r = subprocess.run(["pvesh", "get", "/cluster/options", "--output-format", "json"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return None, False, (r.stderr or "pvesh okunamadi").strip()[:200]
+        return json.loads(r.stdout or "{}").get("description", "") or "", \
+               PVE_LINK_IM in (json.loads(r.stdout or "{}").get("description") or ""), ""
+    except Exception as e:
+        return None, False, str(e)[:200]
+
+def proxmox_link_yaz(ekle=True):
+    """Proxmox Datacenter Notes'a arayuz linki ekler/kaldirir.
+
+    Proxmox'un hicbir dosyasina dokunulmaz, yalnizca not alani guncellenir -
+    surum yukseltmelerinde kaybolmaz ve geri alinmasi tek tiktir."""
+    mevcut, var, hata = proxmox_link_oku()
+    if mevcut is None: return {"ok": False, "msg": hata}
+    satirlar = [x for x in (mevcut or "").split("\n") if PVE_LINK_IM not in x]
+    if ekle:
+        url = proxmox_link_url()
+        satirlar.append(f"{PVE_LINK_IM} [🗄️ Google Drive Yedek]({url})")
+    yeni = "\n".join(x for x in satirlar if x.strip())
+    try:
+        r = subprocess.run(["pvesh", "set", "/cluster/options", "--description", yeni],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return {"ok": False, "msg": (r.stderr or "yazilamadi").strip()[:200]}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)[:200]}
+    log(f"Proxmox Notes linki {'eklendi' if ekle else 'kaldirildi'}")
+    return {"ok": True, "msg": ("Datacenter → Notes'a eklendi: " + proxmox_link_url())
+            if ekle else "Datacenter → Notes'tan kaldirildi", "var": ekle}
+
+def oturum_listesi(su_anki=None):
+    """Acik 'beni hatirla' oturumlari. Jeton DISARI VERILMEZ; yalnizca kisa
+    onek gosterilir ve islemler bu onekle yapilir."""
+    simdi = time.time()
+    out = []
+    with _SEC_LOCK:
+        kayit = dict(SESSIONS)
+    for t, v in kayit.items():
+        if not v.get("kalici"): continue
+        out.append({"onek": t[:10], "kullanici": v.get("user"), "adres": v.get("ip"),
+                    "olusma": datetime.fromtimestamp(v.get("created", 0)).strftime(TS_FMT)
+                              if v.get("created") else "-",
+                    "kalan_gun": round(max(0.0, (v.get("bitis", 0) - simdi) / 86400), 1),
+                    "bu_mu": bool(su_anki and t == su_anki)})
+    return sorted(out, key=lambda x: x["kalan_gun"], reverse=True)
+
+def oturum_kapat(onek, haric=None):
+    """Onekle eslesen kalici oturumu dusurur. haric verilirse o oturuma dokunulmaz
+    (kullanici kendi oturumunu yanlislikla kapatmasin diye cagiran taraf verir)."""
+    dusen = 0
+    with _SEC_LOCK:
+        for t in [t for t, v in SESSIONS.items()
+                  if v.get("kalici") and t.startswith(onek) and t != haric]:
+            SESSIONS.pop(t, None); DEPO._dusen.add(t); dusen += 1
+    if dusen: DEPO.kalicilari_yaz("arayuzden kapatildi")
+    return {"ok": bool(dusen),
+            "msg": f"{dusen} oturum kapatildi" if dusen else "eslesen oturum yok"}
 
 def ice_aktar(veri, plan_kipi="ekle"):
     """Disa aktarilmis ayarlari yukler.
@@ -4875,6 +5181,70 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
           arayüzü bu ayardan etkilenmez</b>, yanlış yazarsan config dosyasından geri alabilirsin.
           Boş liste = herkese açık.</div></div></div>
   </fieldset>
+  <fieldset><legend>Telegram bildirimi</legend>
+    <div class="eg" style="margin-bottom:8px">Mail bazen geç gelir ya da spam'e düşer.
+      Telegram anlık: yedek biter bitmez, servis çökünce, betik değişince mesaj düşer.
+      Botu <b>@BotFather</b>'dan oluşturup jetonu buraya yapıştır.</div>
+    <div class="frm">
+      <label for="g-tg">Telegram bildirimi</label>
+      <div><label class="chk"><input type="checkbox" id="g-tg"> <span>Açık</span></label>
+        <div class="eg">Kapalıyken hiçbir mesaj gönderilmez.</div></div>
+      <label for="g-tgtoken">Bot jetonu</label>
+      <div><input id="g-tgtoken" type="password" placeholder="123456789:AAE..." autocomplete="off">
+        <div class="errmsg" id="err-tgtoken"></div>
+        <div class="eg" id="g-tgtokenhint">Bu alan <b>hiçbir zaman geri gösterilmez</b>.
+          Boş bırakırsan mevcut jeton korunur.</div></div>
+      <label for="g-tgchat">Sohbet (chat id)</label>
+      <div><input id="g-tgchat" placeholder="123456789">
+        <div class="eg">Kişisel sohbette kendi id'in, grupta grup id'si (eksi ile başlar).
+          Bilmiyorsan bota bir mesaj at, sonra
+          <code>api.telegram.org/bot&lt;jeton&gt;/getUpdates</code> adresinden gör.</div></div>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="tgTest()">✈ Test mesajı gönder</button>
+      <span class="small" id="g-tgdurum"></span>
+    </div>
+    <div class="eg" style="margin-top:8px">Plan bazında kapatılabilir; bir plan kendi
+      sohbetine de yazabilir (plan düzenlemede <b>Bildirim</b> adımı).</div>
+  </fieldset>
+  <fieldset><legend>Bakım ve taşıma</legend>
+    <div class="f"><label class="tip" title="Planları ve mail profillerini başka bir kuruluma taşı.">Ayarları taşı</label>
+      <div>
+        <div class="btns">
+          <button class="sm" onclick="ayarIndir(false)">⬇ Ayarları indir</button>
+          <button class="sm" onclick="ayarIndir(true)">⬇ Şifrelerle indir</button>
+          <button class="sm" onclick="ayarYukleAc()">⬆ Ayar dosyası yükle</button>
+          <input type="file" id="s-dosya" accept=".json,application/json" style="display:none">
+        </div>
+        <div class="eg">İndirilen dosya <b>sır içermez</b>: SMTP şifreleri, arayüz şifresi ve
+          Google jetonları çıkmaz. Hedef kurulumda hesapları yeniden yetkilendirir,
+          mail şifrelerini yeniden girersin. "Şifrelerle indir" yalnızca SMTP şifrelerini
+          ekler — dosyayı koru.</div>
+        <div class="eg">Yüklenen planlar <b>kapalı</b> gelir; hesap ve klasörü
+          gözden geçirdikten sonra sen açarsın. Arayüz şifresi, TLS yolları ve
+          izinli ağlar hiçbir zaman aktarılmaz — bunlar host'a özeldir.</div>
+      </div></div>
+    <div class="f"><label class="tip" title="Proxmox arayüzünde Datacenter → Notes alanına tıklanabilir link koyar.">Proxmox linki</label>
+      <div>
+        <div class="btns">
+          <button class="sm" onclick="pveLink(true)">🔗 Proxmox'a link ekle</button>
+          <button class="sm warn" onclick="pveLink(false)">Kaldır</button>
+        </div>
+        <div class="eg" id="s-pvelink">durum okunuyor…</div>
+        <div class="eg">Proxmox'un hiçbir dosyasına dokunulmaz, yalnızca
+          <b>Datacenter → Notes</b> alanı güncellenir; sürüm yükseltmelerinde kaybolmaz.</div>
+      </div></div>
+  </fieldset>
+  <fieldset><legend>Açık oturumlar</legend>
+    <div class="eg" style="margin-bottom:8px">"Beni hatırla" ile açılmış oturumlar.
+      Bir cihazı kaybettiysen buradan kapat. <b>Çıkış yapmak hatırlanan oturumu siler</b> —
+      hatırlamayı denemek için çıkışa basma, sekmeyi kapatıp tekrar aç.</div>
+    <div id="s-oturumlar">yükleniyor…</div>
+    <div class="btns" style="margin-top:8px">
+      <button class="sm" onclick="oturumlariYukle()">↻ Yenile</button>
+      <button class="sm warn" onclick="oturumKapat(null, true)">Diğer tüm oturumları kapat</button>
+    </div>
+  </fieldset>
   <fieldset><legend>Gelişmiş</legend>
     <div class="f"><label class="tip" title="Klasör seçici yalnızca bu köklerin altını gösterir.">Gezinme kökleri</label>
       <div><input id="g-roots"><div class="hint">Virgülle ayır. Örnek: <code>/var/lib/vz, /mnt/pve, /mnt</code></div></div></div>
@@ -5476,6 +5846,55 @@ const EN = {
     "Kapsam drive.file: yalnizca bu aracin olusturdugu dosyalari gorur, Drive'inin gerisine erisemez.": "Scope drive.file: it only sees files this tool created and cannot reach the rest of your Drive.",
     "Bazi kurumsal hesaplarda drive_id/drive_type de gerekir; gerekirse hesabi rclone config ile elle kur.": "Some business accounts also need drive_id/drive_type; if so, configure the account manually with rclone config.",
     "Oturumu kapatmak istediğine emin misin?\n\"Beni hatırla\" işaretlemiş olsan bile hatırlanan oturum silinir.": "Are you sure you want to sign out?\nEven if you ticked \"Remember me\", the remembered session is deleted.",
+    "Bakım ve taşıma": "Maintenance and migration",
+    "Ayarları taşı": "Migrate settings",
+    "⬇ Ayarları indir": "⬇ Download settings",
+    "⬇ Şifrelerle indir": "⬇ Download with passwords",
+    "⬆ Ayar dosyası yükle": "⬆ Upload settings file",
+    "Proxmox linki": "Proxmox link",
+    "🔗 Proxmox'a link ekle": "🔗 Add link to Proxmox",
+    "Kaldır": "Remove",
+    "Açık oturumlar": "Open sessions",
+    "Cihaz": "Device",
+    "Adres": "Address",
+    "Açılış": "Opened",
+    "bu tarayıcı": "this browser",
+    "Hatırlanan açık oturum yok.": "No remembered sessions.",
+    "Hatırlama: ": "Remember me: ",
+    "açık": "on",
+    "adres bağlama: ": "address binding: ",
+    "Diğer tüm oturumları kapat": "Close all other sessions",
+    "Bu tarayıcı dışındaki tüm hatırlanan oturumlar kapatılsın mı?": "Close every remembered session except this browser?",
+    "Oturumlar": "Sessions",
+    "İndirilecek dosya SMTP şifrelerini düz metin içerecek.\nYalnızca güvendiğin bir yere kaydet.": "The downloaded file will contain SMTP passwords in plain text.\nSave it somewhere you trust.",
+    "Şifrelerle indir": "Download with passwords",
+    "İndir": "Download",
+    "dosya geçerli JSON değil": "file is not valid JSON",
+    "Dosyada ": "The file has ",
+    " plan, ": " plan(s), ",
+    " mail profili var": " mail profile(s)",
+    " (sürüm ": " (version ",
+    "Mevcut planların korunsun mu, yoksa yerlerine bunlar mı geçsin?": "Keep your existing plans, or replace them with these?",
+    "Ayar yükle": "Load settings",
+    "Ekle (mevcutlar kalsın)": "Add (keep existing)",
+    "Durum okunamadı: ": "Could not read status: ",
+    "Link ekli: ": "Link is in place: ",
+    "Link yok. Eklenecek adres: ": "No link. Address to add: ",
+    "durum okunamadı": "could not read status",
+    "okunamadı": "could not read",
+    "Çalışan betik değişmiş": "The running script has changed",
+    "Güncelleme yaptıysan normaldir; referansı yenile: ": "Normal if you just updated; refresh the baseline: ",
+    "Betik okunamadi.": "Could not read the script.",
+    "Butunluk referansi henuz alinmadi.": "Integrity baseline not taken yet.",
+    "Calisan betik degismis. Beklenen {b}…, bulunan {s}…. Guncelleme yaptiysan normaldir; yapmadiysan INCELE.": "The running script changed. Expected {b}…, found {s}…. Normal if you updated; if not, INVESTIGATE.",
+    "Telegram bildirimi": "Telegram notifications",
+    "Bot jetonu": "Bot token",
+    "Sohbet (chat id)": "Chat (chat id)",
+    "✈ Test mesajı gönder": "✈ Send test message",
+    "jeton kayıtlı": "token saved",
+    "jeton girilmemiş": "no token",
+    "önce bot jetonunu gir ve kaydet": "enter the bot token and save first",
+    "önce Kaydet'e bas, sonra test et": "press Save first, then test",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -6249,18 +6668,30 @@ function saglikCiz() {
     const kutu = document.getElementById("saglik");
     if (!kutu)
         return;
-    if (!h || h.tick === "iyi") {
+    const uyarilar = [];
+    if (h && h.butunluk === "DEGISTI") {
+        // Bu en agiri: calisan kod beklenenden farkli. Ustte ve kirmizi dursun.
+        uyarilar.push('<b>🛑 ' + esc(C("Çalışan betik değişmiş")) + "</b>"
+            + '<div class="small" style="margin-top:5px">' + esc(h.butunluk_mesaj || "") + "</div>"
+            + '<div class="small" style="margin-top:5px">'
+            + esc(C("Güncelleme yaptıysan normaldir; referansı yenile: "))
+            + "<code>pve-gdrive butunluk --sabitle</code></div>");
+    }
+    if (h && h.tick !== "iyi") {
+        uyarilar.push('<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
+            : "Zamanlayıcı hiç çalışmadı"))
+            + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
+            + '<div class="small" style="margin-top:5px">'
+            + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>");
+    }
+    if (!uyarilar.length) {
         kutu.style.display = "none";
         kutu.textContent = "";
         return;
     }
     kutu.style.display = "";
     kutu.className = "card uyari-kutu";
-    kutu.innerHTML = '<b>⚠ ' + esc(C(h.tick === "gecikmis" ? "Zamanlayıcı gecikmiş"
-        : "Zamanlayıcı hiç çalışmadı"))
-        + "</b><div class=\"small\" style=\"margin-top:5px\">" + esc(h.tick_mesaj || "") + "</div>"
-        + '<div class="small" style="margin-top:5px">'
-        + esc(C("Kontrol et: ")) + "<code>systemctl status pve-gdrive-tick.timer</code></div>";
+    kutu.innerHTML = uyarilar.join('<hr style="border:0;border-top:1px solid #4a2222;margin:9px 0">');
 }
 function progOf(p) {
     const g = p.weekdays && p.weekdays.length
@@ -7476,6 +7907,126 @@ async function smtpTest(id) {
     flash(j.msg || "", j.ok);
 }
 /* ---------- genel ayarlar ---------- */
+/** Telegram testi. Jeton kaydedilmemisse once kaydetmesi gerektigini soyle. */
+async function tgTest() {
+    const e = document.getElementById("g-tgdurum");
+    const yaz = (t, iyi) => {
+        if (e) {
+            e.textContent = t;
+            e.className = "small" + (iyi ? "" : " uyari-metin");
+        }
+    };
+    const jetonVar = Boolean(S && S.telegram_jeton_var) || Boolean(val("g-tgtoken").trim());
+    if (!jetonVar) {
+        yaz(C("önce bot jetonunu gir ve kaydet"), false);
+        return;
+    }
+    if (val("g-tgtoken").trim()) {
+        yaz(C("önce Kaydet'e bas, sonra test et"), false);
+        return;
+    }
+    yaz(C("gönderiliyor…"), true);
+    const j = await api("/api/telegram/test", { method: "POST",
+        body: JSON.stringify({ chat: val("g-tgchat").trim() }) });
+    yaz(j.msg || "", j.ok);
+    flash(j.msg || "", j.ok);
+}
+/* ---------- bakim: ayar tasima, Proxmox linki, oturumlar ---------- */
+/** Tarayici indirmesi: sunucu Content-Disposition ile dosya adini verir. */
+function ayarIndir(sirlarla) {
+    if (sirlarla) {
+        void onay(C("İndirilecek dosya SMTP şifrelerini düz metin içerecek.\n"
+            + "Yalnızca güvendiğin bir yere kaydet."), C("Şifrelerle indir"), C("İndir"), C("Vazgeç")).then((e) => {
+            if (e)
+                window.location.href = "/api/disa-aktar?sirlar=1";
+        });
+        return;
+    }
+    window.location.href = "/api/disa-aktar";
+}
+function ayarYukleAc() { el("s-dosya").click(); }
+async function ayarYukle(dosya) {
+    let veri;
+    try {
+        veri = JSON.parse(await dosya.text());
+    }
+    catch {
+        flash(C("dosya geçerli JSON değil"), false);
+        return;
+    }
+    const d = veri;
+    const np = (d.plans || []).length, ns = (d.smtp_profiles || []).length;
+    const kip = await onay(C("Dosyada ") + np + C(" plan, ") + ns + C(" mail profili var")
+        + (d._surum ? C(" (sürüm ") + esc(d._surum) + ")" : "") + ".\n"
+        + C("Mevcut planların korunsun mu, yoksa yerlerine bunlar mı geçsin?"), C("Ayar yükle"), C("Ekle (mevcutlar kalsın)"), C("Vazgeç"));
+    if (!kip)
+        return;
+    const j = await api("/api/ice-aktar", { method: "POST",
+        body: JSON.stringify({ veri, kip: "ekle" }) });
+    flash(j.msg || "", j.ok);
+    if (j.ok) {
+        void refresh();
+        renderSmtp();
+    }
+}
+async function pveLinkDurum() {
+    const e = document.getElementById("s-pvelink");
+    if (!e)
+        return;
+    try {
+        const j = await api("/api/proxmox-link");
+        e.innerHTML = !j.ok ? esc(C("Durum okunamadı: ") + (j.msg || ""))
+            : j.var ? "✅ " + esc(C("Link ekli: ")) + "<code>" + esc(j.url) + "</code>"
+                : "○ " + esc(C("Link yok. Eklenecek adres: ")) + "<code>" + esc(j.url) + "</code>";
+    }
+    catch {
+        e.textContent = C("durum okunamadı");
+    }
+}
+async function pveLink(ekle) {
+    const j = await api("/api/proxmox-link", { method: "POST",
+        body: JSON.stringify({ ekle }) });
+    flash(j.msg || "", j.ok);
+    void pveLinkDurum();
+}
+async function oturumlariYukle() {
+    const kutu = document.getElementById("s-oturumlar");
+    if (!kutu)
+        return;
+    try {
+        const j = await api("/api/oturumlar");
+        const o = j.oturumlar || [];
+        kutu.innerHTML = !o.length
+            ? '<div class="small">' + C("Hatırlanan açık oturum yok.") + "</div>"
+            : '<table><thead><tr><th>' + C("Cihaz") + "</th><th>" + C("Adres")
+                + "</th><th>" + C("Açılış") + '</th><th class="r">' + C("Kalan")
+                + "</th><th></th></tr></thead><tbody>"
+                + o.map((x) => "<tr><td>" + (x.bu_mu ? "<b>" + C("bu tarayıcı") + "</b>"
+                    : '<code class="small">' + esc(x.onek) + "…</code>")
+                    + "</td><td>" + esc(x.adres) + "</td><td>" + esc(x.olusma)
+                    + '</td><td class="r">' + x.kalan_gun + C(" gün") + "</td><td>"
+                    + (x.bu_mu ? "" : '<button class="sm warn" onclick="oturumKapat(\''
+                        + esc(x.onek) + "')\">" + C("Kapat") + "</button>")
+                    + "</td></tr>").join("") + "</tbody></table>"
+                + '<div class="small" style="margin-top:6px">'
+                + C("Hatırlama: ") + (j.ayarlar.remember_enabled ? C("açık") : C("kapalı"))
+                + " · " + esc(String(j.ayarlar.remember_days)) + C(" gün")
+                + " · " + C("adres bağlama: ") + esc(String(j.ayarlar.session_ip_bind || "ip"))
+                + " · SameSite: " + esc(String(j.ayarlar.cookie_samesite || "Lax")) + "</div>";
+        ceviriUygula();
+    }
+    catch {
+        kutu.textContent = C("okunamadı");
+    }
+}
+async function oturumKapat(onek, hepsi) {
+    if (hepsi && !await onay(C("Bu tarayıcı dışındaki tüm hatırlanan oturumlar kapatılsın mı?"), C("Oturumlar"), C("Kapat"), C("Vazgeç")))
+        return;
+    const j = await api("/api/oturum/kapat", { method: "POST",
+        body: JSON.stringify(hepsi ? { hepsi: true } : { onek }) });
+    flash(j.msg || "", j.ok);
+    void oturumlariYukle();
+}
 function openSettings() {
     const s = S ? S.settings : null;
     if (!s)
@@ -7509,6 +8060,15 @@ function openSettings() {
         ? '<span style="color:#7ee2a8">🔒 TLS açık.</span> Sertifika: <b>' + esc(c ? c.konu : "-")
             + "</b> · veren: " + esc(c ? c.veren : "-") + C(" · bitiş: ") + esc(c ? c.bitis : "-")
         : '<span style="color:#ff9b9b">⚠ TLS kapalı</span> — arayüz düz HTTP çalışıyor.');
+    setChk("g-tg", Boolean(s.telegram_enabled));
+    setVal("g-tgchat", String(s.telegram_chat_id || ""));
+    setVal("g-tgtoken", "");
+    setTxt("g-tgdurum", S && S.telegram_jeton_var ? C("jeton kayıtlı") : C("jeton girilmemiş"));
+    void pveLinkDurum();
+    void oturumlariYukle();
+    const df = el("s-dosya");
+    df.onchange = () => { if (df.files && df.files[0])
+        void ayarYukle(df.files[0]); df.value = ""; };
     openM("m-set");
 }
 async function saveSettings() {
@@ -7550,6 +8110,11 @@ async function saveSettings() {
     };
     if (val("g-pass"))
         b.ui_pass = val("g-pass");
+    b.telegram_enabled = chk("g-tg");
+    b.telegram_chat_id = val("g-tgchat").trim();
+    // Jeton yalnizca YENI girildiyse gonderilir; bos ise sunucudaki korunur
+    if (val("g-tgtoken").trim())
+        b.telegram_token = val("g-tgtoken").trim();
     const j = await api("/api/settings/save", { method: "POST", body: JSON.stringify(b) });
     flash(j.msg || "", j.ok);
     if (j.ok) {
@@ -7986,6 +8551,19 @@ def main():
     elif cmd == "bildir":
         # systemd OnFailure= bunu cagirir: pve-gdrive.py bildir <birim>
         sys.exit(birim_bildir(sys.argv[2] if len(sys.argv) > 2 else "bilinmeyen"))
+    elif cmd == "butunluk":
+        if "--sabitle" in a:
+            print(butunluk_sabitle("elle")["msg"])
+        else:
+            d, m2 = butunluk_kontrol()
+            st = read_state()
+            print(f"dosya    : {betik_yolu()}")
+            print(f"su anki  : {betik_ozeti()}")
+            print(f"referans : {st.get('betik_sha256') or '(yok)'}"
+                  + (f"  [{st.get('betik_sha_zaman')} / {st.get('betik_sha_sebep')}]"
+                     if st.get("betik_sha256") else ""))
+            print(f"durum    : {d}" + (f" - {m2}" if m2 else ""))
+            sys.exit(0 if d == "iyi" else 1)
     elif cmd in ("version", "surum", "--version"):
         print(SURUM)
     elif cmd == "oturumlar":
