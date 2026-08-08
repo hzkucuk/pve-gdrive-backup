@@ -27,7 +27,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.3.3"
+SURUM = "1.4.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -157,6 +157,8 @@ PLAN_DEFAULTS = {
     # Host yapilandirma yedegi: plan bazinda kapatilabilir, yollari/dislama
     # listesi verilmezse GLOBAL_DEFAULTS'taki liste kullanilir (bkz. hostconf_ayar).
     "host_config_enabled": True, "host_config_json": True, "host_config_keep_count": 30,
+    # Birincil hedef calismazsa sirayla denenecek yedek hedefler ("hesap:klasor").
+    "yedek_hedefler": [],
     "id": "",
     "name": "Yeni plan",
     "enabled": True,
@@ -300,6 +302,13 @@ def norm_plan(p):
         try: q[k] = max(0, int(q[k]))
         except Exception: q[k] = PLAN_DEFAULTS[k]
     if not isinstance(q.get("rclone_extra"), list): q["rclone_extra"] = []
+    yh, gorulen = [], {str(q.get("remote") or "").strip()}
+    for h in (q.get("yedek_hedefler") if isinstance(q.get("yedek_hedefler"), list) else []):
+        h = str(h or "").strip()
+        # Ayni hedef iki kez yazilirsa ikincisi anlamsiz; birincil hedefin
+        # tekrari ise tehlikeli (basarisizlik ayni yere iki kez denenir).
+        if h and ":" in h and h not in gorulen: yh.append(h); gorulen.add(h)
+    q["yedek_hedefler"] = yh
     try: q["nice"] = min(19, max(-20, int(q["nice"])))
     except Exception: q["nice"] = PLAN_DEFAULTS["nice"]
     try: q["ionice_class"] = min(3, max(0, int(q["ionice_class"])))
@@ -1445,6 +1454,29 @@ def send_report(p, trigger="zamanlanmis"):
     return ok
 
 # ---------- CEKIRDEK ----------
+# ---------- COKLU HEDEF ----------
+# Bir plan birden fazla hedefe sahip olabilir: birincisi calismazsa sonraki
+# denenir. Kritik kural, projenin en onemli guvenlik kuralinin uzantisidir:
+# RETENTION YALNIZCA YUKLEMENIN GERCEKTEN BASARILI OLDUGU HEDEFTE CALISIR.
+# Aksi halde yedek hesaba dustugumuz gun, birincideki eski yedekler silinir.
+
+def plan_hedefleri(p):
+    """Sirasiyla denenecek hedefler. Birincisi p['remote'], sonrakiler yedek."""
+    liste = [str(p.get("remote") or "").strip()]
+    for h in (p.get("yedek_hedefler") or []):
+        h = str(h or "").strip()
+        if h and h not in liste: liste.append(h)
+    return [h for h in liste if h]
+
+def plan_hedefle(p, hedef):
+    """Aktif hedefe gore plan kopyasi.
+
+    Alt fonksiyonlarin tamami p['remote'] okuyor. Her birine ayri hedef
+    parametresi eklemek yerine plani kopyalayip remote'u degistiriyoruz:
+    boylece 'yanlislikla baska hedefe dokunma' ihtimali kalmiyor."""
+    q = dict(p); q["remote"] = hedef
+    return q
+
 def do_copy(p):
     args = ["copy", p["src_dir"], p["remote"],
             "--transfers", str(p["transfers"]), "--checkers", str(p["checkers"]),
@@ -2099,6 +2131,17 @@ def build_run_mail(p, status, summary, snap, detay):
         L += [f"  Host yapilandirmasi: {detay.get('konf_n', 0)} dosya arsivlendi ve yuklendi", ""]
     elif p.get("host_config_enabled", GLOBAL_DEFAULTS["host_config_enabled"]):
         L += ["  ! Host yapilandirmasi bu calismada yedeklenemedi.", ""]
+    dn = detay.get("denemeler") or []
+    if len(dn) > 1 or detay.get("yedege_dustu"):
+        L += ["HEDEFLER"]
+        for i, d in enumerate(dn):
+            L.append(f"  {i + 1}. {d['hedef']:38} {'BASARILI' if d['ok'] else 'basarisiz'}")
+        if detay.get("yedege_dustu"):
+            L += ["  ! Birincil hedef calismadi, yedek hedefe yazildi.",
+                  "    Eski yedekler yalnizca yazilan hedefte temizlendi; "
+                  "digerlerine dokunulmadi.", ""]
+        else:
+            L.append("")
     L += ["YAPILANDIRMA",
           f"  Kaynak       : {p['src_dir']}",
           f"  Hedef        : {p['remote']}"] + _bolum_saklama(p) + [
@@ -2124,6 +2167,8 @@ def build_run_mail(p, status, summary, snap, detay):
     L += _bolum_cop(snap)
 
     uyari = []
+    if detay.get("yedege_dustu"):
+        uyari.append(f"Birincil hedef calismadi, yedek hedef kullanildi: {detay.get('aktif')}")
     if status == "HATA": uyari.append("Calisma HATA ile bitti - log dosyasina bak.")
     if detay.get("skipped"): uyari.append("Retention atlandi, eski yedekler birikmeye devam ediyor.")
     qw = int(p.get("report_quota_warn") or 0)
@@ -2155,15 +2200,36 @@ def _asama_atlandi(p, pid, trigger):
         except Exception as e: log(f"atlandi maili gonderilemedi: {e}", pid)
 
 def _asama_kopyala(p, pid):
-    """(basarili_mi, yuklenen_dosya, atlanan_yarim_dosyalar)"""
+    """(basarili_mi, yuklenen_dosya, atlanan_yarim, aktif_hedef, denemeler)
+
+    Hedefler sirayla denenir; ilk basarili olan kazanir. Basarisiz hedeflere
+    HICBIR SEY yapilmaz - ne silme, ne temizlik."""
     yarim = inprogress(p)
     if yarim:
         log(f"yazilmakta olan {len(yarim)} dosya atlanacak: {', '.join(yarim[:3])}"
             + (" ..." if len(yarim) > 3 else ""), pid)
-    # Kopyalama oncesi "kac dosya vardi" listelemesi yapilmaz: yuklenen sayisi rclone'un
-    # kendi ozetinden gelir, boylece her calismada bir tam uzak listeleme tasarruf edilir.
-    ok, uploaded = do_copy(p)
-    return ok, uploaded, yarim
+    hedefler = plan_hedefleri(p)
+    denemeler = []
+    for i, hedef in enumerate(hedefler):
+        if i:
+            log(f"yedek hedefe geciliyor ({i}/{len(hedefler) - 1}): {hedef}", pid)
+            set_progress(pid, {"phase": "yedek-hedef",
+                               "phase_label": f"Yedek hedefe geçildi: {hedef}",
+                               "hedef": hedef})
+        else:
+            set_progress(pid, {"hedef": hedef})
+        # Kopyalama oncesi "kac dosya vardi" listelemesi yapilmaz: yuklenen sayisi
+        # rclone'un kendi ozetinden gelir, bir tam uzak listeleme tasarruf edilir.
+        ok, uploaded = do_copy(plan_hedefle(p, hedef))
+        denemeler.append({"hedef": hedef, "ok": bool(ok), "yuklenen": uploaded})
+        if ok:
+            if i: log(f"yedek hedefe yazildi: {hedef} (birincil hedef basarisizdi)", pid)
+            return True, uploaded, yarim, hedef, denemeler
+        log(f"hedef basarisiz: {hedef}", pid)
+    if len(hedefler) > 1:
+        log(f"TUM hedefler basarisiz ({len(hedefler)} deneme) - hicbir yerde "
+            f"silme yapilmayacak", pid)
+    return False, 0, yarim, None, denemeler
 
 def _retention_calissin_mi(p, ok, listed, pid):
     """PROJENIN EN ONEMLI GUVENLIK KURALI.
@@ -2196,17 +2262,21 @@ def _asama_retention(p, pid, ok):
     return moved, purged, False
 
 def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
-                 konf=0, konf_n=0):
+                 konf=0, konf_n=0, aktif=None, denemeler=None):
     set_progress(pid, {"phase": "ozet", "phase_label": "Durum güncelleniyor"})
     snap = update_snapshot(p)
     dur = int(time.time() - started)
     status = "basarili" if ok else "HATA"
+    denemeler = denemeler or []
+    yedege_dustu = bool(aktif and denemeler and denemeler[0]["hedef"] != aktif)
     summary = (f"yuklenen:{uploaded} | copene:{moved} | kalici-silinen:{purged} | sure:{dur}s"
                + (f" | yapilandirma:{konf_n} dosya" if konf else "")
+               + (f" | YEDEK HEDEF: {aktif}" if yedege_dustu else "")
                + (" | RETENTION ATLANDI" if atlandi else ""))
     log("OZET: " + status + " | " + summary, pid)
     patch = {"last_run": now_str(), "status": status, "summary": summary,
              "last_trigger": trigger, "last_duration": dur,
+             "aktif_hedef": aktif, "hedef_denemeleri": denemeler,
              "history": _gecmise_ekle(pid, {"time": now_str(), "status": status,
                                             "summary": summary, "trigger": trigger})}
     patch.update(snap)
@@ -2214,7 +2284,8 @@ def _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi,
     maybe_report(p, status, summary, snap,
                  {"trigger": trigger, "dur": dur, "uploaded": uploaded, "moved": moved,
                   "purged": purged, "skipped": atlandi, "yarim": yarim,
-                  "konf": konf, "konf_n": konf_n})
+                  "konf": konf, "konf_n": konf_n,
+                  "aktif": aktif, "denemeler": denemeler, "yedege_dustu": yedege_dustu})
 
 def _asama_hata(p, pid, e):
     log(f"BEKLENMEDIK HATA: {e}", pid)
@@ -2247,13 +2318,16 @@ def do_run(pid, trigger="zamanlanmis"):
                            "phase_label": "Proxmox yedeği bekleniyor"})
         if not wait_for_vzdump(p):
             _asama_atlandi(p, pid, trigger); return
-        ok, uploaded, yarim = _asama_kopyala(p, pid)
+        ok, uploaded, yarim, aktif, denemeler = _asama_kopyala(p, pid)
+        # Bundan sonraki HER SEY yalnizca basarili hedefe uygulanir.
+        # aktif None ise hicbiri calismadi: silme yapan asamalar zaten atlanir.
+        ph = plan_hedefle(p, aktif) if aktif else p
         set_progress(pid, {"phase": "yapilandirma",
                            "phase_label": "Host yapılandırması yedekleniyor"})
-        konf, konf_n, _ = hostconf_yukle(p)
-        moved, purged, atlandi = _asama_retention(p, pid, ok)
-        _asama_bitir(p, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
-                     konf, konf_n)
+        konf, konf_n, _ = hostconf_yukle(ph) if ok else (0, 0, "")
+        moved, purged, atlandi = _asama_retention(ph, pid, ok)
+        _asama_bitir(ph, pid, trigger, started, ok, uploaded, moved, purged, atlandi, yarim,
+                     konf, konf_n, aktif, denemeler)
     except Exception as e:
         _asama_hata(p, pid, e)
     finally:
@@ -2293,6 +2367,79 @@ def do_tick():
     return ran
 
 # ---------- RCLONE HESAPLARI (birden fazla Google hesabi) ----------
+# ---------- SAGLAYICILAR ----------
+# rclone'un "authorize" ile web akisi destekledigi ve tek jetonla
+# yapilandirilabilen saglayicilar. Liste, hedef kurulumdaki rclone 1.60.1
+# uzerinde tek tek denenerek cikarildi (bkz. docs/OZELLIKLER.md).
+#
+# DURUST NOT: gercek bir hesapla ucdan uca yalnizca Google Drive dogrulandi.
+# Digerlerinin OAuth akisi calisiyor ama yukleme/saklama davranisi test
+# edilmedi; "denenmedi" olarak isaretli ve arayuzde de oyle gorunuyor.
+SAGLAYICILAR = {
+    "drive":    {"ad": "Google Drive", "simge": "🇬",
+                 "auth": ["--drive-scope", "drive.file"],
+                 "olustur": ["scope=drive.file"], "dogrulandi": True,
+                 "not": "Kapsam drive.file: yalnizca bu aracin olusturdugu "
+                        "dosyalari gorur, Drive'inin gerisine erisemez."},
+    "dropbox":  {"ad": "Dropbox", "simge": "📦", "auth": [], "olustur": [],
+                 "dogrulandi": False, "not": ""},
+    "onedrive": {"ad": "OneDrive", "simge": "☁", "auth": [], "olustur": [],
+                 "dogrulandi": False,
+                 "not": "Bazi kurumsal hesaplarda drive_id/drive_type de gerekir; "
+                        "gerekirse hesabi rclone config ile elle kur."},
+    "box":      {"ad": "Box", "simge": "🗄", "auth": [], "olustur": [],
+                 "dogrulandi": False, "not": ""},
+    "pcloud":   {"ad": "pCloud", "simge": "🌥", "auth": [], "olustur": [],
+                 "dogrulandi": False, "not": ""},
+    "yandex":   {"ad": "Yandex Disk", "simge": "🅨", "auth": [], "olustur": [],
+                 "dogrulandi": False, "not": ""},
+    "sharefile": {"ad": "Citrix ShareFile", "simge": "📁", "auth": [], "olustur": [],
+                  "dogrulandi": False, "not": ""},
+    "hidrive":  {"ad": "HiDrive", "simge": "💾", "auth": [], "olustur": [],
+                 "dogrulandi": False, "not": ""},
+}
+
+def saglayici(tur):
+    return SAGLAYICILAR.get(str(tur or "drive"), SAGLAYICILAR["drive"])
+
+_SAGLAYICI_ONBELLEK = {"zaman": 0.0, "adlar": None}
+
+def rclone_saglayici_adlari():
+    """rclone'un tanidigi backend adlari (kume) ya da cozulemezse None.
+
+    'rclone config providers' ~1 MB JSON uretir; her arayuz acilisinda
+    ayristirmak israf, bu yuzden onbellege alinir. Cikti bicimi surumler
+    arasinda degisebilir: cozemezsek None doneriz ve cagiran taraf HICBIR
+    saglayiciyi gizlemez. Tespit hatasi calisan bir saglayiciyi saklamamali -
+    once bu kural yanlisti ve Google Drive dahil hepsi 'tanimiyor' gorunuyordu."""
+    simdi = time.time()
+    if _SAGLAYICI_ONBELLEK["adlar"] is not None and simdi - _SAGLAYICI_ONBELLEK["zaman"] < 3600:
+        return _SAGLAYICI_ONBELLEK["adlar"]
+    adlar = None
+    try:
+        rc, out, _ = rclone(["config", "providers"], timeout=30)
+        if rc == 0 and out.strip():
+            veri = json.loads(out)
+            if isinstance(veri, list):
+                adlar = {str(x.get("Name", "")).lower() for x in veri if isinstance(x, dict)}
+                adlar.discard("")
+    except Exception as e:
+        yut("rclone_saglayici_adlari", e)
+    if not adlar: adlar = None
+    _SAGLAYICI_ONBELLEK.update(zaman=simdi, adlar=adlar)
+    return adlar
+
+def saglayici_listesi():
+    """Arayuz icin saglayici listesi. 'kurulu' yalnizca rclone'un backend
+    listesi GUVENILIR bicimde okunabildiginde False olabilir."""
+    adlar = rclone_saglayici_adlari()
+    liste = []
+    for tur, v in SAGLAYICILAR.items():
+        liste.append({"tur": tur, "ad": v["ad"], "simge": v["simge"],
+                      "dogrulandi": v["dogrulandi"], "not": v["not"],
+                      "kurulu": True if adlar is None else (tur in adlar)})
+    return liste
+
 AUTH_OUT = "/tmp/pve-gdrive-auth.out"
 _AUTH = {"proc": None, "url": None, "started": 0}
 
@@ -2391,10 +2538,13 @@ def artik_authorize_temizle():
     except Exception as e: yut("artik_authorize_temizle", e)
     return kapatilan
 
-def auth_start():
-    """rclone'un OAuth yardimcisini baslatir. Google, tarayiciyi 127.0.0.1:53682'ye
-    yonlendirdigi icin bu adres kullanicinin KENDI makinesinde acilabilir olmali;
-    bu yuzden SSH tuneli komutu da birlikte dondurulur."""
+def auth_start(tur="drive"):
+    """rclone'un OAuth yardimcisini baslatir. Saglayici tarayiciyi
+    127.0.0.1:53682'ye yonlendirdigi icin bu adres kullanicinin KENDI
+    makinesinde acilabilir olmali; bu yuzden SSH tuneli komutu da dondurulur."""
+    if tur not in SAGLAYICILAR:
+        return {"ok": False, "url": None, "tunnel": "",
+                "msg": f"desteklenmeyen saglayici: {tur}"}
     auth_stop()
     try: os.remove(AUTH_OUT)
     except Exception as e: yut("auth_start", e)
@@ -2407,9 +2557,11 @@ def auth_start():
                     "msg": f"{AUTH_PORT} portu dolu ve serbest birakilamadi. "
                            f"Sunucuda kontrol et: ss -tlnp | grep {AUTH_PORT}"}
         if n: log(f"yarida kalmis {n} rclone sureci kapatildi (OAuth portu serbest birakildi)")
+    sg = saglayici(tur)
     f = open(AUTH_OUT, "w")
+    _AUTH["tur"] = tur
     _AUTH["proc"] = subprocess.Popen(
-        ["rclone", "authorize", "drive", "--drive-scope", "drive.file", "--auth-no-open-browser"],
+        ["rclone", "authorize", tur] + list(sg["auth"]) + ["--auth-no-open-browser"],
         stdout=f, stderr=subprocess.STDOUT, start_new_session=True, env=rclone_ortam())
     _AUTH["started"] = time.time(); _AUTH["url"] = None
     hata = ""
@@ -2482,7 +2634,9 @@ def remote_var_mi(name):
     """Dosyaya gercekten yazildi mi? rclone'un cikis kodu yeterli kanit degil."""
     return any(r["name"] == name for r in rclone_remotes(force=True))
 
-def remote_create(name, token):
+def remote_create(name, token, tur="drive"):
+    if tur not in SAGLAYICILAR:
+        return {"ok": False, "msg": f"desteklenmeyen saglayici: {tur}"}
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(name or "")).strip()
     if not name: return {"ok": False, "msg": "gecersiz hesap adi"}
     if any(r["name"] == name for r in rclone_remotes()):
@@ -2493,8 +2647,9 @@ def remote_create(name, token):
         return {"ok": False, "msg": "jeton gecerli JSON degil"}
     yedek = rclone_conf_yedekle(f"ekle-{name}")
     # --non-interactive: rclone jetonu dogrulamak icin OAuth sunucusu acip asili kalmasin
-    rc, out, err = rclone(["config", "create", name, "drive", "scope=drive.file",
-                           f"token={token}", "--non-interactive"], timeout=60)
+    rc, out, err = rclone(["config", "create", name, tur]
+                          + list(saglayici(tur)["olustur"])
+                          + [f"token={token}", "--non-interactive"], timeout=60)
     if rc != 0: return {"ok": False, "msg": (err or out).strip()[:200]}
     # Cikis kodu 0 olmasi yazildigini KANITLAMAZ. Dosyadan geri okuyup dogrula:
     # aksi halde "eklendi" denir, hesap yoktur ve bu ancak yedek gununde anlasilir.
@@ -2508,7 +2663,7 @@ def remote_create(name, token):
     except Exception as e: yut("remote_create", e)
     q = remote_quota(name)
     _KOTA_ONBELLEK.pop(name, None)
-    log(f"rclone hesabi eklendi ve dogrulandi: {name}")
+    log(f"rclone hesabi eklendi ve dogrulandi: {name} ({saglayici(tur)['ad']})")
     return {"ok": True, "msg": f"'{name}' eklendi" + (
         f" ({human(q.get('used'))}/{human(q.get('total'))} kullanimda)" if q.get("ok") else
         " ama kota okunamadi: " + str(q.get("error", ""))[:80]), "name": name}
@@ -3343,6 +3498,8 @@ class H(BaseHTTPRequestHandler):
                 cevap["oneri"] = saklama_oneri(a, kota)
                 cevap["oneri_pay_pct"] = int(cfg().get("oneri_pay_pct") or 60)
             self._json(cevap)
+        elif p == "/api/saglayicilar":
+            self._json({"saglayicilar": saglayici_listesi()})
         elif p == "/api/ifaces":
             ifs = net_ifaces(); vars = default_iface()
             onerilen, nasil = wan_iface()
@@ -3376,12 +3533,17 @@ class H(BaseHTTPRequestHandler):
         elif path == "/api/plan/delete":
             self._json(delete_plan(pid))
         elif path == "/api/remote/auth/start":
-            self._json(auth_start())
+            self._json(auth_start(self._body().get("tur") or q.get("tur", ["drive"])[0]))
         elif path == "/api/remote/auth/finish":
             tok = auth_token()
             if not tok: self._json({"ok": False, "msg": "jeton henuz gelmedi"})
             else:
-                r = remote_create(self._body().get("name", ""), tok)
+                b2 = self._body()
+                # Tur, yetkilendirmeyi baslatan istekten tasinir: kullanici
+                # arada baska bir tur secse bile jeton hangi saglayiciya aitse
+                # hesap o turde olusur.
+                r = remote_create(b2.get("name", ""), tok,
+                                  _AUTH.get("tur") or b2.get("tur") or "drive")
                 if r.get("ok"):
                     auth_stop()
                     try: os.remove(AUTH_OUT)
@@ -3393,7 +3555,9 @@ class H(BaseHTTPRequestHandler):
             except Exception as e: yut("_post", e)
             self._json({"ok": True, "msg": "iptal edildi"})
         elif path == "/api/remote/add":
-            b = self._body(); self._json(remote_create(b.get("name", ""), b.get("token", "")))
+            b = self._body()
+            self._json(remote_create(b.get("name", ""), b.get("token", ""),
+                                     b.get("tur") or "drive"))
         elif path == "/api/remote/delete":
             self._json(remote_delete(q.get("name", [""])[0]))
         elif path == "/api/remote/test":
@@ -4070,6 +4234,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .oturum .kul:before{content:"👤 ";opacity:.7}
 
+/* Yedek hedef satirlari */
+.yh-satir{display:flex;gap:6px;align-items:center}
+.uyari-metin{color:#ffd479}
+
 </style></head><body>
 <div class="wrap">
 <header>
@@ -4150,7 +4318,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 </div>
 <div class="wstep" data-step="3" style="display:none">
   <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
-  <fieldset><legend>Hedef (Google hesabı)</legend>
+  <fieldset><legend>Hedef (bulut hesabı)</legend>
     <div class="f"><label class="tip" title="Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.">Hesap</label>
       <div><div class="inline"><select id="e-acct" style="flex:1"></select>
         <button class="sm primary" onclick="wHesapEkle()">＋ Yeni hesap</button>
@@ -4163,6 +4331,21 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
         <div class="errmsg" id="err-folder"></div>
         <div class="hint"><b>Her plan farklı klasöre yazmalı.</b> Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.</div>
         <div class="eg">Örnek: <code>proxmox-yedek</code> · <code>arsiv/2026</code> · <code>pve/usb1tb</code></div></div></div>
+  </fieldset>
+  <fieldset><legend>Yedek hedefler (opsiyonel)</legend>
+    <div class="eg" style="margin-bottom:8px">Birincil hedefe yazamazsa sırayla
+      bunlar denenir. İlk başarılı olan kullanılır.
+      <b>Eski yedekler yalnızca yazılan hedefte temizlenir</b> — yedeğe düştüğün gün
+      birincideki yedeklere dokunulmaz, hesap düzelince orada duruyor olurlar.</div>
+    <div id="e-yh-liste"></div>
+    <div class="inline" style="margin-top:8px">
+      <button class="sm" type="button" onclick="yhEkle()">＋ Yedek hedef ekle</button>
+      <span class="small" id="e-yh-ozet"></span>
+    </div>
+    <div class="eg" style="margin-top:8px">Farklı bir sağlayıcı da olabilir
+      (Dropbox, OneDrive, Box…). <b>Ayarlar → Hesaplar</b>'tan ekleyip burada seçersin.
+      Yedek hedef <b>farklı bir hesapta</b> olursa asıl korumayı sağlar; aynı hesabın
+      başka klasörü, hesap kilitlenirse işe yaramaz.</div>
   </fieldset>
 </div>
 <div class="wstep" data-step="4" style="display:none">
@@ -4513,7 +4696,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 </div></div>
 
 <div id="hesap-ekle-panel" style="display:none">
-  <fieldset><legend>Yeni Google hesabı yetkilendir</legend>
+  <fieldset><legend>Yeni bulut hesabı yetkilendir</legend>
+    <div class="f"><label class="tip" title="Hangi bulut sağlayıcısı. Hepsi tarayıcı ile yetkilendirilir.">Sağlayıcı</label>
+      <div><select id="a-tur" onchange="saglayiciDegisti()"></select>
+        <div class="eg" id="a-turhint"></div></div></div>
     <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
       <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
         <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
@@ -4522,7 +4708,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
     </div>
     <div id="a-m1">
-      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
+      <div class="hint">Sağlayıcı onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
         Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
       <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
         <div><input id="a-tunnel" readonly onclick="this.select()">
@@ -5063,6 +5249,23 @@ const EN = {
     "Kaydedilmemiş değişiklikler var. Yine de çıkılsın mı?": "You have unsaved changes. Sign out anyway?",
     "Çıkış": "Sign out",
     "Çık": "Sign out",
+    "Yedek hedef yok — sadece birincil kullanılır.": "No fallback targets — only the primary is used.",
+    "klasör": "folder",
+    "Yukarı taşı": "Move up",
+    "Bu hedefi kaldır": "Remove this target",
+    "⚠ ": "⚠ ",
+    " hedef birincil ile aynı hesapta — hesap kilitlenirse işe yaramaz": " target(s) are on the same account as the primary — useless if that account is locked",
+    " yedek hedef tanımlı": " fallback target(s) configured",
+    "Yedek hedefler": "Fallback targets",
+    "yok — sadece birincil hedef": "none — primary target only",
+    "Birincil çalışmazsa sırayla denenir: ": "Tried in order if the primary fails: ",
+    " yedek": " fallback",
+    "Son yazılan": "Last written to",
+    "  (denenmedi)": "  (untested)",
+    "Gerçek hesapla uçtan uca doğrulandı.": "Verified end to end with a real account.",
+    "OAuth akışı çalışıyor ama yükleme/saklama davranışı gerçek hesapla denenmedi. Önce küçük bir planla dene.": "The OAuth flow works, but upload/retention behaviour has not been tested with a real account. Try a small plan first.",
+    "Kapsam drive.file: yalnizca bu aracin olusturdugu dosyalari gorur, Drive'inin gerisine erisemez.": "Scope drive.file: it only sees files this tool created and cannot reach the rest of your Drive.",
+    "Bazi kurumsal hesaplarda drive_id/drive_type de gerekir; gerekirse hesabi rclone config ile elle kur.": "Some business accounts also need drive_id/drive_type; if so, configure the account manually with rclone config.",
 };
 /**
  * İki dilli arayüz. Türkçe kaynak dildir; İngilizce çalışma anında uygulanır.
@@ -5909,7 +6112,15 @@ function planCard(p) {
         + '<div class="row"><span>Kaynak</span><b>' + esc(p.src_dir)
         + (p.src_exists ? ' <span class="small">(' + p.src_dumps + " dosya)</span>" : ' <span class="pill err">yok</span>')
         + "</b></div>"
-        + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
+        + '<div class="row"><span>Hedef</span><b>' + esc(p.remote)
+        + ((p.yedek_hedefler || []).length
+            ? ' <span class="pill idle" title="' + esc(C("Birincil çalışmazsa sırayla denenir: "))
+                + esc((p.yedek_hedefler || []).join(", ")) + '">+'
+                + (p.yedek_hedefler || []).length + C(" yedek") + "</span>" : "")
+        + "</b></div>"
+        + (s.aktif_hedef && s.aktif_hedef !== p.remote
+            ? '<div class="row"><span>' + C("Son yazılan") + '</span><b class="uyari-metin">'
+                + esc(s.aktif_hedef) + "</b></div>" : "")
         + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
         + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
         + '<div class="row"><span>Saklama</span><b>' + p.keep_days + C(" gün · min ") + p.keep_count
@@ -6293,6 +6504,10 @@ function wOzet() {
     h += wSatir("Kaynak", val("e-src"));
     h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
     h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
+    const yh = yhTopla();
+    h += wSatir(C("Yedek hedefler"), yh.length
+        ? yh.map((x, i) => (i + 1) + ". " + esc(x)).join("<br>")
+        : C("yok — sadece birincil hedef"));
     h += wSatir(C("Host yapılandırması"), chk("e-hc")
         ? C("yedekleniyor · son ") + val("e-hck") + C(" arşiv saklanır")
             + (chk("e-hcj") ? C(" · JSON görüntü dahil") : "")
@@ -6325,6 +6540,96 @@ function wOzet() {
     setHtml("w-ozet", h);
 }
 /** Hesap ekleme paneli tek bir DOM parcasidir; sihirbaz ile modal arasinda tasinir. */
+/* ---------- yedek hedefler ---------- */
+// Basarisizlikta sirayla denenecek hedefler. Satirlar dinamik: hesap secimi +
+// klasor. Kaydederken "hesap:klasor" dizisine cevrilir.
+let YH = [];
+function yhCiz() {
+    const kutu = document.getElementById("e-yh-liste");
+    if (!kutu)
+        return;
+    if (!YH.length) {
+        kutu.innerHTML = '<div class="small">' + C("Yedek hedef yok — sadece birincil kullanılır.")
+            + "</div>";
+    }
+    else {
+        kutu.innerHTML = YH.map((h, i) => '<div class="inline yh-satir" style="margin-bottom:6px">'
+            + '<span class="small" style="width:18px;text-align:right">' + (i + 1) + ".</span>"
+            + '<select class="yh-hesap" data-i="' + i + '" style="flex:0 0 40%"></select>'
+            + '<input class="yh-klasor" data-i="' + i + '" style="flex:1" placeholder="'
+            + esc(C("klasör")) + '" value="' + esc(h.klasor) + '">'
+            + '<button class="sm" type="button" data-yukari="' + i + '" title="'
+            + esc(C("Yukarı taşı")) + '"' + (i ? "" : " disabled") + ">↑</button>"
+            + '<button class="sm warn" type="button" data-sil="' + i + '" title="'
+            + esc(C("Bu hedefi kaldır")) + '">✕</button></div>').join("");
+        // Hesap listeleri birincil hedefle ayni kaynaktan doldurulur
+        const secenekler = REM.map((r) => '<option value="' + esc(r.name) + '">'
+            + esc(r.name) + "</option>").join("");
+        Array.prototype.slice.call(kutu.querySelectorAll(".yh-hesap"))
+            .forEach((sel) => {
+            const i = Number(sel.getAttribute("data-i"));
+            sel.innerHTML = secenekler;
+            sel.value = YH[i].hesap || (REM[0] && REM[0].name) || "";
+            sel.onchange = () => { YH[i].hesap = sel.value; yhOzet(); markDirty(); };
+        });
+        Array.prototype.slice.call(kutu.querySelectorAll(".yh-klasor"))
+            .forEach((g) => {
+            const i = Number(g.getAttribute("data-i"));
+            g.oninput = () => { YH[i].klasor = g.value; yhOzet(); markDirty(); };
+        });
+        Array.prototype.slice.call(kutu.querySelectorAll("[data-sil]"))
+            .forEach((b) => {
+            b.onclick = () => {
+                YH.splice(Number(b.getAttribute("data-sil")), 1);
+                yhCiz();
+                markDirty();
+            };
+        });
+        Array.prototype.slice.call(kutu.querySelectorAll("[data-yukari]"))
+            .forEach((b) => {
+            b.onclick = () => {
+                const i = Number(b.getAttribute("data-yukari"));
+                if (i < 1)
+                    return;
+                const t = YH[i - 1];
+                YH[i - 1] = YH[i];
+                YH[i] = t;
+                yhCiz();
+                markDirty();
+            };
+        });
+    }
+    yhOzet();
+}
+/** Ayni hesabin baska klasoru gercek koruma saglamaz; bunu soyle. */
+function yhOzet() {
+    const e = document.getElementById("e-yh-ozet");
+    if (!e)
+        return;
+    const ana = val("e-acct");
+    const ayni = YH.filter((h) => h.hesap === ana).length;
+    e.textContent = !YH.length ? ""
+        : ayni ? C("⚠ ") + ayni + C(" hedef birincil ile aynı hesapta — hesap kilitlenirse işe yaramaz")
+            : YH.length + C(" yedek hedef tanımlı");
+    e.className = "small" + (ayni ? " uyari-metin" : "");
+}
+function yhEkle() {
+    YH.push({ hesap: val("e-acct") || (REM[0] && REM[0].name) || "", klasor: "" });
+    yhCiz();
+    markDirty();
+}
+function yhTopla() {
+    return YH.map((h) => (h.hesap || "").trim() + ":" + (h.klasor || "").trim())
+        .filter((x) => x.length > 1 && !x.startsWith(":") && !x.endsWith(":"));
+}
+function yhDoldur(liste) {
+    YH = (liste || []).map((x) => {
+        const i = String(x).indexOf(":");
+        return i < 0 ? { hesap: String(x), klasor: "" }
+            : { hesap: String(x).slice(0, i), klasor: String(x).slice(i + 1) };
+    });
+    yhCiz();
+}
 function hesapPaneliTasi(hedefId, gorunur) {
     const panel = el("hesap-ekle-panel");
     const yuva = document.getElementById(hedefId);
@@ -6459,7 +6764,7 @@ function openEditor(pid) {
     setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
         + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
     setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
-    void loadRemotes(rp[0]);
+    void loadRemotes(rp[0]).then(() => yhDoldur(v.yedek_hedefler || []));
     loadSmtpSelect(v.smtp_profile);
     void loadStorages();
     ramHint();
@@ -6468,6 +6773,7 @@ function openEditor(pid) {
     Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
         .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
     fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
+    fld("e-acct").onchange = () => { yhOzet(); markDirty(); };
     fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
     fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
     fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
@@ -6514,6 +6820,7 @@ async function savePlan() {
         .map((c) => Number(c.value));
     const body = {
         ...alanlariTopla(), // tum ortak alanlar (bkz. alanlar.ts)
+        yedek_hedefler: yhTopla(),
         id: EDIT,
         remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
         weekdays: wd,
@@ -6670,10 +6977,41 @@ async function loadRemotes(selName) {
         setVal("e-acct", selName);
     setTxt("e-accthint", REM.length ? REM.length + C(" hesap tanımlı") : C("Henüz hesap yok — 'Yönet' ile ekle."));
 }
+let SAG = [];
+async function saglayicilariYukle() {
+    try {
+        const j = await api("/api/saglayicilar");
+        SAG = (j.saglayicilar || []).filter((x) => x.kurulu);
+    }
+    catch {
+        SAG = [];
+    }
+    setHtml("a-tur", SAG.map((x) => '<option value="' + esc(x.tur) + '">'
+        + esc(x.simge + " " + x.ad) + (x.dogrulandi ? "" : C("  (denenmedi)"))
+        + "</option>").join(""));
+    saglayiciDegisti();
+}
+function saglayiciDegisti() {
+    const x = SAG.filter((y) => y.tur === val("a-tur"))[0];
+    const e = document.getElementById("a-turhint");
+    if (!e)
+        return;
+    if (!x) {
+        e.textContent = "";
+        return;
+    }
+    // Neyin gercekten denendigini sakla: "calisiyor gibi duruyor" demek yaniltir.
+    e.innerHTML = (x.not ? esc(C(x.not)) + " " : "")
+        + (x.dogrulandi
+            ? '<b style="color:#7ee2a8">' + esc(C("Gerçek hesapla uçtan uca doğrulandı.")) + "</b>"
+            : '<b style="color:#ffd479">' + esc(C("OAuth akışı çalışıyor ama yükleme/saklama "
+                + "davranışı gerçek hesapla denenmedi. Önce küçük bir planla dene.")) + "</b>");
+}
 function openAccounts() {
     openM("m-acct");
     hesapPaneliTasi("hesap-ekle-yuvasi", true);
     acctTab(1);
+    void saglayicilariYukle();
     void renderAccounts();
     void api("/api/remote/auth/status").then((j) => {
         if (j.waiting && j.url) {
@@ -6734,7 +7072,8 @@ async function acctPaste() {
     }
     good("a-token");
     const j = await api("/api/remote/add", { method: "POST",
-        body: JSON.stringify({ name: val("a-name"), token: val("a-token") }) });
+        body: JSON.stringify({ name: val("a-name"), token: val("a-token"),
+            tur: val("a-tur") || "drive" }) });
     flash(j.msg || "", j.ok);
     if (j.ok) {
         setVal("a-token", "");
@@ -6754,7 +7093,8 @@ async function authStart() {
         return;
     }
     good("a-name");
-    const j = await api("/api/remote/auth/start", { method: "POST" });
+    const j = await api("/api/remote/auth/start", { method: "POST",
+        body: JSON.stringify({ tur: val("a-tur") || "drive" }) });
     setVal("a-tunnel", j.tunnel || "");
     if (!j.ok) {
         flash(j.msg || C("başlatılamadı"), false);

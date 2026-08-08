@@ -34,6 +34,8 @@ interface PlanState {
   totals?: Totals;
   trash_totals?: Totals;
   updated?: string | null;
+  aktif_hedef?: string | null;
+  hedef_denemeleri?: { hedef: string; ok: boolean; yuklenen: number }[];
 }
 
 interface Plan {
@@ -42,6 +44,7 @@ interface Plan {
   enabled: boolean;
   src_dir: string;
   remote: string;
+  yedek_hedefler?: string[];
   keep_days: number;
   keep_count: number;
   drive_trash_days: number;

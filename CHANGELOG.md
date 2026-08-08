@@ -2,6 +2,47 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.4.0 — 2026-08-08
+
+### Yedek hedefler: plan başına N hesap
+
+Bir plan artık birden fazla hedefe sahip olabilir. Birincil hedefe yazamazsa
+sırayla yedekler denenir, ilk başarılı olan kullanılır. Farklı sağlayıcı da
+olabilir.
+
+**En kritik davranış** — projenin en önemli güvenlik kuralının uzantısı:
+
+> Retention **yalnızca yüklemenin gerçekten başarılı olduğu hedefte** çalışır.
+
+Yedek hedefe düştüğün gün birincideki eski yedeklere dokunulmaz; hesap
+düzeldiğinde orada duruyor olurlar. Bütün hedefler başarısız olursa hiçbir yerde
+silme yapılmaz. Bu, adı büyük harfle yazılmış bir testle korunuyor
+(`YEDEGE DUSUNCE BIRINCIDEKI YEDEKLER SILINMEZ`).
+
+Arayüz, yedek hedefin birincil ile **aynı hesapta** olması durumunda uyarır —
+o hesap kilitlenirse yedek de işe yaramaz. Yedeğe düşüldüğünde mail `HEDEFLER`
+bölümü ve uyarı içerir; plan kartında "Son yazılan" satırı çıkar.
+
+### Başka sağlayıcılar
+
+Hesap ekleme artık sağlayıcı seçtiriyor: Google Drive, Dropbox, OneDrive, Box,
+pCloud, Yandex Disk, Citrix ShareFile, HiDrive. Liste, hedef kurulumdaki
+rclone 1.60.1 üzerinde `rclone authorize` ile tek tek denenerek çıkarıldı.
+
+**Yalnızca Google Drive gerçek bir hesapla uçtan uca doğrulandı.** Diğerlerinin
+OAuth akışı çalışıyor ama yükleme/saklama davranışı ölçülmedi; arayüzde
+**(denenmedi)** olarak işaretli ve seçince uyarı çıkıyor.
+
+Sağlayıcı tespiti sırasında bir hata bulundu ve düzeltildi: `rclone config
+providers` çıktısı JSON'dur, satır deseni değil. İlk yazımda desen tutmuyordu ve
+kural **kapalı tarafa** düşüyordu — Google Drive dahil hepsi "rclone tanımıyor"
+görünüyor, hesap ekleme listesi tamamen boşalıyordu. Artık çıktı JSON olarak
+ayrıştırılıyor, sonuç bir saat önbellekleniyor (~1 MB çıktı) ve çözülemezse
+**hiçbir sağlayıcı gizlenmiyor**: tespit hatası çalışan bir sağlayıcıyı
+saklamamalı.
+
+Test: 70 → 76. Yeni `hedefler` grubu.
+
 ## 1.3.3 — 2026-08-08
 
 ### Plan formu artık boşuna "değişti" demiyor

@@ -396,7 +396,15 @@ function planCard(p: Plan): string {
     + '<div class="row"><span>Kaynak</span><b>' + esc(p.src_dir)
     + (p.src_exists ? ' <span class="small">(' + p.src_dumps + " dosya)</span>" : ' <span class="pill err">yok</span>')
     + "</b></div>"
-    + '<div class="row"><span>Hedef</span><b>' + esc(p.remote) + "</b></div>"
+    + '<div class="row"><span>Hedef</span><b>' + esc(p.remote)
+    + ((p.yedek_hedefler || []).length
+        ? ' <span class="pill idle" title="' + esc(C("Birincil çalışmazsa sırayla denenir: "))
+          + esc((p.yedek_hedefler || []).join(", ")) + '">+'
+          + (p.yedek_hedefler || []).length + C(" yedek") + "</span>" : "")
+    + "</b></div>"
+    + (s.aktif_hedef && s.aktif_hedef !== p.remote
+        ? '<div class="row"><span>' + C("Son yazılan") + '</span><b class="uyari-metin">'
+          + esc(s.aktif_hedef) + "</b></div>" : "")
     + '<div class="row"><span>Program</span><b>' + progOf(p) + "</b></div>"
     + '<div class="row"><span>Sonraki</span><b>' + esc(p.next_run || "-") + "</b></div>"
     + '<div class="row"><span>Saklama</span><b>' + p.keep_days + C(" gün · min ") + p.keep_count
@@ -745,6 +753,10 @@ function wOzet(): void {
   h += wSatir("Kaynak", val("e-src"));
   h += wSatir("Hedef", (val("e-acct") || "?") + ":" + val("e-folder"));
   h += wSatir("Saklama", val("e-kd") + C(" gün · VM/CT başına en az ") + val("e-kc") + C(" set"));
+  const yh = yhTopla();
+  h += wSatir(C("Yedek hedefler"), yh.length
+    ? yh.map((x, i) => (i + 1) + ". " + esc(x)).join("<br>")
+    : C("yok — sadece birincil hedef"));
   h += wSatir(C("Host yapılandırması"), chk("e-hc")
     ? C("yedekleniyor · son ") + val("e-hck") + C(" arşiv saklanır")
       + (chk("e-hcj") ? C(" · JSON görüntü dahil") : "")
@@ -775,6 +787,92 @@ function wOzet(): void {
 }
 
 /** Hesap ekleme paneli tek bir DOM parcasidir; sihirbaz ile modal arasinda tasinir. */
+/* ---------- yedek hedefler ---------- */
+// Basarisizlikta sirayla denenecek hedefler. Satirlar dinamik: hesap secimi +
+// klasor. Kaydederken "hesap:klasor" dizisine cevrilir.
+let YH: { hesap: string; klasor: string }[] = [];
+
+function yhCiz(): void {
+  const kutu = document.getElementById("e-yh-liste");
+  if (!kutu) return;
+  if (!YH.length) {
+    kutu.innerHTML = '<div class="small">' + C("Yedek hedef yok — sadece birincil kullanılır.")
+      + "</div>";
+  } else {
+    kutu.innerHTML = YH.map((h, i) =>
+      '<div class="inline yh-satir" style="margin-bottom:6px">'
+      + '<span class="small" style="width:18px;text-align:right">' + (i + 1) + ".</span>"
+      + '<select class="yh-hesap" data-i="' + i + '" style="flex:0 0 40%"></select>'
+      + '<input class="yh-klasor" data-i="' + i + '" style="flex:1" placeholder="'
+      + esc(C("klasör")) + '" value="' + esc(h.klasor) + '">'
+      + '<button class="sm" type="button" data-yukari="' + i + '" title="'
+      + esc(C("Yukarı taşı")) + '"' + (i ? "" : " disabled") + ">↑</button>"
+      + '<button class="sm warn" type="button" data-sil="' + i + '" title="'
+      + esc(C("Bu hedefi kaldır")) + '">✕</button></div>').join("");
+    // Hesap listeleri birincil hedefle ayni kaynaktan doldurulur
+    const secenekler = REM.map((r) => '<option value="' + esc(r.name) + '">'
+      + esc(r.name) + "</option>").join("");
+    Array.prototype.slice.call(kutu.querySelectorAll(".yh-hesap"))
+      .forEach((sel: HTMLSelectElement) => {
+        const i = Number(sel.getAttribute("data-i"));
+        sel.innerHTML = secenekler;
+        sel.value = YH[i].hesap || (REM[0] && REM[0].name) || "";
+        sel.onchange = () => { YH[i].hesap = sel.value; yhOzet(); markDirty(); };
+      });
+    Array.prototype.slice.call(kutu.querySelectorAll(".yh-klasor"))
+      .forEach((g: HTMLInputElement) => {
+        const i = Number(g.getAttribute("data-i"));
+        g.oninput = () => { YH[i].klasor = g.value; yhOzet(); markDirty(); };
+      });
+    Array.prototype.slice.call(kutu.querySelectorAll("[data-sil]"))
+      .forEach((b: HTMLElement) => {
+        b.onclick = () => { YH.splice(Number(b.getAttribute("data-sil")), 1);
+                            yhCiz(); markDirty(); };
+      });
+    Array.prototype.slice.call(kutu.querySelectorAll("[data-yukari]"))
+      .forEach((b: HTMLElement) => {
+        b.onclick = () => {
+          const i = Number(b.getAttribute("data-yukari"));
+          if (i < 1) return;
+          const t = YH[i - 1]; YH[i - 1] = YH[i]; YH[i] = t;
+          yhCiz(); markDirty();
+        };
+      });
+  }
+  yhOzet();
+}
+
+/** Ayni hesabin baska klasoru gercek koruma saglamaz; bunu soyle. */
+function yhOzet(): void {
+  const e = document.getElementById("e-yh-ozet");
+  if (!e) return;
+  const ana = val("e-acct");
+  const ayni = YH.filter((h) => h.hesap === ana).length;
+  e.textContent = !YH.length ? ""
+    : ayni ? C("⚠ ") + ayni + C(" hedef birincil ile aynı hesapta — hesap kilitlenirse işe yaramaz")
+           : YH.length + C(" yedek hedef tanımlı");
+  e.className = "small" + (ayni ? " uyari-metin" : "");
+}
+
+function yhEkle(): void {
+  YH.push({ hesap: val("e-acct") || (REM[0] && REM[0].name) || "", klasor: "" });
+  yhCiz(); markDirty();
+}
+
+function yhTopla(): string[] {
+  return YH.map((h) => (h.hesap || "").trim() + ":" + (h.klasor || "").trim())
+    .filter((x) => x.length > 1 && !x.startsWith(":") && !x.endsWith(":"));
+}
+
+function yhDoldur(liste: string[]): void {
+  YH = (liste || []).map((x) => {
+    const i = String(x).indexOf(":");
+    return i < 0 ? { hesap: String(x), klasor: "" }
+                 : { hesap: String(x).slice(0, i), klasor: String(x).slice(i + 1) };
+  });
+  yhCiz();
+}
+
 function hesapPaneliTasi(hedefId: string, gorunur: boolean): void {
   const panel = el("hesap-ekle-panel");
   const yuva = document.getElementById(hedefId);
@@ -904,11 +1002,13 @@ function openEditor(pid: string | null): void {
   setHtml("e-wd", WD.map((n, i) => '<label><input type="checkbox" value="' + (i + 1) + '"'
     + ((v.weekdays || []).indexOf(i + 1) >= 0 ? " checked" : "") + ">" + n + "</label>").join(""));
   setTxt("e-srchint", p ? (p.src_exists ? p.src_dumps + " dosya bulundu" : C("⚠ klasör bulunamadı")) : "");
-  void loadRemotes(rp[0]); loadSmtpSelect(v.smtp_profile); void loadStorages();
+  void loadRemotes(rp[0]).then(() => yhDoldur((v.yedek_hedefler as string[]) || []));
+  loadSmtpSelect(v.smtp_profile); void loadStorages();
   ramHint(); saklamaIpucu(); bwLinkKipi();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
     .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
   fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
+  fld("e-acct").onchange = () => { yhOzet(); markDirty(); };
   fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
   fld("e-kc").oninput = () => { saklamaIpucu(); markDirty(); };
   fld("e-td").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
@@ -946,6 +1046,7 @@ async function savePlan(): Promise<void> {
     .map((c: HTMLInputElement) => Number(c.value));
   const body: Record<string, unknown> = {
     ...alanlariTopla(),                       // tum ortak alanlar (bkz. alanlar.ts)
+    yedek_hedefler: yhTopla(),
     id: EDIT,
     remote: val("e-acct") + ":" + val("e-folder").trim().replace(/^\/+/, ""),
     weekdays: wd,
@@ -1088,8 +1189,39 @@ async function loadRemotes(selName?: string): Promise<void> {
   if (selName) setVal("e-acct", selName);
   setTxt("e-accthint", REM.length ? REM.length + C(" hesap tanımlı") : C("Henüz hesap yok — 'Yönet' ile ekle."));
 }
+/* ---------- saglayicilar ---------- */
+interface Saglayici {
+  tur: string; ad: string; simge: string; dogrulandi: boolean; not: string; kurulu: boolean;
+}
+let SAG: Saglayici[] = [];
+
+async function saglayicilariYukle(): Promise<void> {
+  try {
+    const j = await api<{ saglayicilar: Saglayici[] }>("/api/saglayicilar");
+    SAG = (j.saglayicilar || []).filter((x) => x.kurulu);
+  } catch { SAG = []; }
+  setHtml("a-tur", SAG.map((x) => '<option value="' + esc(x.tur) + '">'
+    + esc(x.simge + " " + x.ad) + (x.dogrulandi ? "" : C("  (denenmedi)"))
+    + "</option>").join(""));
+  saglayiciDegisti();
+}
+
+function saglayiciDegisti(): void {
+  const x = SAG.filter((y) => y.tur === val("a-tur"))[0];
+  const e = document.getElementById("a-turhint");
+  if (!e) return;
+  if (!x) { e.textContent = ""; return; }
+  // Neyin gercekten denendigini sakla: "calisiyor gibi duruyor" demek yaniltir.
+  e.innerHTML = (x.not ? esc(C(x.not)) + " " : "")
+    + (x.dogrulandi
+        ? '<b style="color:#7ee2a8">' + esc(C("Gerçek hesapla uçtan uca doğrulandı.")) + "</b>"
+        : '<b style="color:#ffd479">' + esc(C("OAuth akışı çalışıyor ama yükleme/saklama "
+            + "davranışı gerçek hesapla denenmedi. Önce küçük bir planla dene.")) + "</b>");
+}
+
 function openAccounts(): void {
-  openM("m-acct"); hesapPaneliTasi("hesap-ekle-yuvasi", true); acctTab(1); void renderAccounts();
+  openM("m-acct"); hesapPaneliTasi("hesap-ekle-yuvasi", true); acctTab(1);
+  void saglayicilariYukle(); void renderAccounts();
   void api<AuthStatus>("/api/remote/auth/status").then((j) => {
     if (j.waiting && j.url) { el("a-authbox").style.display = ""; setTxt("a-url", j.url); pollAuth(); }
   });
@@ -1133,7 +1265,8 @@ async function acctPaste(): Promise<void> {
   try { JSON.parse(val("a-token")); } catch { bad("a-token", C("geçerli JSON değil")); return; }
   good("a-token");
   const j = await api("/api/remote/add", { method: "POST",
-    body: JSON.stringify({ name: val("a-name"), token: val("a-token") }) });
+    body: JSON.stringify({ name: val("a-name"), token: val("a-token"),
+                           tur: val("a-tur") || "drive" }) });
   flash(j.msg || "", j.ok);
   if (j.ok) {
     setVal("a-token", ""); setVal("a-name", "");
@@ -1144,7 +1277,8 @@ async function acctPaste(): Promise<void> {
 async function authStart(): Promise<void> {
   if (!RX.acct.test(val("a-name").trim())) { bad("a-name", C("önce geçerli bir hesap adı yaz")); return; }
   good("a-name");
-  const j = await api<AuthStart>("/api/remote/auth/start", { method: "POST" });
+  const j = await api<AuthStart>("/api/remote/auth/start", { method: "POST",
+    body: JSON.stringify({ tur: val("a-tur") || "drive" }) });
   setVal("a-tunnel", j.tunnel || "");
   if (!j.ok) { flash(j.msg || C("başlatılamadı"), false); return; }
   el("a-authbox").style.display = "";

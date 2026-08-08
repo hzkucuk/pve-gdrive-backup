@@ -332,3 +332,54 @@ göstermez — 4×1 Gbit bond'un arkasında 60 Mbit'lik bir ISS hattı olabilir.
 Hatırlanan oturumlar `0600` izinli bir dosyada saklanır ve servis yeniden
 başladığında geri yüklenir. `session_ip_bind` yalnızca hatırlanan oturumlara
 uygulanır; normal oturum her zaman birebir adrese bağlıdır.
+
+## Yedek hedefler (çoklu hesap)
+
+Bir plan birden fazla hedefe sahip olabilir. Birincil hedefe yazamazsa sırayla
+yedekler denenir; ilk başarılı olan kullanılır.
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `remote` | — | Birincil hedef, `hesap:klasör` |
+| `yedek_hedefler` | `[]` | Sırayla denenecek yedekler. Birincilin tekrarı ve boş/geçersiz girdiler atılır |
+
+**Silme davranışı — projenin en önemli güvenlik kuralının uzantısı:**
+
+> Retention **yalnızca yüklemenin gerçekten başarılı olduğu hedefte** çalışır.
+
+Yedek hedefe düştüğün gün birincideki eski yedeklere **dokunulmaz**. Hesap
+düzeldiğinde orada duruyor olurlar. Bütün hedefler başarısız olursa hiçbir yerde
+silme yapılmaz ve çalışma `HATA` ile biter.
+
+Yedek hedef **farklı bir hesapta** olmalı; aynı hesabın başka klasörü hesap
+kilitlendiğinde işe yaramaz. Arayüz bunu fark edip uyarır.
+
+Yedek hedefe düşüldüğünde çalışma maili `HEDEFLER` bölümü ve bir uyarı içerir;
+plan kartında "Son yazılan" satırı görünür.
+
+## Sağlayıcılar
+
+Hesaplar tarayıcı ile (OAuth) yetkilendirilir. Liste, hedef kurulumdaki
+rclone 1.60.1 üzerinde tek tek denenerek çıkarıldı:
+
+| Sağlayıcı | `rclone authorize` | Gerçek hesapla test |
+|---|---|---|
+| Google Drive | ✔ | **✔ uçtan uca doğrulandı** |
+| Dropbox | ✔ | denenmedi |
+| OneDrive | ✔ | denenmedi — bazı kurumsal hesaplar `drive_id`/`drive_type` ister |
+| Box | ✔ | denenmedi |
+| pCloud | ✔ | denenmedi |
+| Yandex Disk | ✔ | denenmedi |
+| Citrix ShareFile | ✔ | denenmedi |
+| HiDrive | ✔ | denenmedi |
+
+Denenmemiş sağlayıcılar arayüzde **(denenmedi)** olarak işaretlidir ve seçince
+uyarı çıkar: OAuth akışı çalışıyor ama yükleme/saklama davranışı gerçek bir
+hesapla ölçülmedi. Önce küçük bir planla dene.
+
+`mega` ve `koofr` OAuth kullanmaz (kullanıcı adı/parola), `jottacloud` ve `zoho`
+farklı bir akış ister — listede yoktur.
+
+rclone'un tanımadığı bir sağlayıcı listede pasif görünür. Bu tespit
+**açık tarafa** düşer: `rclone config providers` çıktısı okunamazsa hiçbir
+sağlayıcı gizlenmez, çünkü bir tespit hatası çalışan sağlayıcıyı saklamamalı.

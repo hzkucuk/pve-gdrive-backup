@@ -112,6 +112,16 @@ class Ortam:
                                         "mtime": int(time.time()), "trashed": False}
         with open(self.db, "w") as f: json.dump(d, f)
 
+    def drive_hedef(self, remote, copte=False):
+        """Belirli bir hedefteki dosyalar. drive() remote onekini atiyor;
+        coklu hedef testinde iki hedefteki ayni adli dosyalar karisiyordu ve
+        'birincilde silinme oldu mu' kontrolu bosa calisiyordu."""
+        try:
+            with open(self.db) as f: d = json.load(f)
+        except Exception: return []
+        return sorted(k[len(remote) + 1:] for k, v in d.get("files", {}).items()
+                      if k.startswith(remote + "/") and bool(v.get("trashed")) == copte)
+
     def drive(self, copte=False):
         try:
             with open(self.db) as f: d = json.load(f)
@@ -1019,6 +1029,154 @@ def t_hostconf_kapali():
         G = o.modul()
         y, n, hata = G.hostconf_yukle(G.get_plan("p1"))
         dogru((y, n, hata) == (0, 0, ""), f"kapaliyken sessiz kalmali: {(y, n, hata)}")
+    finally: o.temizle()
+
+@test("birincil hedef coktugunde yedege gecilir", "hedefler")
+def t_yedek_hedef():
+    o = Ortam()
+    try:
+        for g in range(3): o.vzdump_seti("qemu-100", g)
+        o.plan(remote="gdrive:birincil", yedek_hedefler=["gdrive:yedek1", "gdrive:yedek2"])
+        G = o.modul()
+        gercek = G.do_copy
+        cagrilar = []
+        def sahte_copy(pl):
+            cagrilar.append(pl["remote"])
+            if pl["remote"] == "gdrive:birincil": return False, 0     # birincil coktu
+            return gercek(pl)
+        G.do_copy = sahte_copy
+        ok, yuklenen, yarim, aktif, denemeler = G._asama_kopyala(G.get_plan("p1"), "p1")
+        dogru(ok, "yedek hedef basarili olmaliydi")
+        esit(aktif, "gdrive:yedek1", "ilk calisan yedek secilmeli")
+        esit(cagrilar, ["gdrive:birincil", "gdrive:yedek1"],
+             f"sirayla denenmeli ve ilk basarida durmali: {cagrilar}")
+        esit([d["ok"] for d in denemeler], [False, True], "denemeler kaydedilmeli")
+    finally: o.temizle()
+
+@test("YEDEGE DUSUNCE BIRINCIDEKI YEDEKLER SILINMEZ", "hedefler")
+def t_yedek_hedef_silme_guvenligi():
+    """Projenin en onemli guvenlik kuralinin coklu hedef uzantisi.
+    Yedek hesaba dustugumuz gun birincideki eski yedekler silinirse,
+    birincil hesap duzeldiginde orada hicbir sey kalmamis olur."""
+    o = Ortam()
+    try:
+        for g in range(0, 6): o.vzdump_seti("qemu-100", g)
+        o.plan(remote="gdrive:birincil", yedek_hedefler=["gdrive:yedek1"],
+               keep_days=1, keep_count=1)
+        G = o.modul()
+        # Once birincile gercek yedekler koy (saglikli gun)
+        G.do_copy(G.plan_hedefle(G.get_plan("p1"), "gdrive:birincil"))
+        birincil_once = o.drive_hedef("gdrive:birincil")
+        dogru(len(birincil_once) >= 6, f"birincile yazilmali: {len(birincil_once)}")
+
+        # Simdi birincil coksun, yedege dusulsun
+        gercek = G.do_copy
+        G.do_copy = lambda pl: (False, 0) if pl["remote"] == "gdrive:birincil" else gercek(pl)
+        G.do_run("p1", "test")
+
+        st = G.pstate(G.read_state(), "p1")
+        esit(st["aktif_hedef"], "gdrive:yedek1", "yedege dusmeli")
+        esit(st["status"], "basarili", "calisma basarili sayilmali")
+
+        # ASIL KONTROL: birincile hic dokunulmamis olmali
+        esit(o.drive_hedef("gdrive:birincil"), birincil_once,
+             "birincildeki dosyalar AYNEN durmali - veri kaybi olmamali")
+        esit(o.drive_hedef("gdrive:birincil", copte=True), [],
+             "birincilden hicbir sey cope gitmemeli")
+
+        # Buna karsilik yazilan hedefte retention CALISMIS olmali (is yapiliyor)
+        dogru(o.drive_hedef("gdrive:yedek1"), "yedege yazilmis olmali")
+        dogru(o.drive_hedef("gdrive:yedek1", copte=True),
+              "yazilan hedefte saklama kurali uygulanmis olmali")
+    finally: o.temizle()
+
+@test("tum hedefler coktugunde hicbir silme yapilmaz", "hedefler")
+def t_tum_hedefler_cokerse():
+    o = Ortam()
+    try:
+        for g in range(0, 6): o.vzdump_seti("qemu-100", g)
+        o.plan(remote="gdrive:birincil", yedek_hedefler=["gdrive:yedek1"],
+               keep_days=1, keep_count=1)
+        G = o.modul()
+        G.do_copy(G.plan_hedefle(G.get_plan("p1"), "gdrive:birincil"))
+        once = o.drive_hedef("gdrive:birincil")
+        G.do_copy = lambda pl: (False, 0)          # hepsi coktu
+        G.do_run("p1", "test")
+        st = G.pstate(G.read_state(), "p1")
+        esit(st["status"], "HATA", "hepsi cokunce HATA olmali")
+        dogru(st["aktif_hedef"] is None, "aktif hedef olmamali")
+        dogru("RETENTION ATLANDI" in st["summary"], f"retention atlanmali: {st['summary']}")
+        esit(o.drive_hedef("gdrive:birincil"), once, "hicbir dosya silinmemeli")
+        esit(o.drive_hedef("gdrive:birincil", copte=True), [], "hicbir sey cope gitmemeli")
+    finally: o.temizle()
+
+@test("hedef listesi normalize edilir", "hedefler")
+def t_hedef_normalize():
+    o = Ortam()
+    try:
+        # Birincilin tekrari tehlikeli (ayni yere iki kez denenir), tekrarlar anlamsiz
+        o.plan(remote="gdrive:ana", yedek_hedefler=["gdrive:ana", "gdrive:b",
+                                                    "gdrive:b", "", "bozuk-iki-nokta-yok"])
+        G = o.modul()
+        p = G.get_plan("p1")
+        esit(p["yedek_hedefler"], ["gdrive:b"], f"temizlenmeli: {p['yedek_hedefler']}")
+        esit(G.plan_hedefleri(p), ["gdrive:ana", "gdrive:b"], "sira korunmali")
+        # Hedefe gore plan kopyasi asil plani bozmamali
+        q = G.plan_hedefle(p, "gdrive:b")
+        esit(q["remote"], "gdrive:b", "kopyada hedef degismeli")
+        esit(p["remote"], "gdrive:ana", "asil plan degismemeli")
+    finally: o.temizle()
+
+@test("saglayici kaydi tutarli ve arayuze aktariliyor", "hedefler")
+def t_saglayicilar():
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru("drive" in G.SAGLAYICILAR, "Google Drive olmali")
+        # Yalnizca Drive gercek hesapla dogrulandi; digerleri boyle isaretlenmeli
+        esit([t for t, v in G.SAGLAYICILAR.items() if v["dogrulandi"]], ["drive"],
+             "yalnizca gercekten denenen 'dogrulandi' olmali")
+        for tur, v in G.SAGLAYICILAR.items():
+            for alan in ("ad", "simge", "auth", "olustur", "dogrulandi", "not"):
+                dogru(alan in v, f"{tur} icin '{alan}' tanimli olmali")
+        esit(G.saglayici("drive")["olustur"], ["scope=drive.file"],
+             "drive kisitli kapsamla olusturulmali")
+        esit(G.saglayici("boyle-bir-sey-yok")["ad"], "Google Drive", "bilinmeyen tur varsayilana duser")
+        # Desteklenmeyen tur reddedilmeli, sessizce drive'a dusmemeli
+        dogru(not G.auth_start("uydurma")["ok"], "bilinmeyen saglayici reddedilmeli")
+        dogru(not G.remote_create("x", "{}", "uydurma")["ok"], "bilinmeyen turde hesap acilmamali")
+        liste = G.saglayici_listesi()
+        dogru(len(liste) == len(G.SAGLAYICILAR), "hepsi listelenmeli")
+        dogru(all("kurulu" in x for x in liste), "kurulu bilgisi olmali")
+
+        # Tespit hatasi CALISAN bir saglayiciyi gizlememeli. Ilk yazimda
+        # kural tersti ve Drive dahil hepsi "rclone tanimiyor" gorunuyordu;
+        # arayuzdeki hesap ekleme listesi tamamen bosalirdi.
+        for bozuk in ((1, "bu json degil", ""), (0, "", ""), (0, "{}", ""), (1, "", "hata")):
+            G._SAGLAYICI_ONBELLEK.update(zaman=0, adlar=None)
+            G.rclone = lambda a, timeout=None, _c=bozuk: _c
+            dogru(G.rclone_saglayici_adlari() is None, f"cozulemeyen cikti None olmali: {bozuk}")
+            dogru(all(x["kurulu"] for x in G.saglayici_listesi()),
+                  f"tespit basarisizken hicbiri gizlenmemeli: {bozuk}")
+        # Gecerli JSON gelince gercekten suzmeli
+        G._SAGLAYICI_ONBELLEK.update(zaman=0, adlar=None)
+        G.rclone = lambda a, timeout=None: (
+            0, '[{"Name":"drive"},{"Name":"dropbox"}]', "")
+        d = {x["tur"]: x["kurulu"] for x in G.saglayici_listesi()}
+        dogru(d["drive"] and d["dropbox"], "tanidiklar kurulu olmali")
+        dogru(not d["box"], "tanimadigi kurulu sayilmamali")
+    finally: o.temizle()
+
+@test("yedek hedef arayuzu gomulu", "arayuz")
+def t_yedek_hedef_arayuz():
+    o = Ortam()
+    try:
+        G = o.modul()
+        h = G.HTML
+        for parca in ("e-yh-liste", "yhEkle", "yhTopla", "yhDoldur", "yhOzet",
+                      "yedek_hedefler", "a-tur", "saglayiciDegisti"):
+            dogru(parca in h, f"'{parca}' arayuzde bulunmali")
+        dogru("yedek_hedefler: yhTopla()" in h, "kaydederken gonderilmeli")
     finally: o.temizle()
 
 @test("olay yayini yavas istemciden etkilenmez", "canli")

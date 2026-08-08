@@ -77,7 +77,7 @@
 </div>
 <div class="wstep" data-step="3" style="display:none">
   <div class="wbaslik"><b>3. Hedef</b> <span class="small">Hangi Google hesabına, hangi klasöre</span></div>
-  <fieldset><legend>Hedef (Google hesabı)</legend>
+  <fieldset><legend>Hedef (bulut hesabı)</legend>
     <div class="f"><label class="tip" title="Yedeğin yükleneceği Google hesabı. Başkasının hesabını da ekleyip burada seçebilirsin.">Hesap</label>
       <div><div class="inline"><select id="e-acct" style="flex:1"></select>
         <button class="sm primary" onclick="wHesapEkle()">＋ Yeni hesap</button>
@@ -90,6 +90,21 @@
         <div class="errmsg" id="err-folder"></div>
         <div class="hint"><b>Her plan farklı klasöre yazmalı.</b> Aynı klasörü paylaşan iki plan birbirinin yedeğini eski sanıp siler.</div>
         <div class="eg">Örnek: <code>proxmox-yedek</code> · <code>arsiv/2026</code> · <code>pve/usb1tb</code></div></div></div>
+  </fieldset>
+  <fieldset><legend>Yedek hedefler (opsiyonel)</legend>
+    <div class="eg" style="margin-bottom:8px">Birincil hedefe yazamazsa sırayla
+      bunlar denenir. İlk başarılı olan kullanılır.
+      <b>Eski yedekler yalnızca yazılan hedefte temizlenir</b> — yedeğe düştüğün gün
+      birincideki yedeklere dokunulmaz, hesap düzelince orada duruyor olurlar.</div>
+    <div id="e-yh-liste"></div>
+    <div class="inline" style="margin-top:8px">
+      <button class="sm" type="button" onclick="yhEkle()">＋ Yedek hedef ekle</button>
+      <span class="small" id="e-yh-ozet"></span>
+    </div>
+    <div class="eg" style="margin-top:8px">Farklı bir sağlayıcı da olabilir
+      (Dropbox, OneDrive, Box…). <b>Ayarlar → Hesaplar</b>'tan ekleyip burada seçersin.
+      Yedek hedef <b>farklı bir hesapta</b> olursa asıl korumayı sağlar; aynı hesabın
+      başka klasörü, hesap kilitlenirse işe yaramaz.</div>
   </fieldset>
 </div>
 <div class="wstep" data-step="4" style="display:none">
@@ -440,7 +455,10 @@
 </div></div>
 
 <div id="hesap-ekle-panel" style="display:none">
-  <fieldset><legend>Yeni Google hesabı yetkilendir</legend>
+  <fieldset><legend>Yeni bulut hesabı yetkilendir</legend>
+    <div class="f"><label class="tip" title="Hangi bulut sağlayıcısı. Hepsi tarayıcı ile yetkilendirilir.">Sağlayıcı</label>
+      <div><select id="a-tur" onchange="saglayiciDegisti()"></select>
+        <div class="eg" id="a-turhint"></div></div></div>
     <div class="f"><label class="tip" title="Plan hedefinde görünecek kısa ad.">Hesap adı</label>
       <div><input id="a-name" placeholder="ortak-hesap"><div class="errmsg" id="err-aname"></div>
         <div class="eg">Sadece harf, rakam, <code>-</code> ve <code>_</code>. Örnek: <code>kisisel</code>, <code>ortak-hesap</code></div></div></div>
@@ -449,7 +467,7 @@
       <button id="a-tab2" onclick="acctTab(2)">Hazır jetonu yapıştır</button>
     </div>
     <div id="a-m1">
-      <div class="hint">Google onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
+      <div class="hint">Sağlayıcı onaydan sonra tarayıcıyı <b>senin bilgisayarındaki</b> 127.0.0.1 adresine yönlendirir.
         Bu yüzden önce aşağıdaki komutu kendi bilgisayarında bir terminalde çalıştır ve açık bırak, sonra "Başlat" de.</div>
       <div class="f" style="margin-top:8px"><label>Tünel komutu</label>
         <div><input id="a-tunnel" readonly onclick="this.select()">
