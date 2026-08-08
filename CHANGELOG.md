@@ -2,6 +2,87 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.3.0 — 2026-08-08
+
+Bu sürümün büyük kısmı, gerçek kurulumda ortaya çıkan sorunların düzeltilmesidir.
+
+### Canlı arayüz
+
+- **Sunucu → tarayıcı olay akışı (SSE).** Arayüz artık birkaç saniyede bir
+  `/api/status` çekmiyor; durum, ilerleme ve log satırları değiştiği anda düşüyor.
+  WebSocket yerine SSE: sunucu saf Python stdlib, `EventSource` kendiliğinden
+  yeniden bağlanıyor ve ters vekilden sorunsuz geçiyor. Akış kurulamazsa arayüz
+  eski yoklama moduna dönüyor; başlıktaki gösterge hangi modda olduğunu söylüyor.
+- **Sağ tık menüleri.** Plan kartı, Google hesabı, SMTP profili, log paneli,
+  yedek/çöp tablo satırları ve boş alan için bağlama duyarlı menüler. Klavyeyle
+  gezilebilir, ekran dışına taşmaz, dokunmatikte uzun basmayla açılır.
+- **F5 taslağı.** Açık plan formu aralıklarla yerel taslağa yazılıyor; dönünce
+  geri yükleme öneriliyor. Şifre alanları taslağa girmez, sunucuya hiçbir şey gitmez.
+- **Form hataları** ilk hatalı alana kaydırıyor, odağı veriyor ve kısa süre vurguluyor.
+- Hiç çalışmamış plan artık `ATLANDI` değil **`BEKLİYOR`** gösteriyor.
+
+### Host yapılandırma yedeği
+
+`vzdump` yalnızca disk yedeği alır. Host çökerse elinde diskler olur ama onları
+nereye geri yükleyeceğini anlatan hiçbir şey olmaz. Her çalışmada tarihli bir
+arşiv üretilip yükleniyor: `/etc/pve`, `/etc/network/interfaces`, `/etc/fstab`,
+apt kaynakları. Ölçüm: **38 dosya, tar.gz 7 KB + JSON 15 KB.**
+
+**Özel anahtarlar alınmaz.** `/etc/pve/priv` varsayılan olarak yasak, izin
+listesiyle çalışır; yalnızca `authorized_keys` ve `known_hosts` (açık anahtar
+listeleri) girer. Ayrıntı ve geri yükleme adımları: `docs/GERI-YUKLEME.md`.
+
+### Bant genişliği
+
+- **Ölçüm yanlış arayüzden yapılıyordu.** Varsayılan rota Proxmox'ta `vmbr0`'dan
+  geçer; köprünün sayaçları VM↔VM yerel trafiği de sayar ve o trafik internete hiç
+  çıkmaz. Ölçüldü (aynı an): `bond0` 12,2 KB/sn, `vmbr0` 19,1 KB/sn. Artık
+  köprünün altındaki uplink seçiliyor — önce bond, sonra fiziksel.
+- **Hat kapasitesi artık tahmin değil ölçüm.** Arayüzün bağ hızı internet yükleme
+  hızını göstermez; 4×1 Gbit bond'un arkasında 60 Mbit'lik hat olabilir. Öğrenme
+  kipinde, kendi sınırına dayanılmayan anlarda fiilen ulaşılan en yüksek sürekli
+  hız ölçülüp kalıcı yazılıyor.
+
+### Servis izleme
+
+- `pve-gdrive-bildir@.service` ve iki birimde `OnFailure=`. Çöken birimin systemd
+  durumu ve son 40 günlük satırı maile giriyor.
+- Her tick "yaşıyorum" damgası bırakıyor; damga eskirse arayüzde uyarı çıkıyor ve
+  haftalık rapora giriyor. Yeni komut: `pve_gdrive.py saglik`.
+
+### Mail
+
+Düz metin gövde korunuyor, üstüne **Outlook uyumlu HTML** alternatif üretiliyor:
+tablo tabanlı, satır içi CSS, `mso` koşullu bloğu, flex/grid yok. Durum rengi
+başarılı/HATA/atlandı'ya göre değişiyor.
+
+### Düzeltmeler
+
+- **"Beni hatırla" çalışmıyordu.** Oturumlar yalnızca bellekteydi; her servis
+  yeniden başlatması herkesi çıkış yaptırıyordu. Kalıcı oturumlar artık 0600 izinli
+  dosyada saklanıp açılışta geri yükleniyor. Oturum adres bağlama kipi parametrik:
+  `ip | ag | yok`.
+- **Rapor butonu çalışmıyordu** — `run_action("report")` sunucuda hiç tanımlı değildi.
+- **Arayüzde ham `C(...)` çağrıları görünüyordu** (`C(3 gün · min 3 set`, Drive
+  kullanım satırı, tırnaksız `title=` öznitelikleri). Eski bir toplu kelime
+  değiştirmenin kalıntısıydı; temizlendi ve testle korumaya alındı.
+- **Saklama ipuçları sabit "14 gün" diyordu**, alanda 3 yazarken bile. Artık
+  girilen değerden türüyor.
+- Mail gövdelerinde "MISAFIR" → "VM/CT".
+
+### Dağıtım
+
+`dagit.sh`: hedef yolu systemd biriminin `ExecStart`'ından okur, doğrulamayı çalışan
+sürecin `/proc/<pid>/cmdline` ile açtığı dosyanın sha256'sı üzerinden yapar, eski
+sürümü saklar. (Bir gün boyunca yanlış dosyaya dağıtım yapılıp "doğrulandı" denmesi
+bu betiğin sebebidir.)
+
+### Test
+
+42 → **64**. Yeni gruplar: `canli`, `izleme`, `bantgenisligi`, `yapilandirma`.
+Test koşucusuna gerçek HTTP sunucusu başlatan yardımcı eklendi; SSE uçtan uca
+gerçek bağlantı üzerinden ölçülüyor.
+
 ## 1.2.0 — 2026-08-08
 
 ### Eklenenler

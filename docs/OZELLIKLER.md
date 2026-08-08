@@ -261,3 +261,74 @@ Oturum çerezi veya `Authorization: Bearer <api_token>` ile. POST istekleri `X-C
 | `/api/remote/auth/start\|status\|finish\|cancel` | POST/GET | OAuth akışı |
 | `/api/settings/save` | POST | Ortak ayarlar |
 | `/login`, `/logout` | POST | Oturum |
+
+## Host yapılandırma yedeği
+
+`vzdump` yalnızca disk yedeği alır. Bu arşiv, "diskleri nereye geri yükleyeceğim"
+sorusunu cevaplar. Ölçülen boyut: 38 dosya, tar.gz 7 KB + JSON 15 KB.
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `host_config_enabled` | `true` | Her plan çalışmasında tarihli arşiv üretilir |
+| `host_config_json` | `true` | `pvesh` ile REST ağacının okunabilir görüntüsü |
+| `host_config_keep_count` | `30` | Gün sınırından muaf arşiv tabanı |
+| `host_config_paths` | `/etc/pve`, `/etc/network/interfaces`, `/etc/fstab`, … | Arşive girecek yollar |
+| `host_config_exclude` | `*.key`, `*.pem`, `shadow.cfg`, … | Desen tabanlı dışlama |
+| `host_config_priv_allow` | `authorized_keys`, `known_hosts` | `priv/` içinden **yalnızca** bunlar geçer |
+| `host_config_pvesh` | 11 uç | JSON görüntüsüne girecek API yolları |
+
+`/etc/pve/priv` **varsayılan olarak yasaktır**; izin listesiyle çalışır. Böylece
+Proxmox oraya yeni bir sır koyarsa kural güncellenmese bile dışarıda kalır.
+Geri yükleme adımları ve eksik anahtarların ne anlama geldiği: `docs/GERI-YUKLEME.md`.
+
+## Bant genişliği
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `bwlimit` | `30M` | Sabit sınır (bayt/sn; `30M` = 30 MiB/sn) |
+| `bwlimit_schedule` | — | Saatlik çizelge: `08:00,2M 19:00,off` |
+| `bwlimit_auto` | `false` | Hattaki diğer trafiğe göre canlı ayar |
+| `bw_auto_link_mode` | `ogren` | `ogren` = fiilen ölçülen kapasite, `manuel` = elle |
+| `bw_auto_link` | `100M` | Yalnızca `manuel` kipte kullanılır |
+| `bw_auto_iface` | — | Boşsa otomatik: varsayılan rota, köprüyse altındaki uplink |
+| `bw_auto_reserve_pct` | `30` | Hattın bu yüzdesi her zaman diğerlerine bırakılır |
+
+**Neden köprü değil uplink:** Proxmox'ta varsayılan rota `vmbr0` gibi bir köprüden
+geçer. Köprünün sayaçları VM↔VM yerel trafiği de sayar; o trafik internete hiç
+çıkmaz ve yükleme hızıyla yarışmaz. Ölçüm (aynı an): `bond0` 12,2 KB/sn,
+`vmbr0` 19,1 KB/sn.
+
+**Neden bağ hızı kullanılmaz:** arayüzün bildirdiği hız internet yükleme hızını
+göstermez — 4×1 Gbit bond'un arkasında 60 Mbit'lik bir ISS hattı olabilir.
+
+## Canlı olay akışı (SSE)
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `sse_enabled` | `true` | Kapatılırsa arayüz yoklama moduna döner |
+| `sse_watch_ms` | `1000` | Diskteki değişikliğin taranma sıklığı |
+| `sse_heartbeat_sec` | `20` | Ters vekil bağlantıyı kesmesin diye boş sinyal |
+| `sse_ping_sec` | `5` | Kopan bağlantının fark edilme süresi |
+| `sse_max_clients` | `16` | Eş zamanlı açık akış sınırı |
+
+## Servis izleme
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `failure_mail` | `true` | systemd birimi çökünce mail at |
+| `failure_mail_to` | — | Boşsa ilk planın alıcısı kullanılır |
+| `failure_smtp_profile` | — | Boşsa planın profili |
+| `failure_mail_lines` | `40` | Maile eklenecek günlük satırı |
+| `tick_uyari_dk` | `20` | Bu kadar dakikadır tick gelmediyse uyar |
+
+## Oturum güvenliği
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `remember_enabled` | `true` | Giriş ekranında "beni hatırla" |
+| `remember_days` | `30` | Hatırlanan oturumun ömrü |
+| `session_ip_bind` | `ip` | `ip` = birebir adres, `ag` = aynı ağ bloğu, `yok` = kontrol yok |
+
+Hatırlanan oturumlar `0600` izinli bir dosyada saklanır ve servis yeniden
+başladığında geri yüklenir. `session_ip_bind` yalnızca hatırlanan oturumlara
+uygulanır; normal oturum her zaman birebir adrese bağlıdır.
