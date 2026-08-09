@@ -1,77 +1,65 @@
-# Kaldığımız yer — 2026-08-09 (son güncelleme 20:2x)
+# Kaldığımız yer — 2026-08-09 (son güncelleme 23:2x)
 
 Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o günkü durum**.
 
 ## Hemen bakılacaklar
 
-0. **1.9.0 KOD HAZIR, DAĞITILMADI — commit de edilmedi.** (2026-08-09 20:1x)
+0. **1.10.0 canlıda ve arayüz gerçekten açılıyor.** (2026-08-09 23:1x)
 
-   Çalışma ağacında duruyor, host'ta hâlâ **1.8.1** çalışıyor. İki yeni özellik:
-
-   - **Dahil etme filtresi** (`include_patterns`): boş = hepsi, doluysa yalnızca
-     desene uyanlar yüklenir. Sihirbaz *2. Kaynak* adımında, dosya listesinin
-     üstünde; desen yazınca liste anında yenilenir. Filtre dışı kalanlar
-     **gizlenmez**, `filtre dışı` rozetiyle işaretlenir.
-   - **Tipli girdi kontrolleri**: `run_at` / `report_at` artık `type="time"`.
-     Girdi tipi de artık alan tablosundan türüyor (`alanTipleriniUygula`) —
-     sayıya `min`/`max`/`step`, saate dakika hassasiyeti otomatik.
-
-   🔴 **Ölçülmüş tuzak — bu bilgi kaybolmasın:** filtreyi `--include` ile kurmak
-   YANLIŞ. rclone `--include` ve `--exclude` birlikte verilince
-   *"the order they are parsed in is indeterminate"* hatası basıyor ve iki farklı
-   sırada da `*.tmp` dosyası filtreden **geçti** — yani filtre açık bir planda
-   `skip_patterns` garantisi kayboluyor ve yazılmakta olan yarım bir yedek
-   Drive'a çıkabiliyordu. Ürün bu yüzden sıralı `--filter` üretiyor
-   (`filtre_kurallari`): önce atlama, sonra dahil etme, en sonda `- *`.
-   Guard testi bunu gerçek rclone ile doğruluyor ve naif kurgu geri konduğunda
-   **düşüyor** (denendi).
-
-   Doğrulama: `python3 tests/run_tests.py` → **122 geçti, 0 kaldı** (önce 118).
-   Host'ta rclone **v1.60.1-DEV** ile gerçek `/mnt/pve/Usb1Tb/dump` klasöründe
-   (60 dosya) `rclone lsf` ile de ölçüldü, hiçbir şey yazılmadı:
+   Commit `4bde2e0` → push → `./dagit.sh`. Doğrulama betiğin sözüne değil,
+   çalışan sürecin açtığı dosyaya dayanıyor:
 
    ```
-   filtresiz (yalnız atlama)          60
-   *100*        (alt dize)            12
-   vzdump-*-100-*  (alan hedefli)     12
-   *100*.tar.zst  (yalnız arşiv)       4
+   çalışan dosya : /usr/local/bin/pve_gdrive.py
+   sürüm         : 1.10.0
+   sha256        : e6999c1d58a1d68a…   ← yereldekiyle birebir aynı
+   servis        : active · timer active · arayüz HTTP 200
+   plan gunluk   : KAPALI, sonraki 2026-08-10 03:00 (dokunulmadı)
    ```
 
-   **Sıradaki adımlar:**
-   ```bash
-   cd ~/source/repos/pve-gdrive-backup
-   python3 tests/run_tests.py        # 122 beklenir
-   python3 build_ui.py               # gömülü arayüzü tazele
-   git add -A && git commit          # 1.9.0
-   ./dagit.sh                        # elle scp YOK (kural 6b)
-   ```
+   Ayrıca host'taki dosya **geri çekilip** Chrome headless ile açıldı:
+   `plan_satiri=1, PLAN_ALANLARI=hazir(46), acildi=true`.
 
-   ✅ **Tick timer sorusu cevaplandı (ölçüldü 2026-08-09 20:2x).** `dagit.sh`
-   timer'a **dokunmuyor**, yalnız `pve-gdrive-ui`'yi yeniden başlatıyor — ve bu
-   yeterli:
+   🔴 **1.9.0 ARAYÜZÜ ÖLÜYDÜ — bu bilgi kaybolmasın.** 1.9.0 üç saat boyunca
+   canlıda durdu ve arayüz hiç açılmıyordu: sayfa yükleniyor, HTML'de her şey
+   var, plan listesi boş. `tsc` tek dosyaya birleştiriyor (`outFile`);
+   `app.ts`'in sonundaki açılış satırı `alanTipleriniUygula()` çağırıyordu, o
+   işlev `alanlar.ts`'teki `PLAN_ALANLARI` tablosunu okuyor ve `alanlar.ts`
+   `app.ts`'ten **sonra** birleşiyor → `Cannot access 'PLAN_ALANLARI' before
+   initialization` → paket o satırda ölüyor, `refresh()` hiç koşmuyor.
 
-   - `$HEDEF.new` ile `$HEDEF` aynı dizinde, `/usr/local/bin` → `rpool/ROOT/pve-1`
-     (ölçüldü). Yani `mv` tek dosya sistemi içinde **atomik rename**: dağıtım
-     sırasında başlayan bir tick ya eski inode'u ya yeni dosyayı görür, **yarım
-     dosya çalıştırılmaz**.
-   - `systemctl restart pve-gdrive-ui` yalnız arayüzü döndürür; tick ayrı bir
-     birim, süren bir yedek kesilmez.
-   - Plan başına `flock` var (`/tmp/pve-gdrive-<plan>.lock`), üst üste koşu olmaz.
-   - 1.9.0 şema göçü içermiyor: yalnız güvenli varsayılanlı yeni bir plan alanı
-     (`include_patterns: []`) eklendi, eski planlar olduğu gibi yüklenir.
+   Ölçüm (Chrome headless `--dump-dom`): 1.8.1 plan satırı **1**, 1.9.0 plan
+   satırı **0**, 1.10.0 plan satırı **1**. Dosya sırasını değiştirmek çözüm
+   değil — `alanlar.ts` de `app.ts`'teki `RX`'i kullanıyor, ters sırada `tsc`
+   **TS2448** veriyor (denendi). Açılış artık `DOMContentLoaded` ile çağrılıyor.
 
-   Dağıtım anı için host durumu (2026-08-09 20:2x): rclone **çalışmıyor**,
-   `pve-gdrive-tick.service` inactive, plan `gunluk` **KAPALI**, sonraki slot
-   2026-08-10 03:00. Yani pencere tamamen sakin.
+   ⚠️ **Asıl ders doğrulamada, ve bu bir sınıf:** 1.9.0 "doğrulandı" diye
+   raporlanmıştı — servis `active`, HTTP **200**, gömülü dosyada `id="e-inc"`,
+   `alanTipleriniUygula`, `type="time"` dizeleri **vardı**. Hepsi doğruydu ve
+   hiçbiri arayüzün çalıştığını göstermiyordu. Gömülü arayüzü değiştiren her
+   işte artık `gomulu arayuz paketi bastan sona kosuyor` testi var: paketi
+   gerçek tarayıcıda çalıştırıp en sonda tanımlanan tabloya erişiyor mu diye
+   bakıyor. Test 1.9.0 kodunda tam o hatayla düşüyor (ölçüldü).
 
-   Ürün sahibine önerilen ama henüz yapılmayan: arayüzdeki desen örneklerine
-   `vzdump-*-100-*` ve `*100*.tar.zst` eklensin. Sebebi ölçüldü — `*100*` alt dize
-   eşleşmesi olduğu için `.log` ve `.tar.zst.notes` dosyalarını da alıyor; bunlar
-   `dump_regex`'e uymadığı için **"saklama dışı"** olur: yüklenir ama hiç silinmez.
+   ✅ **Misafir seçici geldi (1.10.0).** "Sadece 100 nolu misafiri yedekle"
+   demek için desen bilmek gerekmiyor: 2. Kaynak adımında klasördeki misafirler
+   set/dosya/boyutuyla listeleniyor, **yalnız** düğmesi tek tıkla filtreyi o
+   misafire ayarlıyor, kutucuklar ikincisini ekliyor. Desen kutusu görünür ve
+   düzenlenebilir kalıyor. Üretilen kalıp alan hedefli (`vzdump-lxc-100-*`);
+   elle `*100*` yazana alt dize uyarısı ve tek tıkla **Düzelt** çıkıyor.
 
-   Host durumu (2026-08-09 20:14): `pve-gdrive-ui.service` active/enabled,
-   `/usr/local/bin/pve_gdrive.py serve`, sha256 `26ad07f5…`, SURUM 1.8.1;
-   `pve-gdrive-tick.timer` active; PVE 8.4.19, 31 gündür ayakta.
+   Gerçek tarayıcıda ölçülen akış (60 gerçek dosya adı):
+   `filtre boş → 60 yüklenir` · `yalnız lxc-100 → 12 / 48 dışarıda` ·
+   `+ qemu-105 → 24 / 36` · `elle *100* → uyarı` · `Düzelt → vzdump-*-100-*`.
+
+   ❌ **1.9.0 notlarındaki bir uyarı YANLIŞTI, silindi.** `.log` ve
+   `.tar.zst.notes` dosyaları "saklama dışı" **değil**. `dump_regex` baştan
+   eşleşiyor (`.match`), üçü de aynı sete giriyor ve arşivle **birlikte**
+   siliniyor. Gerçek dosya adlarıyla ölçüldü: `*100*` → 12 dosya yüklenir,
+   `saklama_disi = 0`, `collect_sets` 12 dosyanın 12'sini de bir sete koyuyor.
+   Filtre kullanmak Drive'da dosya biriktirmiyor.
+
+   Testler: **126 geçti, 0 kaldı** (1.9.0'da 122).
 
 1. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
    2026-08-09 00:41'de ürün sahibinin isteğiyle kesildi (29,8 GB / 215,9 GB,
@@ -169,6 +157,8 @@ Ayrıntı: `CHANGELOG.md`. **100/100 test geçiyor.**
 - Yanlış dosyaya dağıtım → `./dagit.sh` kullan (hedefi systemd biriminden okur)
 - `state.json`'daki `last_run`'ı elle boşaltma → zamanlayıcı yedeği o an başlatır
 - "Test ettim" demeden önce **kullanıcının gireceği yolu** çalıştır
+- Gömülü arayüz değiştiyse **sayfayı gerçekten aç** — HTTP 200 ve "dosyada şu
+  dize var" arayüzün çalıştığını göstermez (1.9.0: paket açılışta ölmüştü)
 - Oturum sonunda `tools/transcript-yedekle.sh`
 - Canlıda süreç öldürmeden önce `prune_on_failure`'ı **oku** — açıksa silme yapar
 - Ölçüm aracını da sına: `Ortam` PATH'e sahte rclone koyar, gerçek ölçüm için
