@@ -4,7 +4,23 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
 ## Hemen bakılacaklar
 
-0. **1.10.0 canlıda ve arayüz gerçekten açılıyor.** (2026-08-09 23:1x)
+0. **1.10.1 canlıda.** (2026-08-09 23:5x)
+
+   Hesap kotası ilk açılışta gelmiyordu, F5 gerekiyordu. Üç kusur birden:
+   ölçüm sürerken ekranda kırmızı `⚠ kota okunamadı` yazıyordu (ortada arıza
+   yok, `rclone about` 34 sn'ye kadar sürebiliyor); ölçüm bitince kimse haber
+   vermiyordu (kota bellekte, `state.json` değişmiyor, izleyici yayın yapmıyor);
+   SSE canlıyken yoklama 60 sn olduğu için ekran bir dakika yalan söylüyordu.
+
+   Şimdi: `kota ölçülüyor…` ayrı bir durum, ölçüm bitince `durum` olayı
+   itiliyor (ölçüldü: 3,1 sn), ve bekleyen hesap varken arayüz 3 sn'de bir
+   kendi bakıyor. Host'tan çekilen dosyayla doğrulandı: kullanıcı hiçbir şeye
+   dokunmadan `kota ölçülüyor…` → `sametdrive 7% · 148.0 GB / 2.0 TB`.
+
+   `sha256 259224af1b9b3298…` — yerel ile host birebir aynı, HTTP 200.
+   Testler: **128 geçti, 0 kaldı.**
+
+1. **1.10.0: misafir seçici ve arayüzün açılış hatası.** (2026-08-09 23:1x)
 
    Commit `4bde2e0` → push → `./dagit.sh`. Doğrulama betiğin sözüne değil,
    çalışan sürecin açtığı dosyaya dayanıyor:
@@ -61,7 +77,7 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
    Testler: **126 geçti, 0 kaldı** (1.9.0'da 122).
 
-1. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
+2. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
    2026-08-09 00:41'de ürün sahibinin isteğiyle kesildi (29,8 GB / 215,9 GB,
    %14). rclone'a SIGTERM verildi; `prune_on_failure=False` olduğu önceden
    okunmuştu, **hiçbir yedek silinmedi** (log: `retention ATLANDI`). Hata maili
@@ -76,14 +92,14 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
      '/usr/local/bin/pve-gdrive plans; tail -30 /var/log/pve-gdrive.log'
    ```
 
-2. **İkinci sunucu yarım** — `10.0.0.253`. Yapılmayanlar:
+3. **İkinci sunucu yarım** — `10.0.0.253`. Yapılmayanlar:
    - Google hesabı bağlanmadı (tünel: `ssh -N -L 53682:127.0.0.1:53682 root@10.0.0.253`)
    - Telegram kurulmadı — **sunucu etiketi ver**, yoksa iki host aynı sohbete
      yazıp hangisi olduğu anlaşılmaz
    - Plan hâlâ **kapalı**
    - Kaynak hazır: `/USB_4T_R1/yedek/dump` (2.8 TB boş)
 
-3. **`10.0.0.253` — vzdump 3 TB'lık mount point'i de alıyor.** CT 100
+4. **`10.0.0.253` — vzdump 3 TB'lık mount point'i de alıyor.** CT 100
    (urbackupserver) `mp0 = /urbackupdisk, backup=1, size=3000G`. Log doğruladı:
    `including mount point mp0`. Üç sorun: (a) hedef `/USB_4T_R1/yedek/dump`
    **aynı havuzda**, 2,8 TB boş — sığmayabilir, (b) aynı havuza yedek gerçek
@@ -91,12 +107,12 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
    Öneri: `pct set 100 -mp0 ...,backup=0` (UrBackup'ın veri diski zaten
    başkalarının yedeği). Önce deneme yedeği alıp boyutu ölç.
 
-4. **`10.0.0.253` — Proxmox Notes linki yok.** Marmaradaki link bu sohbetin
+5. **`10.0.0.253` — Proxmox Notes linki yok.** Marmaradaki link bu sohbetin
    başında `proxmox-link.sh` ile eklenmişti; yeni makinede hiç çalışmadı.
    Çözüm: `/opt/pve-gdrive-backup/proxmox-link.sh` ya da 1.7.1+ sürümde
    *Ayarlar → Bakım ve taşıma → Proxmox'a link ekle* (bu ikisine birden yazar).
 
-5. **Google hesabı Windows 11 makinesinden bağlanacak.** Win10 1809+/Win11'de
+6. **Google hesabı Windows 11 makinesinden bağlanacak.** Win10 1809+/Win11'de
    OpenSSH istemcisi kurulu gelir. Tünel o makinede açılacak, tarayıcı da orada
    olacak. Ağ izin listesi kontrol edilsin: `pve-gdrive aglar`.
 
