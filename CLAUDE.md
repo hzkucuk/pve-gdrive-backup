@@ -139,6 +139,21 @@ Aynı şey doğrulama için de geçerli: bir şeyi ölçerken *ölçümün kendi
 doğru şeyi ölçtüğünü kontrol et. (2026-08-08: çoklu hedef güvenlik testi geçti
 ama mock yardımcısı hedefleri ayırt etmediği için aslında hiçbir şey ölçmüyordu.)
 
+### 9b. Kurulum betiklerini birlikte güncelle ve test et
+
+Ürün ile kurulum betikleri ayrı yaşar ve sessizce ayrışır: betik dünkü alanları
+yazar, ürün bugünküleri bekler. Bir iş parçası bittiğinde `install.sh`, `kur.sh`,
+`kurulum.py` ve `tools/varsayilan-conf.py` gözden geçirilir — sonra **çalıştırılır**.
+
+- Yeni plan alanı eklediysen betiğe eklemene gerek yok (`PLAN_DEFAULTS` doldurur),
+  ama **taze kurulumun o alanla ne yaptığını test et** (güvenli varsayılan mı?).
+- Kurulum yolu sabit yazılmaz; `PVE_GDRIVE_CONF` her yerde geçerlidir. Sabit yol
+  demek, betiğin yalnızca gerçek bir host'ta `/etc`'e yazarak denenebilmesi demek —
+  yani pratikte hiç denenmemesi.
+- Test gerçek bir Linux'ta koşar: `docker run --rm -v "$PWD":/is debian:12-slim`
+  içinde sahte `systemctl` ile hem **temiz kurulum** hem **yükseltme** (mevcut
+  config'e dokunulmamalı) hem de **tek satırlık kurulum** (`kur.sh`) denenir.
+
 ### 9. Değişiklikten sonra regresyon koş
 
 Kod değiştirdiysen mevcut test paketini yeniden koş ve sonucu göster. Yeni özellik eklediysen
@@ -156,6 +171,7 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [x] Kaynak klasör arayüzden seçilebilsin
 - [x] Yedeklenecek dosyalar desenle süzülebilsin (`include_patterns`), süzülenler listede görünsün
 - [x] Yedeklenecek misafirler kutucukla seçilebilsin; seçim doğru deseni üretsin
+- [x] Her değişiklikte kurulum betikleri güncellenip gerçek Linux'ta test edilsin
 - [x] Form alanları tipine uygun kontrolle çizilsin (saat seçici, sayı alanı min/max/step)
 - [x] Birden fazla plan, her biri bağımsız
 - [x] Gün cinsinden her şey parametrik; mümkün olan her şey parametrik

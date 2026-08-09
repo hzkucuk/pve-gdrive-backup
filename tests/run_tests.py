@@ -1461,6 +1461,104 @@ def t_depo_duzelt():
         dogru(not G.depo_duzelt("yok-boyle", "icerik")["ok"], "olmayan depo reddedilmeli")
     finally: o.temizle()
 
+@test("temiz kurulumun urettigi config urunun semasina uyuyor", "kurulum")
+def t_kurulum_conf_semasi():
+    """Kurulum betigi ile urun ayri ayri yasiyor ve sessizce ayrisabilirler:
+    betik dunku alanlari yazar, urun bugunku alanlari bekler. Bu test kurulumun
+    GERCEKTEN urettigi dosyayi urune yukletir.
+
+    Yeni plan alanlari betige eklenmez; PLAN_DEFAULTS ile birlestigi icin
+    burada olmayan alan guvenli varsayilanini alir. Test tam da bunu olcer:
+    1.10.0'da gelen include_patterns kuruluma hic yazilmiyor ve bos geliyor --
+    yani taze kurulumda klasordeki HER SEY yedeklenir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        hedef = os.path.join(o.dizin, "kurulum.conf")
+        sifre_d = os.path.join(o.dizin, "sifre.txt")
+        ortam = dict(os.environ, PVE_GDRIVE_CONF=hedef, PGD_SIFRE_DOSYASI=sifre_d,
+                     PGD_SRC_DIR=o.dump, PGD_UI_PORT="8787", PGD_ALLOW_NETWORKS="")
+        r = subprocess.run([sys.executable, os.path.join(KOK, "tools", "varsayilan-conf.py")],
+                           capture_output=True, text=True, env=ortam, timeout=60)
+        dogru(r.returncode == 0, f"uretici hata verdi: {r.stderr[:300]}")
+        dogru(os.path.exists(hedef), "config yazilmadi")
+        # Sirlar: config ve sifre dosyasi baskasina okunmamali
+        for yol in (hedef, sifre_d):
+            mod = os.stat(yol).st_mode & 0o077
+            dogru(mod == 0, f"{os.path.basename(yol)} baskasina acik: {oct(os.stat(yol).st_mode)}")
+
+        ham = json.load(open(hedef))
+        plan_ham = ham["plans"][0]
+        # Betigin yazdigi her plan alani urunde TANINIYOR olmali (sema kaymasi)
+        bilinmeyen = [k for k in plan_ham if k not in G.PLAN_DEFAULTS]
+        dogru(not bilinmeyen, f"kurulum urunun tanimadigi plan alani yaziyor: {bilinmeyen}")
+        bilinmeyen_g = [k for k in ham if k not in G.GLOBAL_DEFAULTS and k != "plans"]
+        dogru(not bilinmeyen_g, f"kurulum urunun tanimadigi genel alan yaziyor: {bilinmeyen_g}")
+
+        # Urun bu dosyayi yukleyebilmeli ve eksik alanlar varsayilana dusmeli
+        # Modul yolu ice alirken bir kere okuyor; ortam degiskenini sonradan
+        # degistirmek yetmez (once boyle yazildi ve plan bulunamadi).
+        os.environ["PVE_GDRIVE_CONF"] = hedef
+        G.CONFIG_PATH = hedef
+        G.cfg(force=True)
+        p = G.get_plan("gunluk")
+        dogru(p, "kurulumun yazdigi plan urunde bulunamadi")
+        eksik = [k for k in G.PLAN_DEFAULTS if k not in p]
+        dogru(not eksik, f"plan alanlari varsayilanla tamamlanmadi: {eksik}")
+        dogru(p["include_patterns"] == [],
+              f"taze kurulumda filtre BOS olmali (hepsi yedeklenir): {p['include_patterns']}")
+        dogru(p["enabled"] is False, "taze kurulumda plan kapali gelmeli (kullanici acsin)")
+
+        # Ve bu planla kaynak listesi gercekten calismali
+        o.dosya("vzdump-lxc-100-2026_08_09-21_00_00.tar.zst", 1024, yas_sn=7200)
+        r2 = G.kaynak_dosyalar(o.dump, p)
+        dogru(r2["ok"] and r2["yuklenecek"] == 1,
+              f"kurulum plani ile dosya listesi calismali: {r2.get('hata') or r2}")
+        dogru(len(r2["misafirler"]) == 1, "misafir ozeti kurulum planiyla da uretilmeli")
+    finally:
+        o.temizle()
+
+@test("sihirbazin urettigi config da ayni semaya uyuyor", "kurulum")
+def t_kurulum_sihirbaz_semasi():
+    """kurulum.py ile varsayilan-conf.py iki AYRI yol; ikisi de config yaziyor.
+    Biri guncellenip oteki unutulursa taze kurulum sessizce bozulur."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        kay = open(os.path.join(KOK, "kurulum.py")).read()
+        i = kay.find('"plans": [{')
+        dogru(i > 0, "sihirbazda plan uretimi bulunamadi")
+        # Yalnizca plan blogu: pencere genis tutulunca sihirbazin JSON zarfi
+        # (_kip, _conf, ...) da "plan alani" sanildi -- testin kendi kusuruydu.
+        blok = kay[i:kay.find("}]", i) + 2]
+        alanlar = re.findall(r'"([a-z_]+)":', blok)
+        bilinmeyen = [k for k in alanlar if k not in G.PLAN_DEFAULTS and k != "plans"]
+        dogru(not bilinmeyen, f"sihirbaz urunun tanimadigi plan alani yaziyor: {bilinmeyen}")
+        # Iki yol ayni plan alanlarini yazmali (biri gelisip oteki geride kalmasin)
+        uret = open(os.path.join(KOK, "tools", "varsayilan-conf.py")).read()
+        j = uret.find('"plans": [{')
+        alanlar2 = set(re.findall(r'"([a-z_]+)":', uret[j:uret.find("}]", j) + 2]))
+        fark = set(alanlar) ^ alanlar2
+        dogru(not fark, f"sihirbaz ile etkilesimsiz kurulum ayni alanlari yazmali, fark: {fark}")
+    finally: o.temizle()
+
+@test("install.sh yapilandirma yolunu sabit yazmiyor", "kurulum")
+def t_kurulum_yol_degiskeni():
+    """Kurulum yolu sabitse betik yalnizca gercek bir Proxmox host'unda,
+    /etc'e yazarak denenebilir -- yani pratikte hic denenmez."""
+    ik = open(os.path.join(KOK, "install.sh")).read()
+    dogru("PVE_GDRIVE_CONF" in ik, "install.sh PVE_GDRIVE_CONF'u tanimali")
+    dogru('python3 "$here/tools/varsayilan-conf.py"' in ik,
+          "config uretimi ayri dosyadan cagrilmali (gomulu python test edilemiyor)")
+    # Yol yalnizca TEK yerde, varsayilan olarak gecmeli. Sihirbaz dali bu
+    # denetimle yakalandi: orada yol hala sabitti ve PVE_GDRIVE_CONF yok
+    # sayiliyordu (kurulum.py ise tanidigi icin ikisi ayrisiyordu).
+    kalan = ik.replace('${PVE_GDRIVE_CONF:-/etc/pve-gdrive.conf}', "")
+    kalan = kalan.replace('os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")', "")
+    dogru("/etc/pve-gdrive.conf" not in kalan,
+          "config yolu birden fazla yerde sabit yazilmis: "
+          + str([l.strip() for l in kalan.split("\n") if "/etc/pve-gdrive.conf" in l]))
+
 @test("kurulum sihirbazi ekranda GORUNUR", "kurulum")
 def t_sihirbaz_gorunur():
     """install.sh sihirbazi $( ) icinde calistirip son satirdaki JSON'u alir.

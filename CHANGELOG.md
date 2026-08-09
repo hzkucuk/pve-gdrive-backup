@@ -32,6 +32,34 @@ Gerçek tarayıcıda doğrulandı (Chrome headless, kullanıcı hiçbir şeye do
 
 Testler: **128 geçti, 0 kaldı**. İki yeni test 1.10.0 kodunda düşüyor (ölçüldü).
 
+### Kurulum betikleri: test edilebilir hâle geldi ve iki kusur çıktı
+
+Kurulumun ürettiği yapılandırma ile ürünün beklediği şema ayrı ayrı yaşıyordu ve
+kimse ikisini karşılaştırmıyordu. Etkileşimsiz kipteki üretici `install.sh` içinde
+`python3 -c '…'` olarak gömülüydü: çalıştırmadan doğrulanamıyor, çalıştırmak için de
+gerçek bir host'a `/etc/pve-gdrive.conf` yazmak gerekiyordu. Üretici artık ayrı bir
+dosyada: `tools/varsayilan-conf.py`.
+
+Testler bunu yakaladı:
+
+- **Sihirbaz dalı yapılandırma yolunu sabit yazıyordu.** `kurulum.py` `PVE_GDRIVE_CONF`
+  değişkenini tanıyor, `install.sh`'in sihirbaz dalı ise yolu üç yerde sabit yazıyordu —
+  ikisi ayrışmıştı. Artık tek kaynak var.
+- **Üretilen arayüz şifresi `/tmp`'de 0644 duruyordu.** `install.sh` onu okuyup siliyor,
+  ama o aralıkta host'taki her yerel kullanıcı okuyabilirdi. Dosya artık `0600` ile açılıyor.
+
+Yeni testler (gerçek Debian 12 kabında, sahte `systemctl` ile):
+
+| ne denendi | sonuç |
+|---|---|
+| temiz kurulum (`PGD_SESSIZ=1 ./install.sh`) | config 600 · 4 systemd birimi · durum dizini 700 · sürüm 1.10.1 · kaynak `/etc/pve/storage.cfg`'den bulundu |
+| yükseltme (aynı betik tekrar) | `zaten var, dokunulmuyor` — 2 plan, filtre, `enabled`, `keep_days`, kullanıcı adı **korundu**, dosya sha'sı değişmedi |
+| tek satırlık kurulum (`curl … kur.sh \| bash`) | GitHub'dan indirdi, 1.10.1 kurdu, config 600 |
+| şema kayması nöbetçisi | kurulumun yazdığı her plan alanı üründe tanınıyor; sihirbaz ile etkileşimsiz kurulum **aynı** alanları yazıyor |
+| taze kurulumda `include_patterns` | `[]` — yani klasördeki her şey yedeklenir (güvenli varsayılan) |
+
+Testler: **131 geçti, 0 kaldı.**
+
 > Not: ilk yazdığım test yanlış yeri ölçüyordu — "kota okunamadı" dizesi çeviri
 > tablosunda da geçtiği için sıralama denetimi dosyanın tamamında yanılıyordu.
 > Denetim artık `hesapSerit` işlevinin kendi gövdesine bakıyor.
