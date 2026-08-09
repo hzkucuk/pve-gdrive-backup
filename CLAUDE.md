@@ -155,6 +155,7 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [x] Silinen yedek Google çöp kutusuna gitsin, N gün sonra kalıcı silinsin (parametrik)
 - [x] Kaynak klasör arayüzden seçilebilsin
 - [x] Yedeklenecek dosyalar desenle süzülebilsin (`include_patterns`), süzülenler listede görünsün
+- [x] Yedeklenecek misafirler kutucukla seçilebilsin; seçim doğru deseni üretsin
 - [x] Form alanları tipine uygun kontrolle çizilsin (saat seçici, sayı alanı min/max/step)
 - [x] Birden fazla plan, her biri bağımsız
 - [x] Gün cinsinden her şey parametrik; mümkün olan her şey parametrik

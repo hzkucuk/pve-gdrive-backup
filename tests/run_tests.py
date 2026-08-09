@@ -2706,6 +2706,14 @@ def t_dahil_filtresi_ucu():
         # Filtre disi dosya listeden GIZLENMEZ; kullanici neyin disarida kaldigini gormeli
         dogru(len(j["dosyalar"]) == 3, f"3 dosyanin tamami listelenmeli: {len(j['dosyalar'])}")
 
+        # Secici HTTP ucundan beslenir: plan kaydedilmeden de misafirler gelmeli
+        m = {g["ad"]: g for g in j["misafirler"]}
+        dogru(set(m) == {"qemu-100", "qemu-101"}, f"misafir ozeti eksik: {sorted(m)}")
+        dogru(m["qemu-100"]["secili"] and not m["qemu-101"]["secili"],
+              f"secim durumu ucten yanlis geldi: {[(k, v['secili']) for k, v in m.items()]}")
+        dogru(m["qemu-100"]["desen"] == "vzdump-qemu-100-*",
+              f"secici deseni yanlis: {m['qemu-100']['desen']}")
+
         # Filtre bos gonderilirse plandaki gibi davranilmali (hicbir sey elenmez)
         j2 = json.load(ist.istek(taban + "&inc="))
         dogru(not j2.get("filtre_acik"), f"bos filtre acik sayilmamali: {j2.get('filtre_acik')}")
@@ -2744,6 +2752,187 @@ def t_alan_tipleri():
         # 5) Dahil etme filtresi alani ve canli onizleme baglantisi
         dogru('id="e-inc"' in G.HTML, "dahil etme filtresi alani olmali")
         dogru("&inc=" in G.HTML, "filtre listeleme sorgusuna eklenmeli")
+    finally: o.temizle()
+
+@test("misafir secici: klasordeki misafirler ve secim durumu olculur", "kaynak")
+def t_misafir_ozeti():
+    """Kullanici 'sadece 100 nolu misafiri yedekle' diyebilmeli. Bunun icin
+    once klasorde HANGI misafirlerin oldugunu urun sayacak; secim durumu da
+    tahminden degil, dosyalarin desene fiilen uymasindan turemeli."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        for gun in ("08", "09"):
+            for uz in (".tar.zst", ".tar.zst.notes", ".log"):
+                o.dosya(f"vzdump-lxc-100-2026_08_{gun}-21_00_00{uz}", 1024, yas_sn=7200)
+            o.dosya(f"vzdump-qemu-105-2026_08_{gun}-22_00_00.vma.zst", 4096, yas_sn=7200)
+        o.dosya("notlar.txt", 64, yas_sn=7200)
+
+        # 1) Filtre KAPALI: hepsi secili, cunku klasordeki her sey yuklenir
+        p0 = o.plan(skip_patterns=["*.dat"], min_age_min=0, include_patterns=[])
+        r0 = G.kaynak_dosyalar(o.dump, p0)
+        m0 = {g["ad"]: g for g in r0["misafirler"]}
+        dogru(set(m0) == {"lxc-100", "qemu-105"}, f"iki misafir bulunmali: {sorted(m0)}")
+        dogru(all(g["secili"] for g in m0.values()), "filtre kapaliyken hepsi secili olmali")
+        dogru(m0["lxc-100"]["set"] == 2, f"lxc-100 iki set olmali: {m0['lxc-100']['set']}")
+        dogru(m0["lxc-100"]["dosya"] == 6, f"lxc-100 alti dosya olmali: {m0['lxc-100']['dosya']}")
+        dogru(m0["qemu-105"]["set"] == 2, f"qemu-105 iki set olmali: {m0['qemu-105']['set']}")
+        # Misafir olmayan dosya listeye girmemeli, ama dosya listesinde durmali
+        dogru(any(x["ad"] == "notlar.txt" for x in r0["dosyalar"]), "notlar.txt listede olmali")
+
+        # 2) Seciciyle uretilen desen: yalnizca o misafir secili kalir
+        desen = G.misafir_deseni("lxc", "100")
+        dogru(desen == "vzdump-lxc-100-*", f"uretilen desen yanlis: {desen}")
+        p1 = o.plan(skip_patterns=["*.dat"], min_age_min=0, include_patterns=[desen])
+        r1 = G.kaynak_dosyalar(o.dump, p1)
+        m1 = {g["ad"]: g for g in r1["misafirler"]}
+        dogru(m1["lxc-100"]["secili"] and not m1["qemu-105"]["secili"],
+              f"yalnizca lxc-100 secili olmali: {[(g['ad'], g['secili']) for g in r1['misafirler']]}")
+        dogru(m1["lxc-100"]["yuklenir"] == 6, f"lxc-100'un 6 dosyasi yuklenmeli: {m1['lxc-100']['yuklenir']}")
+        dogru(m1["qemu-105"]["yuklenir"] == 0, "secili olmayan misafirden dosya yuklenmemeli")
+        dogru(r1["yuklenecek"] == 6, f"toplam 6 dosya yuklenmeli: {r1['yuklenecek']}")
+
+        # 3) Arsiv, notes ve log AYNI sete girer -- yani hepsi saklamaya dahildir.
+        #    (Olculdu 2026-08-09: dump_regex bastan eslesiyor, .log ve .notes de
+        #     kalibin icinde. "Yuklenir ama hic silinmez" durumu olusmuyor.)
+        dogru(r1["saklama_disi"] == 0, f"saklama disi dosya olmamali: {r1['saklama_disi']}")
+        setler = G.collect_sets([{"Name": x["ad"], "Size": x["boyut"], "ModTime": "",
+                                  "IsDir": False} for x in r1["dosyalar"]
+                                 if x["durum"] == "yuklenir"])
+        kapsanan = sum(len(v["files"]) for v in setler.values())
+        dogru(len(setler) == 2 and kapsanan == 6,
+              f"6 dosya 2 sete girmeli, {kapsanan} dosya {len(setler)} sette")
+    finally: o.temizle()
+
+@test("misafir deseni alt dize tuzagini kapatir (1001/2100)", "kaynak")
+def t_misafir_deseni_alt_dize():
+    """SINIF TESTI. '*100*' sezgisel ama yanlis: alt dize eslesmesi oldugu icin
+    lxc-1001 ve qemu-2100 gibi BASKA misafirleri de kapar. Bugun klasorde oyle
+    biri olmayabilir; desen ise plana yazilir ve yarin eklenen misafirde sessizce
+    devreye girer -- kullanici yalnizca 100'u yedekledigini sanarak.
+
+    Urunun urettigi kalip alan hedeflidir; ikisi burada karsilastirilir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        hedef = "vzdump-lxc-100-2026_08_09-21_00_00.tar.zst"
+        tuzak = ["vzdump-lxc-1001-2026_08_09-21_00_00.tar.zst",
+                 "vzdump-qemu-2100-2026_08_09-22_00_00.vma.zst"]
+        for a in [hedef] + tuzak: o.dosya(a, 1024, yas_sn=7200)
+
+        # 1) Tuzak gercek mi? Once elle yazilan desenle olculur.
+        p_alt = o.plan(skip_patterns=[], min_age_min=0, include_patterns=["*100*"])
+        r_alt = G.kaynak_dosyalar(o.dump, p_alt)
+        yuk_alt = {x["ad"] for x in r_alt["dosyalar"] if x["durum"] == "yuklenir"}
+        dogru(yuk_alt == {hedef, *tuzak},
+              f"tuzak dogrulanamadi, *100* uc dosyayi da almaliydi: {sorted(yuk_alt)}")
+
+        # 2) Urunun uretttigi desen yalnizca hedefi alir
+        p_iyi = o.plan(skip_patterns=[], min_age_min=0,
+                       include_patterns=[G.misafir_deseni("lxc", "100")])
+        r_iyi = G.kaynak_dosyalar(o.dump, p_iyi)
+        yuk_iyi = {x["ad"] for x in r_iyi["dosyalar"] if x["durum"] == "yuklenir"}
+        dogru(yuk_iyi == {hedef}, f"yalnizca hedef misafir yuklenmeliydi: {sorted(yuk_iyi)}")
+        m = {g["ad"]: g["secili"] for g in r_iyi["misafirler"]}
+        dogru(m == {"lxc-100": True, "lxc-1001": False, "qemu-2100": False},
+              f"secim durumu yanlis: {m}")
+
+        # 3) Ayni karsilastirma GERCEK rclone ile: arayuzun tahmini ile rclone'un
+        #    karari ayni olmali, yoksa ekranda gosterdigimiz sey yalan olur.
+        gercek = None
+        for aday in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone", "/usr/bin/rclone"):
+            if os.path.exists(aday): gercek = aday; break
+        if not gercek:
+            print("      (gercek rclone yok, karsilastirma atlandi)")
+            return
+        hedef_dizin = os.path.join(o.dizin, "rk")
+        for desen, beklenen in ((["*100*"], {hedef, *tuzak}),
+                                ([G.misafir_deseni("lxc", "100")], {hedef})):
+            shutil.rmtree(hedef_dizin, ignore_errors=True); os.makedirs(hedef_dizin)
+            args = [gercek, "copy", o.dump, hedef_dizin, "-q"]
+            args += G.filtre_kurallari({"skip_patterns": [], "include_patterns": desen})
+            subprocess.run(args, check=True)
+            dogru(set(os.listdir(hedef_dizin)) == beklenen,
+                  f"rclone {desen}: beklenen {sorted(beklenen)}, gelen {sorted(os.listdir(hedef_dizin))}")
+    finally: o.temizle()
+
+@test("gomulu arayuz paketi bastan sona kosuyor", "arayuz")
+def t_paket_acilisi():
+    """SINIF TESTI -- 1.9.0'da arayuz SESSIZCE oldu ve canliya oyle gitti.
+
+    tsc tek dosyaya birlestiriyor (outFile). app.ts'in sonundaki acilis satiri
+    alanTipleriniUygula() cagiriyordu; o islev alanlar.ts'teki PLAN_ALANLARI
+    tablosunu okuyor ve alanlar.ts app.ts'ten SONRA birlestiriliyor. Sonuc:
+    const TDZ'de yakalandi, paket o satirda oldu, plan listesi hic cizilmedi.
+    Sayfa yine HTTP 200 donuyordu ve icinde tum metinler vardi -- yani
+    "dosyada su dize var mi" turu her dogrulama GECIYORDU.
+
+    Bu yuzden bu test dizeye degil, tarayicida FIILEN kosan pakete bakar:
+    paketin en sonunda tanimlanan tablo erisilebiliyor mu?"""
+    chrome = None
+    for aday in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                 "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"):
+        if os.path.exists(aday): chrome = aday; break
+    if not chrome:
+        raise AssertionError("ATLA: Chrome yok, paket acilisi tarayicida sinanamadi")
+    o = Ortam()
+    try:
+        G = o.modul()
+        # Hata toplayici paketten ONCE, prob paketten SONRA calisir.
+        toplayici = ("<script>window.__h=[];addEventListener('error',"
+                     "function(e){window.__h.push(String(e.message))});</script>")
+        prob = ("<script>(function(){var d='TABLO-YOK';try{"
+                "d=(typeof PLAN_ALANLARI!=='undefined'&&PLAN_ALANLARI.length>0)"
+                "?'ACILDI':'TABLO-YOK';}catch(e){d='TDZ:'+e.message;}"
+                "document.title='PROBE|'+d+'|'+(window.__h||[]).join(';');})();</script>")
+        html = G.HTML.replace("<script>", toplayici + "<script>", 1)
+        dogru(toplayici in html, "hata toplayici yerlestirilemedi")
+        html = html.replace("</body>", prob + "</body>")
+        yol = os.path.join(o.dizin, "paket.html")
+        with open(yol, "w", encoding="utf-8") as f: f.write(html)
+        r = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+                            "--virtual-time-budget=8000", "--dump-dom", "file://" + yol],
+                           capture_output=True, text=True, timeout=120)
+        m = re.search(r"PROBE\|([^|<]*)\|([^<]*)", r.stdout)
+        dogru(m, f"prob sonucu okunamadi (chrome cikti {r.returncode})")
+        durum, hatalar = m.group(1).strip(), m.group(2).strip()
+        dogru(durum == "ACILDI",
+              f"paket bastan sona kosmadi: {durum} / tarayici hatalari: {hatalar or '(yok)'}")
+        dogru("before initialization" not in hatalar,
+              f"acilista TDZ hatasi var: {hatalar}")
+        # Acilis paket bittikten sonraya ertelenmis olmali (sira degisirse de yasasin)
+        dogru('addEventListener("DOMContentLoaded", baslat)' in G.HTML
+              or "addEventListener('DOMContentLoaded', baslat)" in G.HTML,
+              "acilis DOMContentLoaded'a ertelenmis olmali")
+    finally: o.temizle()
+
+@test("misafir secici arayuze gomulu ve desen kutusuna bagli", "arayuz")
+def t_misafir_secici_arayuz():
+    """Secici deseni URETIR, desen kutusu sozlesme olarak gorunur kalir.
+    Kutucuk isaretlemek plana ne yazildigini gizlerse kullanici neyi
+    yedekledigini okuyamaz."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru('id="e-misafir"' in G.HTML, "misafir secici kabi gomulu olmali")
+        dogru('id="e-inc"' in G.HTML, "desen kutusu gorunur kalmali")
+        for f in ("function misafirSec", "function misafirCiz", "function incUyariCiz",
+                  "function incDuzelt", "function incJetonlar"):
+            dogru(f in G.HTML, f"{f} gomulu olmali")
+        # Secici listeyi cizen yol gercekten cagriliyor mu
+        dogru(re.search(r"misafirCiz\(j\.misafirler", G.HTML), "liste yuklenince secici cizilmeli")
+        dogru(re.search(r"incUyariCiz\(\);", G.HTML), "alt dize uyarisi da cizilmeli")
+        # Filtre KAPALI ile "hepsi isaretli" ayni sey degil; fark yazili olmali
+        dogru("ileride eklenecek misafirler dahil" in G.HTML,
+              "bos filtrenin ileriki misafirleri de kapsadigi soylenmeli")
+        dogru("kendiliğinden dahil olmaz" in G.HTML,
+              "acik filtrede yeni misafirin dahil OLMADIGI soylenmeli")
+        # Desen sessizce degistirilmemeli: yeniden yazildiginda kullaniciya denir
+        dogru("yeniden yazıldı" in G.HTML, "desen yeniden yazilinca haber verilmeli")
+        # Alt dize uyarisi ve tek tikla duzeltme
+        dogru("alt dize eşleşmesi" in G.HTML, "alt dize uyarisi gomulu olmali")
+        dogru(re.search(r'onclick="incDuzelt\(', G.HTML), "duzelt dugmesi bagli olmali")
     finally: o.temizle()
 
 @test("DURDURULAN KOSUDA HICBIR YEDEK SILINMEZ", "durdur")

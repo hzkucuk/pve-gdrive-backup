@@ -90,6 +90,22 @@ input[type=checkbox]{width:auto}
 .ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
+/* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
+   Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
+.msf-kut{display:flex;flex-wrap:wrap;gap:6px}
+.msf{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none;
+  background:#141a22;border:1px solid #2a3644;border-radius:8px;padding:5px 9px;font-size:12px}
+.msf:hover{border-color:#3d5570;background:#18202a}
+.msf input{margin:0;cursor:pointer;accent-color:#4a9eff}
+.msf.sec{background:#12291a;border-color:#1f4a2f}
+.msf .msf-ad{font-weight:600;color:#d6e2ee}
+.msf.sec .msf-ad{color:#7ee2a8}
+.msf .msf-bilgi{color:#7d8fa3;white-space:nowrap}
+.msf label{display:flex;align-items:center;gap:7px;cursor:pointer;margin:0}
+.msf-yalniz,.msf-hepsi{background:#1b2531;border:1px solid #2f3f52;color:#9fb4c9;
+  border-radius:6px;font-size:10px;padding:2px 6px;cursor:pointer}
+.msf-yalniz:hover,.msf-hepsi:hover{background:#24384f;color:#d6e2ee;border-color:#4a7096}
+.msf-hepsi{align-self:center;padding:5px 9px;font-size:11px}
 .hint{font-size:11px;color:#6e7c8c;margin-top:4px;line-height:1.45}
 .hint b{color:#9fb4c9}
 .eg{font-size:11px;color:#7d8fa3;background:#0f151d;border-left:2px solid #2d3d50;padding:5px 8px;margin-top:5px;border-radius:0 6px 6px 0}

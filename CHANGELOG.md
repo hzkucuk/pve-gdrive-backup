@@ -2,6 +2,77 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.10.0 — 2026-08-09
+
+### 🔴 1.9.0 arayüzü açılışta ölüyordu — düzeltildi
+
+1.9.0 canlıya gitti ve **arayüz hiç açılmadı**: sayfa yükleniyor, HTML'in içinde her şey
+var, ama plan listesi boş kalıyor ve hiçbir düğme iş görmüyordu.
+
+Sebep: `tsc` tüm arayüzü tek dosyada birleştiriyor (`outFile`) ve `app.ts`'in sonundaki
+açılış satırları `alanTipleriniUygula()` çağırıyordu. O işlev `alanlar.ts` içindeki
+`PLAN_ALANLARI` tablosunu okuyor, `alanlar.ts` ise `app.ts`'ten **sonra** birleştiriliyor.
+`const` bildirimi henüz çalışmadığı için çağrı TDZ'ye düştü:
+
+```
+Uncaught ReferenceError: Cannot access 'PLAN_ALANLARI' before initialization
+```
+
+Paket o satırda öldü; `refresh()` hiç koşmadı. Ölçüm (Chrome headless, `--dump-dom`):
+
+| sürüm | plan satırı | `PLAN_ALANLARI` | uygulama |
+|---|---|---|---|
+| 1.8.1 | 1 | hazır (45 alan) | açıldı |
+| 1.9.0 | **0** | **tanımsız** | **açılmadı** |
+| 1.10.0 | 1 | hazır (46 alan) | açıldı |
+
+Dosya sırasını değiştirmek çözüm değil: `alanlar.ts` de `app.ts`'teki `RX`'i kullanıyor,
+ters sırada `tsc` **TS2448** veriyor (denendi). Doğru çözüm açılışı ertelemek — artık
+`baslat()` `DOMContentLoaded` ile çağrılıyor, yani paketin tamamı yorumlandıktan sonra.
+Sıra ne olursa olsun tüm bildirimler hazır.
+
+> **Bu hatanın asıl dersi doğrulamada.** 1.9.0 "doğrulandı" diye raporlanmıştı: servis
+> `active`, HTTP 200, gömülü dosyada `id="e-inc"`, `alanTipleriniUygula`, `type="time"`
+> dizeleri **vardı**. Hepsi doğruydu ve hiçbiri arayüzün çalıştığını göstermiyordu.
+> Artık `gomulu arayuz paketi bastan sona kosuyor` testi paketi gerçek tarayıcıda
+> çalıştırıyor ve en sonda tanımlanan tabloya erişebiliyor mu diye bakıyor. Test,
+> 1.9.0 kodunda tam o hatayla düşüyor (ölçüldü).
+
+### Yedeklenecek misafirler kutucukla seçiliyor
+
+"Sadece 100 numaralı misafiri yedekle" demek için artık desen bilmek gerekmiyor.
+**2. Kaynak** adımında klasörde yedeği bulunan misafirler set/dosya/boyut bilgisiyle
+listeleniyor; **yalnız** düğmesi tek tıkla filtreyi o misafire ayarlıyor, kutucuklar
+ikinci bir misafiri ekleyip çıkarıyor. Seçim, desen kutusunu **görünür şekilde**
+yazıyor — sözleşme hâlâ desen, sadece doğrusunu yazmak kolaylaştı.
+
+Üretilen kalıp alan hedeflidir (`vzdump-lxc-100-*`), çünkü sezgisel olan `*100*` bir
+alt dize eşleşmesidir. Ölçüldü: `*100*` deseni `vzdump-lxc-1001-…` ve
+`vzdump-qemu-2100-…` dosyalarını da alıyor — bugün klasörde öyle bir misafir olmasa
+bile desen plana yazılır ve **yarın eklenen** misafirde sessizce devreye girer. Elle
+`*100*` yazan kullanıcıya artık uyarı ve tek tıkla **Düzelt** düğmesi çıkıyor.
+
+Gerçek tarayıcıda ölçülen akış (Chrome headless, gerçek sunucu, 60 dosyalık gerçek
+dosya adları):
+
+| adım | desen kutusu | yüklenir | filtre dışı |
+|---|---|---|---|
+| filtre boş | *(boş)* | 60 | 0 |
+| `yalnız` → lxc-100 | `vzdump-lxc-100-*` | 12 | 48 |
+| + qemu-105 kutucuğu | `vzdump-lxc-100-* vzdump-qemu-105-*` | 24 | 36 |
+| elle `*100*` | uyarı çıkar | 12 | 48 |
+| **Düzelt** | `vzdump-*-100-*` | 12 | 48 |
+
+> **Yanlış bir uyarı da düzeltildi.** 1.9.0 notlarında `*100*` deseninin `.log` ve
+> `.tar.zst.notes` dosyalarını "saklama dışı" bırakacağı yazıyordu — **yanlış**.
+> `dump_regex` baştan eşleşiyor (`.match`), bu yüzden arşiv, log ve notes aynı sete
+> giriyor ve arşivle **birlikte** siliniyor. Gerçek dosya adlarıyla ölçüldü:
+> `*100*` → 12 dosya yüklenir, `saklama_disi = 0`, `collect_sets` 12 dosyanın 12'sini
+> de bir sete koyuyor. Filtre kullanmak Drive'da artık dosya biriktirmiyor.
+
+Testler: **126 geçti, 0 kaldı** (1.9.0'da 122). Yeni testlerin dördü 1.9.0 kodunda
+düşüyor — ölçüldüğü doğrulandı.
+
 ## 1.9.0 — 2026-08-09
 
 ### Yedeklenecek dosyalar desenle seçilebiliyor

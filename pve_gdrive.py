@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.9.0"
+SURUM = "1.10.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -1557,6 +1557,26 @@ def kok_icinde_mi(yol):
         yut("kok_icinde_mi", e); return False
     return any(p == r or p.startswith(r + os.sep) for r in gezinti_kokleri())
 
+def _misafir_kimlik(m):
+    """dump_regex eslesmesinden (tip, vmid) cikarir; cikaramazsa ("", "").
+
+    Kalip kullanici tarafindan degistirilebilir (ayarlardaki dump_regex). Ozel
+    bir kalipta 2. ve 3. grup olmayabilir; o durumda misafir bilgisi yok sayilir
+    ve arayuz seciciyi gostermez. Hata verilmez -- liste yine cizilir."""
+    if not m: return ("", "")
+    try:
+        return (str(m.group(2) or ""), str(m.group(3) or ""))
+    except IndexError:
+        return ("", "")
+
+def misafir_deseni(tip, vmid):
+    """Bir misafiri TAM hedefleyen rclone deseni.
+
+    Neden "*100*" degil: alt dize eslesmesi lxc-1001 ve qemu-2100 gibi ileride
+    eklenecek misafirleri de sessizce kapar (olculdu 2026-08-09). Alan hedefli
+    kalip vmid'yi iki tire arasinda arar, bu yuzden yalnizca o misafiri alir."""
+    return f"vzdump-{tip}-{vmid}-*" if tip and vmid else ""
+
 def kaynak_dosyalar(src_dir, p=None, limit=None):
     """Kaynak klasordeki dosyalari, her birinin basina ne gelecegiyle listeler.
 
@@ -1578,6 +1598,7 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
     min_age = float(p.get("min_age_min") or 0)
     simdi = time.time()
     kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0; filtre_disi = 0
+    misafirler = {}
     for ad in adlar:
         yol = os.path.join(src_dir, ad)
         try:
@@ -1590,7 +1611,10 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         yas_dk = (simdi - mtime) / 60.0
         uyar, desen = _desen_uyar(ad, desenler)
         dahil, dahil_d = (True, "") if not dahil_desen else _dahil_uyar(ad, dahil_desen)
-        dump = bool(re_d.match(ad)); konf = bool(RE_HOSTCONF.match(ad))
+        m_d = re_d.match(ad)
+        dump = bool(m_d); konf = bool(RE_HOSTCONF.match(ad))
+        m_tip, m_vmid = _misafir_kimlik(m_d)
+        misafir = f"{m_tip}-{m_vmid}" if m_tip and m_vmid else ""
         if uyar is None:
             durum, neden = "belirsiz", f"desen elle degerlendirilmeli: {desen}"
         elif uyar:
@@ -1618,11 +1642,35 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         kayitlar.append({"ad": ad, "boyut": boyut, "mtime": int(mtime),
                          "yas_dk": int(yas_dk), "durum": durum, "neden": neden,
                          "desen": desen or "", "min_age": int(min_age),
-                         "dahil_desen": dahil_d or "",
+                         "dahil_desen": dahil_d or "", "misafir": misafir,
                          "dump": dump, "konf": konf})
+        # Misafir ozeti: "sadece 100'u yedekle" karari dosya adi yazarak degil
+        # misafir secerek verilebilsin. Sayilar dosyadan turer, tahmin yok.
+        if misafir:
+            g = misafirler.setdefault(misafir, {
+                "ad": misafir, "tip": m_tip, "vmid": m_vmid,
+                "desen": misafir_deseni(m_tip, m_vmid),
+                "dosya": 0, "boyut": 0, "yuklenir": 0, "yuk_boyut": 0,
+                "dahil": 0, "_setler": set()})
+            g["dosya"] += 1; g["boyut"] += boyut
+            try: g["_setler"].add(m_d.group(1))
+            except IndexError: pass
+            if dahil is True: g["dahil"] += 1
+            if durum == "yuklenir":
+                g["yuklenir"] += 1; g["yuk_boyut"] += boyut
     kayitlar.sort(key=lambda k: -k["mtime"])
+    m_liste = []
+    for g in misafirler.values():
+        # secili: filtre kapaliyken HEPSI secilidir (klasordeki her sey yuklenir).
+        # Aciksa dosyalari fiilen desene uyan misafir secili sayilir -- istemci
+        # kendi glob motorunu calistirmaz, gercek eslesmeyi burasi bilir.
+        g = dict(g, set=len(g.pop("_setler")))
+        g["secili"] = (not dahil_desen) or g["dahil"] > 0
+        m_liste.append(g)
+    m_liste.sort(key=lambda g: (g["tip"], int(g["vmid"]) if g["vmid"].isdigit() else 0))
     return {"ok": True, "toplam_dosya": len(kayitlar), "toplam_boyut": toplam,
             "yuklenecek": yuklenecek, "saklama_disi": saklama_disi,
+            "misafirler": m_liste,
             "filtre_disi": filtre_disi, "filtre_acik": bool(dahil_desen),
             "limit": lim, "kirpildi": len(kayitlar) > lim,
             "dosyalar": kayitlar[:lim]}
@@ -5327,6 +5375,22 @@ input[type=checkbox]{width:auto}
 .ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
+/* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
+   Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
+.msf-kut{display:flex;flex-wrap:wrap;gap:6px}
+.msf{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none;
+  background:#141a22;border:1px solid #2a3644;border-radius:8px;padding:5px 9px;font-size:12px}
+.msf:hover{border-color:#3d5570;background:#18202a}
+.msf input{margin:0;cursor:pointer;accent-color:#4a9eff}
+.msf.sec{background:#12291a;border-color:#1f4a2f}
+.msf .msf-ad{font-weight:600;color:#d6e2ee}
+.msf.sec .msf-ad{color:#7ee2a8}
+.msf .msf-bilgi{color:#7d8fa3;white-space:nowrap}
+.msf label{display:flex;align-items:center;gap:7px;cursor:pointer;margin:0}
+.msf-yalniz,.msf-hepsi{background:#1b2531;border:1px solid #2f3f52;color:#9fb4c9;
+  border-radius:6px;font-size:10px;padding:2px 6px;cursor:pointer}
+.msf-yalniz:hover,.msf-hepsi:hover{background:#24384f;color:#d6e2ee;border-color:#4a7096}
+.msf-hepsi{align-self:center;padding:5px 9px;font-size:11px}
 .hint{font-size:11px;color:#6e7c8c;margin-top:4px;line-height:1.45}
 .hint b{color:#9fb4c9}
 .eg{font-size:11px;color:#7d8fa3;background:#0f151d;border-left:2px solid #2d3d50;padding:5px 8px;margin-top:5px;border-radius:0 6px 6px 0}
@@ -5527,12 +5591,19 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
   <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="f"><label class="tip" title="Klasörde yedeği bulunan misafirler. İşaretlediklerin yedeklenir; hiçbirine dokunmazsan hepsi yedeklenir.">Yedeklenecek misafirler</label>
+      <div><div id="e-misafir" class="msf-kut"><span class="hint">Kaynak klasörü seçip
+        <b>Dosyaları listele</b>'ye bas — klasördeki misafirler burada çıkar.</span></div>
+        <div class="eg" id="e-misafir-not"></div></div></div>
     <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
-      <div><input id="e-inc" placeholder="*100* *101*" onchange="kaynakListeYukle(true)">
+      <div><input id="e-inc" placeholder="hepsi" onchange="kaynakListeYukle(true)">
         <div class="errmsg" id="err-inc"></div>
-        <div class="eg">Boşlukla ayır. <b>Boş bırakırsan hepsi yüklenir.</b>
-          Örnek: <code>*100*</code> → yalnızca adında <b>100</b> geçen dosyalar;
-          <code>vzdump-qemu-*</code> → yalnızca VM'ler.
+        <div id="e-inc-uyari"></div>
+        <div class="eg">Yukarıdan misafir işaretlersen bu kutu kendiliğinden yazılır;
+          elle de düzenleyebilirsin. Boşlukla ayır — birden fazla desen yazarsan
+          <b>herhangi birine</b> uyan dosya yüklenir. <b>Boş bırakırsan hepsi yüklenir.</b>
+          Örnek: <code>vzdump-lxc-100-*</code> → yalnızca 100 nolu CT;
+          <code>vzdump-qemu-*</code> → yalnızca VM'ler; <code>*.tar.zst</code> → yalnızca arşivler.
           <b>Atlanacak desenler her zaman önce işler</b>, yani <code>*.tmp</code> filtreye uysa bile yüklenmez.
           Aşağıdaki liste hangi dosyanın gideceğini tek tek gösterir.</div></div></div>
     <div class="btns" style="margin-bottom:8px">
@@ -8309,6 +8380,123 @@ async function savePlan() {
         void refresh();
     }
 }
+/* ---------- misafir secici ----------
+ * "Yalnizca 100 nolu misafiri yedekle" karari desen yazmayi gerektirmemeli.
+ * Kutucuklar deseni URETIR, desen kutusu sozlesme olarak kalir ve gorunur --
+ * kullanici ne uzerinde anlastigimizi her zaman okuyabilir.
+ */
+let sonMisafirler = [];
+let misafirNot = "";
+/** Desen kutusundaki jetonlar. Bosluk ayirir; bos jeton atilir. */
+function incJetonlar() {
+    return val("e-inc").trim().split(/\s+/).filter((x) => x.length > 0);
+}
+function incYaz(jet) {
+    setVal("e-inc", jet.join(" "));
+    markDirty();
+    void kaynakListeYukle(true);
+}
+/** Kutucuk degisti. Yalnizca misafirin KENDI jetonuna dokunulur; serbest
+ *  yazilmis desenler (or. *.tar.zst) oldugu gibi korunur. */
+function misafirSec(desen, seciliydi) {
+    let jet = incJetonlar();
+    const hepsi = sonMisafirler.map((m) => m.desen).filter((x) => x.length > 0);
+    misafirNot = "";
+    if (!seciliydi) {
+        if (jet.indexOf(desen) < 0)
+            jet.push(desen);
+    }
+    else if (jet.indexOf(desen) >= 0) {
+        jet = jet.filter((x) => x !== desen);
+    }
+    else if (!jet.length) {
+        // Filtre bostu, yani "hepsi". Bir misafir cikarilinca kalanlar acikca yazilir.
+        jet = hepsi.filter((x) => x !== desen);
+        misafirNot = C("Filtre boştu; kalan misafirler desen olarak yazıldı.");
+    }
+    else {
+        // Secim serbest bir desenden geliyordu (or. *100*). O deseni delemeyiz;
+        // secili misafirleri acik kaliba cevirir ve bunu SOYLERIZ -- sessizce
+        // kullanicinin yazdigi deseni degistirmek en kotusu olurdu.
+        jet = sonMisafirler.filter((m) => m.secili && m.desen !== desen).map((m) => m.desen);
+        misafirNot = C("Desen, misafir seçimine göre yeniden yazıldı.");
+    }
+    // Hepsi secili kaldiysa filtreyi tamamen kaldir: hem daha kisa, hem de
+    // ileride eklenecek bir misafiri kendiliginden kapsar.
+    const yalnizMisafir = jet.every((x) => hepsi.indexOf(x) >= 0);
+    if (yalnizMisafir && hepsi.length > 0 && jet.length === hepsi.length) {
+        jet = [];
+        misafirNot = C("Hepsi işaretli — filtre kaldırıldı, klasördeki her şey yüklenir.");
+    }
+    incYaz(jet);
+}
+/** "Yalnizca bunu yedekle" — tek tik. Filtre bosken 'sadece 100' demek icin
+ *  diger dorde tek tek dokunmak gerekiyordu; asil senaryo en kisa yol olmali.
+ *  Kutuyu tamamen bu misafire yazar: dahil etme desenleri VEYA ile birlesir,
+ *  yani eski desenleri korumak "yalnizca" sozunu bozardi. */
+function misafirYalniz(desen) {
+    misafirNot = C("Filtre yalnızca bu misafire ayarlandı.");
+    incYaz([desen]);
+}
+/** Filtreyi tamamen kaldirir: klasordeki her sey yuklenir. */
+function misafirHepsi() {
+    misafirNot = C("Filtre kaldırıldı.");
+    incYaz([]);
+}
+function misafirCiz(list, filtreAcik) {
+    sonMisafirler = list;
+    if (!list.length) {
+        setHtml("e-misafir", '<span class="hint">'
+            + C("Bu klasörde ad kalıbına uyan misafir yedeği yok. Desen kutusunu elle kullanabilirsin.")
+            + "</span>");
+        setHtml("e-misafir-not", "");
+        return;
+    }
+    setHtml("e-misafir", list.map((m) => '<div class="msf' + (m.secili ? " sec" : "") + '">'
+        + '<label><input type="checkbox"' + (m.secili ? " checked" : "")
+        + ' onchange="misafirSec(\'' + esc(m.desen) + "', " + (m.secili ? "true" : "false") + ')">'
+        + '<span class="msf-ad">' + esc(m.ad) + "</span></label>"
+        + '<span class="msf-bilgi">' + m.set + C(" set · ") + m.dosya + C(" dosya · ")
+        + hb(m.boyut) + "</span>"
+        + '<button type="button" class="msf-yalniz" title="' + C("Yalnızca bunu yedekle")
+        + '" onclick="misafirYalniz(\'' + esc(m.desen) + '\')">' + C("yalnız") + "</button>"
+        + "</div>").join("")
+        + (filtreAcik
+            ? '<button type="button" class="msf-hepsi" onclick="misafirHepsi()">'
+                + C("hepsini yedekle") + "</button>"
+            : ""));
+    // Filtrenin KAPALI olmasi ile "hepsi isaretli" ayni sey degil: kapali filtre
+    // ileride eklenecek misafirleri de kapsar. Fark yazili olarak soylenir.
+    const not = filtreAcik
+        ? C("Yalnızca işaretli misafirler yedeklenir. Sonradan eklenen bir misafir "
+            + "kendiliğinden dahil olmaz — buradan işaretlemen gerekir.")
+        : C("Filtre boş: klasördeki her şey yedeklenir, ileride eklenecek misafirler dahil.");
+    setHtml("e-misafir-not", (misafirNot ? "<b>" + esc(misafirNot) + "</b> " : "") + esc(not));
+    misafirNot = "";
+}
+/** Alt dize tuzagi. Olculdu 2026-08-09: "*100*" kalibi lxc-1001 ve qemu-2100
+ *  dosyalarini da yakaliyor. Bugun klasorde oyle bir misafir olmayabilir; desen
+ *  ise plana yazilir ve YARIN eklenen misafirde sessizce devreye girer. */
+function incUyariCiz() {
+    const riskli = incJetonlar().filter((x) => /^\*\d+\*$/.test(x));
+    if (!riskli.length) {
+        setHtml("e-inc-uyari", "");
+        return;
+    }
+    setHtml("e-inc-uyari", riskli.map((x) => {
+        const sayi = x.replace(/\*/g, "");
+        const oneri = "vzdump-*-" + sayi + "-*";
+        return '<div class="uyari-metin">⚠ <code>' + esc(x) + "</code> "
+            + C("alt dize eşleşmesi: ileride ") + "<code>lxc-" + esc(sayi) + "1</code>"
+            + C(" gibi bir misafir eklenirse onu da kapar. Önerilen: ")
+            + "<code>" + esc(oneri) + "</code> "
+            + '<button class="sm" onclick="incDuzelt(\'' + esc(x) + "', '" + esc(oneri)
+            + '\')">' + C("Düzelt") + "</button></div>";
+    }).join(""));
+}
+function incDuzelt(eski, yeni) {
+    incYaz(incJetonlar().map((x) => (x === eski ? yeni : x)));
+}
 /** Kaynak klasorde GERCEKTE ne var. Sayilar degil dosyalar: "yedeklendi mi"
  *  sorusu dosya duzeyinde sorulur, ozet ortalamalar bunu gizler. */
 async function kaynakListeYukle(yenile) {
@@ -8341,6 +8529,8 @@ async function kaynakListeYukle(yenile) {
         setHtml("ksl-liste", "");
         return;
     }
+    misafirCiz(j.misafirler || [], !!j.filtre_acik);
+    incUyariCiz();
     const d = j.dosyalar || [];
     const ozet = [
         (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
@@ -9505,12 +9695,34 @@ function menuleriTanimla() {
     sagTik(".panel table tbody tr", satirMenusu);
     sagTik("#plans, .wrap > header, #detail", genelMenu);
 }
-dilBaslat();
-alanTipleriniUygula();
-surukleKur();
-menuKur();
-menuleriTanimla();
-void refresh().then(taslakSor);
+/* Acilis, paketin TAMAMI yorumlandiktan sonra kosar.
+ *
+ * Neden: tsc tek dosyaya birlestiriyor (outFile) ve bu satirlar app.ts'in
+ * sonunda. Baska bir dosyada `const` ile tanimlanmis bir tablo app.ts'ten
+ * SONRA birlestirilirse, buradaki cagri onu TDZ'de yakalar ve
+ * "Cannot access before initialization" ile paket oracikta olur: arayuz
+ * yuklenir ama hicbir sey cizilmez. 1.9.0'da tam bu oldu -- acilistaki
+ * alanTipleriniUygula() cagrisi, alanlar.ts'teki PLAN_ALANLARI'yi TDZ'de
+ * yakaladi ve plan listesi bos kaldi (olculdu 2026-08-09, Chrome headless).
+ *
+ * Dosya sirasini degistirmek cozum DEGIL: alanlar.ts de app.ts'teki RX'i
+ * kullaniyor, tsc ters sirada TS2448 veriyor. Dogru cozum cagriyi ertelemek --
+ * DOMContentLoaded betik bittikten sonra tetiklenir, sira ne olursa olsun
+ * tum bildirimler hazirdir. */
+function baslat() {
+    dilBaslat();
+    alanTipleriniUygula();
+    surukleKur();
+    menuKur();
+    menuleriTanimla();
+    void refresh().then(taslakSor);
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", baslat);
+}
+else {
+    baslat();
+}
 /**
  * Plan formu alan tablosu.
  *

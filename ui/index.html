@@ -77,12 +77,19 @@
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
   <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="f"><label class="tip" title="Klasörde yedeği bulunan misafirler. İşaretlediklerin yedeklenir; hiçbirine dokunmazsan hepsi yedeklenir.">Yedeklenecek misafirler</label>
+      <div><div id="e-misafir" class="msf-kut"><span class="hint">Kaynak klasörü seçip
+        <b>Dosyaları listele</b>'ye bas — klasördeki misafirler burada çıkar.</span></div>
+        <div class="eg" id="e-misafir-not"></div></div></div>
     <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
-      <div><input id="e-inc" placeholder="*100* *101*" onchange="kaynakListeYukle(true)">
+      <div><input id="e-inc" placeholder="hepsi" onchange="kaynakListeYukle(true)">
         <div class="errmsg" id="err-inc"></div>
-        <div class="eg">Boşlukla ayır. <b>Boş bırakırsan hepsi yüklenir.</b>
-          Örnek: <code>*100*</code> → yalnızca adında <b>100</b> geçen dosyalar;
-          <code>vzdump-qemu-*</code> → yalnızca VM'ler.
+        <div id="e-inc-uyari"></div>
+        <div class="eg">Yukarıdan misafir işaretlersen bu kutu kendiliğinden yazılır;
+          elle de düzenleyebilirsin. Boşlukla ayır — birden fazla desen yazarsan
+          <b>herhangi birine</b> uyan dosya yüklenir. <b>Boş bırakırsan hepsi yüklenir.</b>
+          Örnek: <code>vzdump-lxc-100-*</code> → yalnızca 100 nolu CT;
+          <code>vzdump-qemu-*</code> → yalnızca VM'ler; <code>*.tar.zst</code> → yalnızca arşivler.
           <b>Atlanacak desenler her zaman önce işler</b>, yani <code>*.tmp</code> filtreye uysa bile yüklenmez.
           Aşağıdaki liste hangi dosyanın gideceğini tek tek gösterir.</div></div></div>
     <div class="btns" style="margin-bottom:8px">

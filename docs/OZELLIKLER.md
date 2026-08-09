@@ -52,6 +52,7 @@ hangi planın vaktinin geldiğine kod karar verir. Kaçırılan çalışma telaf
 | `min_age_min` | `10` | Sadece bu kadar dakikadır değişmemiş dosyaları yükle |
 | `skip_patterns` | `["*.dat","*.tmp","*.part"]` | Yazılmakta olan dosyalar, hiç yüklenmez |
 | `include_patterns` | `[]` | **Boş = hepsi.** Doluysa yalnızca bu desenlere uyan dosyalar yüklenir (ör. `*100*`). `skip_patterns` her zaman önce işler |
+| *(misafir seçici)* | — | **2. Kaynak** adımındaki kutucuklar. `yalnız` tek tıkla filtreyi o misafire ayarlar, seçim `include_patterns`'a `vzdump-<tip>-<id>-*` olarak yazılır |
 | `prune_on_failure` | `false` | Yükleme başarısızsa retention çalışsın mı. **Kapalı bırak** |
 
 vzdump tespiti üç bağımsız sinyalle yapılır: `/run/vzdump.lock` kilidi, `pgrep -f` ile süreç

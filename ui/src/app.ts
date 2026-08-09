@@ -1116,14 +1116,139 @@ async function savePlan(): Promise<void> {
 interface KaynakDosya {
   ad: string; boyut: number; mtime: number; yas_dk: number;
   durum: string; neden: string; desen: string; min_age: number;
-  dahil_desen: string;
+  dahil_desen: string; misafir: string;
   dump: boolean; konf: boolean;
+}
+interface Misafir {
+  ad: string; tip: string; vmid: string; desen: string;
+  dosya: number; set: number; boyut: number;
+  yuklenir: number; yuk_boyut: number; secili: boolean;
 }
 interface KaynakListe {
   ok: boolean; hata?: string; toplam_dosya?: number; toplam_boyut?: number;
   yuklenecek?: number; saklama_disi?: number; limit?: number; kirpildi?: boolean;
   filtre_disi?: number; filtre_acik?: boolean;
+  misafirler?: Misafir[];
   dosyalar?: KaynakDosya[];
+}
+
+/* ---------- misafir secici ----------
+ * "Yalnizca 100 nolu misafiri yedekle" karari desen yazmayi gerektirmemeli.
+ * Kutucuklar deseni URETIR, desen kutusu sozlesme olarak kalir ve gorunur --
+ * kullanici ne uzerinde anlastigimizi her zaman okuyabilir.
+ */
+let sonMisafirler: Misafir[] = [];
+let misafirNot = "";
+
+/** Desen kutusundaki jetonlar. Bosluk ayirir; bos jeton atilir. */
+function incJetonlar(): string[] {
+  return val("e-inc").trim().split(/\s+/).filter((x) => x.length > 0);
+}
+
+function incYaz(jet: string[]): void {
+  setVal("e-inc", jet.join(" "));
+  markDirty();
+  void kaynakListeYukle(true);
+}
+
+/** Kutucuk degisti. Yalnizca misafirin KENDI jetonuna dokunulur; serbest
+ *  yazilmis desenler (or. *.tar.zst) oldugu gibi korunur. */
+function misafirSec(desen: string, seciliydi: boolean): void {
+  let jet = incJetonlar();
+  const hepsi = sonMisafirler.map((m) => m.desen).filter((x) => x.length > 0);
+  misafirNot = "";
+  if (!seciliydi) {
+    if (jet.indexOf(desen) < 0) jet.push(desen);
+  } else if (jet.indexOf(desen) >= 0) {
+    jet = jet.filter((x) => x !== desen);
+  } else if (!jet.length) {
+    // Filtre bostu, yani "hepsi". Bir misafir cikarilinca kalanlar acikca yazilir.
+    jet = hepsi.filter((x) => x !== desen);
+    misafirNot = C("Filtre boştu; kalan misafirler desen olarak yazıldı.");
+  } else {
+    // Secim serbest bir desenden geliyordu (or. *100*). O deseni delemeyiz;
+    // secili misafirleri acik kaliba cevirir ve bunu SOYLERIZ -- sessizce
+    // kullanicinin yazdigi deseni degistirmek en kotusu olurdu.
+    jet = sonMisafirler.filter((m) => m.secili && m.desen !== desen).map((m) => m.desen);
+    misafirNot = C("Desen, misafir seçimine göre yeniden yazıldı.");
+  }
+  // Hepsi secili kaldiysa filtreyi tamamen kaldir: hem daha kisa, hem de
+  // ileride eklenecek bir misafiri kendiliginden kapsar.
+  const yalnizMisafir = jet.every((x) => hepsi.indexOf(x) >= 0);
+  if (yalnizMisafir && hepsi.length > 0 && jet.length === hepsi.length) {
+    jet = [];
+    misafirNot = C("Hepsi işaretli — filtre kaldırıldı, klasördeki her şey yüklenir.");
+  }
+  incYaz(jet);
+}
+
+/** "Yalnizca bunu yedekle" — tek tik. Filtre bosken 'sadece 100' demek icin
+ *  diger dorde tek tek dokunmak gerekiyordu; asil senaryo en kisa yol olmali.
+ *  Kutuyu tamamen bu misafire yazar: dahil etme desenleri VEYA ile birlesir,
+ *  yani eski desenleri korumak "yalnizca" sozunu bozardi. */
+function misafirYalniz(desen: string): void {
+  misafirNot = C("Filtre yalnızca bu misafire ayarlandı.");
+  incYaz([desen]);
+}
+
+/** Filtreyi tamamen kaldirir: klasordeki her sey yuklenir. */
+function misafirHepsi(): void {
+  misafirNot = C("Filtre kaldırıldı.");
+  incYaz([]);
+}
+
+function misafirCiz(list: Misafir[], filtreAcik: boolean): void {
+  sonMisafirler = list;
+  if (!list.length) {
+    setHtml("e-misafir", '<span class="hint">'
+      + C("Bu klasörde ad kalıbına uyan misafir yedeği yok. Desen kutusunu elle kullanabilirsin.")
+      + "</span>");
+    setHtml("e-misafir-not", ""); return;
+  }
+  setHtml("e-misafir", list.map((m) =>
+    '<div class="msf' + (m.secili ? " sec" : "") + '">'
+    + '<label><input type="checkbox"' + (m.secili ? " checked" : "")
+    + ' onchange="misafirSec(\'' + esc(m.desen) + "', " + (m.secili ? "true" : "false") + ')">'
+    + '<span class="msf-ad">' + esc(m.ad) + "</span></label>"
+    + '<span class="msf-bilgi">' + m.set + C(" set · ") + m.dosya + C(" dosya · ")
+    + hb(m.boyut) + "</span>"
+    + '<button type="button" class="msf-yalniz" title="' + C("Yalnızca bunu yedekle")
+    + '" onclick="misafirYalniz(\'' + esc(m.desen) + '\')">' + C("yalnız") + "</button>"
+    + "</div>").join("")
+    + (filtreAcik
+      ? '<button type="button" class="msf-hepsi" onclick="misafirHepsi()">'
+        + C("hepsini yedekle") + "</button>"
+      : ""));
+  // Filtrenin KAPALI olmasi ile "hepsi isaretli" ayni sey degil: kapali filtre
+  // ileride eklenecek misafirleri de kapsar. Fark yazili olarak soylenir.
+  const not = filtreAcik
+    ? C("Yalnızca işaretli misafirler yedeklenir. Sonradan eklenen bir misafir "
+      + "kendiliğinden dahil olmaz — buradan işaretlemen gerekir.")
+    : C("Filtre boş: klasördeki her şey yedeklenir, ileride eklenecek misafirler dahil.");
+  setHtml("e-misafir-not", (misafirNot ? "<b>" + esc(misafirNot) + "</b> " : "") + esc(not));
+  misafirNot = "";
+}
+
+/** Alt dize tuzagi. Olculdu 2026-08-09: "*100*" kalibi lxc-1001 ve qemu-2100
+ *  dosyalarini da yakaliyor. Bugun klasorde oyle bir misafir olmayabilir; desen
+ *  ise plana yazilir ve YARIN eklenen misafirde sessizce devreye girer. */
+function incUyariCiz(): void {
+  const riskli = incJetonlar().filter((x) => /^\*\d+\*$/.test(x));
+  if (!riskli.length) { setHtml("e-inc-uyari", ""); return; }
+  setHtml("e-inc-uyari", riskli.map((x) => {
+    const sayi = x.replace(/\*/g, "");
+    const oneri = "vzdump-*-" + sayi + "-*";
+    return '<div class="uyari-metin">⚠ <code>' + esc(x) + "</code> "
+      + C("alt dize eşleşmesi: ileride ") + "<code>lxc-" + esc(sayi) + "1</code>"
+      + C(" gibi bir misafir eklenirse onu da kapar. Önerilen: ")
+      + "<code>" + esc(oneri) + "</code> "
+      + '<button class="sm" onclick="incDuzelt(\'' + esc(x) + "', '" + esc(oneri)
+      + '\')">' + C("Düzelt") + "</button></div>";
+  }).join(""));
+}
+
+function incDuzelt(eski: string, yeni: string): void {
+  incYaz(incJetonlar().map((x) => (x === eski ? yeni : x)));
 }
 
 /** Kaynak klasorde GERCEKTE ne var. Sayilar degil dosyalar: "yedeklendi mi"
@@ -1148,6 +1273,8 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     setHtml("ksl-ozet", '<span class="kap-hata">⚠ ' + esc(j.hata || C("okunamadı")) + "</span>");
     setHtml("ksl-liste", ""); return;
   }
+  misafirCiz(j.misafirler || [], !!j.filtre_acik);
+  incUyariCiz();
   const d = j.dosyalar || [];
   const ozet = [
     (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
@@ -2177,9 +2304,31 @@ function menuleriTanimla(): void {
   sagTik("#plans, .wrap > header, #detail", genelMenu);
 }
 
-dilBaslat();
-alanTipleriniUygula();
-surukleKur();
-menuKur();
-menuleriTanimla();
-void refresh().then(taslakSor);
+/* Acilis, paketin TAMAMI yorumlandiktan sonra kosar.
+ *
+ * Neden: tsc tek dosyaya birlestiriyor (outFile) ve bu satirlar app.ts'in
+ * sonunda. Baska bir dosyada `const` ile tanimlanmis bir tablo app.ts'ten
+ * SONRA birlestirilirse, buradaki cagri onu TDZ'de yakalar ve
+ * "Cannot access before initialization" ile paket oracikta olur: arayuz
+ * yuklenir ama hicbir sey cizilmez. 1.9.0'da tam bu oldu -- acilistaki
+ * alanTipleriniUygula() cagrisi, alanlar.ts'teki PLAN_ALANLARI'yi TDZ'de
+ * yakaladi ve plan listesi bos kaldi (olculdu 2026-08-09, Chrome headless).
+ *
+ * Dosya sirasini degistirmek cozum DEGIL: alanlar.ts de app.ts'teki RX'i
+ * kullaniyor, tsc ters sirada TS2448 veriyor. Dogru cozum cagriyi ertelemek --
+ * DOMContentLoaded betik bittikten sonra tetiklenir, sira ne olursa olsun
+ * tum bildirimler hazirdir. */
+function baslat(): void {
+  dilBaslat();
+  alanTipleriniUygula();
+  surukleKur();
+  menuKur();
+  menuleriTanimla();
+  void refresh().then(taslakSor);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", baslat);
+} else {
+  baslat();
+}
