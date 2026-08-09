@@ -10,6 +10,7 @@ let authTimer = 0;
 let refTimer = 0;
 let LOGSRC = "all";
 let dirty = false;
+let kotaTimer = 0;          // kota olculurken kisa araliktaki tazeleme
 let running = 0;
 
 const WD = ["Pzt", "Sal", C("Çar"), "Per", "Cum", "Cmt", "Paz"];
@@ -542,8 +543,24 @@ function ceviriUygula(): void { if (dilAl() !== "tr") sayfayiCevir(); }
 function hesapSerit(): void {
   const h = (S && S.hesaplar) || [];
   if (!h.length) { setHtml("hesapserit", ""); return; }
+  // Olculmeyi bekleyen hesap varsa kisa surede tekrar bak. SSE bunu zaten
+  // itiyor ama akis kapali ya da vekil arkasinda bogulmus olabilir; o zaman
+  // yoklama 60 sn'de bir dondugu icin kullanici bir dakika boyunca yanlis
+  // sey gorurdu.
+  const bekleyen = h.some((x) => (x.quota || {}).bekliyor);
+  window.clearTimeout(kotaTimer);
+  if (bekleyen) kotaTimer = window.setTimeout(() => void refresh(), 3000);
   setHtml("hesapserit", h.map((x) => {
     const q = x.quota || {};
+    // "Olculuyor" ile "okunamadi" ayni sey degil: ilki gecici ve normal,
+    // ikincisi mudahale ister. Ikisini ayni kirmizi kartta gostermek
+    // kullaniciya her acilista var olmayan bir ariza bildiriyordu.
+    if (q.bekliyor) {
+      return '<div class="hesap" onclick="openAccounts()"><div class="ad"><b>'
+        + esc(x.name) + "</b><span>…</span></div>"
+        + '<div class="mini olcu"><i style="width:100%"></i></div>'
+        + '<div class="alt">' + C("kota ölçülüyor…") + "</div></div>";
+    }
     if (!q.ok) {
       return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
         + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '

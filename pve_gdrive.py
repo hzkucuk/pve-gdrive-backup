@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.10.0"
+SURUM = "1.10.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -2992,10 +2992,18 @@ _KOTA_ISLER = set()
 
 def _kota_arkaplan(name):
     """Kotayi arka planda tazeler. Olculdu: bir 'rclone about' cagrisi 34 sn
-    surebiliyor; bunu /api/status icinde beklemek arayuzu kilitler."""
+    surebiliyor; bunu /api/status icinde beklemek arayuzu kilitler.
+
+    Bitince durum olayi yollanir. Yollamazsak kimse haber vermez: kota
+    bellekte durur, state.json degismedigi icin izleyici de bir sey yaymaz ve
+    acik duran arayuz veriyi ancak 60 sn'lik yoklamada ya da kullanici elle
+    yeniledi diye gorur. Olculdu 2026-08-09: veri 3,2 sn'de hazirdi, 14 sn
+    boyunca TEK bir olay bile gitmedi."""
     try:
         veri = remote_quota(name)
         _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
+        if OLAY.abone_sayisi():
+            olay_yolla("durum", public_status())
     except Exception as e:
         yut("_kota_arkaplan", e)
     finally:
@@ -5377,6 +5385,10 @@ input[type=checkbox]{width:auto}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
+/* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */
+.mini.olcu i{background:linear-gradient(90deg,#1f2a37 25%,#3d5570 50%,#1f2a37 75%);
+  background-size:200% 100%;animation:olcuAkis 1.2s linear infinite}
+@keyframes olcuAkis{from{background-position:200% 0}to{background-position:-200% 0}}
 .msf-kut{display:flex;flex-wrap:wrap;gap:6px}
 .msf{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none;
   background:#141a22;border:1px solid #2a3644;border-radius:8px;padding:5px 9px;font-size:12px}
@@ -7153,6 +7165,7 @@ let authTimer = 0;
 let refTimer = 0;
 let LOGSRC = "all";
 let dirty = false;
+let kotaTimer = 0; // kota olculurken kisa araliktaki tazeleme
 let running = 0;
 const WD = ["Pzt", "Sal", C("Çar"), "Per", "Cum", "Cmt", "Paz"];
 function el(id) {
@@ -7755,8 +7768,25 @@ function hesapSerit() {
         setHtml("hesapserit", "");
         return;
     }
+    // Olculmeyi bekleyen hesap varsa kisa surede tekrar bak. SSE bunu zaten
+    // itiyor ama akis kapali ya da vekil arkasinda bogulmus olabilir; o zaman
+    // yoklama 60 sn'de bir dondugu icin kullanici bir dakika boyunca yanlis
+    // sey gorurdu.
+    const bekleyen = h.some((x) => (x.quota || {}).bekliyor);
+    window.clearTimeout(kotaTimer);
+    if (bekleyen)
+        kotaTimer = window.setTimeout(() => void refresh(), 3000);
     setHtml("hesapserit", h.map((x) => {
         const q = x.quota || {};
+        // "Olculuyor" ile "okunamadi" ayni sey degil: ilki gecici ve normal,
+        // ikincisi mudahale ister. Ikisini ayni kirmizi kartta gostermek
+        // kullaniciya her acilista var olmayan bir ariza bildiriyordu.
+        if (q.bekliyor) {
+            return '<div class="hesap" onclick="openAccounts()"><div class="ad"><b>'
+                + esc(x.name) + "</b><span>…</span></div>"
+                + '<div class="mini olcu"><i style="width:100%"></i></div>'
+                + '<div class="alt">' + C("kota ölçülüyor…") + "</div></div>";
+        }
         if (!q.ok) {
             return '<div class="hesap hata" onclick="openAccounts()"><div class="ad"><b>'
                 + esc(x.name) + '</b><span>hata</span></div><div class="alt">⚠ '

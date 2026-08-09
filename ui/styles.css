@@ -92,6 +92,10 @@ input[type=checkbox]{width:auto}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
+/* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */
+.mini.olcu i{background:linear-gradient(90deg,#1f2a37 25%,#3d5570 50%,#1f2a37 75%);
+  background-size:200% 100%;animation:olcuAkis 1.2s linear infinite}
+@keyframes olcuAkis{from{background-position:200% 0}to{background-position:-200% 0}}
 .msf-kut{display:flex;flex-wrap:wrap;gap:6px}
 .msf{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none;
   background:#141a22;border:1px solid #2a3644;border-radius:8px;padding:5px 9px;font-size:12px}

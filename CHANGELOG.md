@@ -2,6 +2,40 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.10.1 — 2026-08-09
+
+### Hesap kotası ilk açılışta gelmiyordu, F5 gerekiyordu
+
+Ürün sahibinin bildirdiği kusur: üstteki hesap şeridi (`sametdrive 7% · 148.9 GB / 2.0 TB`)
+sayfa ilk açıldığında boş/hatalı geliyor, ancak yenileyince doluyordu.
+
+Ölçüm üç ayrı kusur gösterdi (yerel sunucu, sahte rclone ile 3 sn gecikme):
+
+| t | sunucu | ekranda |
+|---|---|---|
+| 0,1 sn | `ok=None, bekliyor=True` | **⚠ kota okunamadı** |
+| 3,2 sn | `ok=True`, 148 GB hazır | hâlâ aynı hata yazısı |
+| 14 sn | değişmedi | SSE'de **hiç olay yok** |
+
+1. **Yanlış mesaj.** Ölçüm sürerken arayüz kırmızı `⚠ kota okunamadı` kartı çiziyordu.
+   Ortada arıza yok, `rclone about` daha bitmemişti (ölçüldü: 34 saniyeye kadar
+   sürebiliyor). Artık ayrı bir durum var: `kota ölçülüyor…` ve akan bir çubuk.
+2. **Haber verilmiyordu.** Kota bellekte tutuluyor; `state.json` değişmediği için
+   izleyici bir şey yaymıyordu. Arka plandaki ölçüm bitince artık `durum` olayı
+   itiliyor — ölçüldü, olay 3,1 sn'de düşüyor (önce 14 saniye boyunca tek olay yoktu).
+3. **Kendine gelmesi 60 saniye sürüyordu.** SSE canlıyken yoklama aralığı 60 sn.
+   Ölçüm bekleyen bir hesap varsa arayüz artık 3 saniyede bir kendi bakıyor; akış
+   kapalı ya da vekil arkasında boğulmuş olsa da ekran doğruyu gösteriyor.
+
+Gerçek tarayıcıda doğrulandı (Chrome headless, kullanıcı hiçbir şeye dokunmadan):
+`kota ölçülüyor…` → **kendiliğinden** `sametdrive 7% · 148.0 GB / 2.0 TB`.
+
+Testler: **128 geçti, 0 kaldı**. İki yeni test 1.10.0 kodunda düşüyor (ölçüldü).
+
+> Not: ilk yazdığım test yanlış yeri ölçüyordu — "kota okunamadı" dizesi çeviri
+> tablosunda da geçtiği için sıralama denetimi dosyanın tamamında yanılıyordu.
+> Denetim artık `hesapSerit` işlevinin kendi gövdesine bakıyor.
+
 ## 1.10.0 — 2026-08-09
 
 ### 🔴 1.9.0 arayüzü açılışta ölüyordu — düzeltildi

@@ -17,7 +17,8 @@ interface Progress {
   plan?: string;
 }
 
-interface Quota { total?: number; used?: number; trashed?: number; free?: number; ok?: boolean; error?: string }
+interface Quota { total?: number; used?: number; trashed?: number; free?: number;
+  ok?: boolean | null; error?: string; bekliyor?: boolean }
 interface Totals { count: number; size: number }
 interface BackupRow { name: string; guest: string; size: number; mod: string }
 interface TrashRow { name: string; size: number; remain_days: number; tracked?: boolean }

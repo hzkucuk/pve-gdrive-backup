@@ -2856,6 +2856,66 @@ def t_misafir_deseni_alt_dize():
                   f"rclone {desen}: beklenen {sorted(beklenen)}, gelen {sorted(os.listdir(hedef_dizin))}")
     finally: o.temizle()
 
+@test("kota olculunce arayuze HABER gider", "izleme")
+def t_kota_olayi():
+    """Kota arka planda olculuyor ('rclone about' 34 sn surebiliyor). Sorun
+    olcumde degil, bitisin kimseye soylenmemesindeydi: deger bellekte duruyor,
+    state.json degismedigi icin izleyici de bir sey yaymiyor ve acik duran
+    arayuz veriyi ancak 60 sn'lik yoklamada goruyordu. Kullanicinin gordugu:
+    ilk acilista kota yok, F5'e basinca var.
+
+    Olculdu 2026-08-09: veri 3,2 sn'de hazirdi, 14 sn boyunca TEK olay gitmedi."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        no = G.OLAY.abone_ol()          # yayin yalnizca abone varken yapilir
+        try:
+            G._KOTA_ONBELLEK.clear()
+            # Ilk cagri: onbellek bos -> "bekliyor" doner, olcum arka plana gider
+            ilk = G.remote_quota_onbellekli("gdrive")
+            dogru(ilk.get("bekliyor") is True,
+                  f"ilk cagri beklemeye dusmeli, gelen: {ilk}")
+            dogru(ilk.get("ok") is None, "olculurken ok=None olmali (hata DEGIL)")
+            basla = time.time()
+            while G._KOTA_ISLER and time.time() - basla < 10: time.sleep(0.05)
+            pk = G.OLAY.bekle(no, 2.0)
+            dogru(pk, "kota gelince durum olayi yollanmali (yollanmadi)")
+            dogru(pk[0] == "durum", f"olay turu durum olmali: {pk[0]}")
+            hes = {h["name"]: h for h in (pk[1].get("hesaplar") or [])}
+            dogru("gdrive" in hes, f"olay hesaplari tasimali: {list(hes)}")
+            dogru(hes["gdrive"]["quota"].get("ok") is True,
+                  f"olaydaki kota hazir olmali: {hes['gdrive']['quota']}")
+            # Ikinci cagri artik onbellekten aninda gelir
+            ikinci = G.remote_quota_onbellekli("gdrive")
+            dogru(ikinci.get("ok") is True and not ikinci.get("bekliyor"),
+                  f"onbellekten hazir gelmeliydi: {ikinci}")
+        finally: G.OLAY.ayril(no)
+    finally: o.temizle()
+
+@test("kota olculurken 'okunamadi' HATASI gosterilmez", "arayuz")
+def t_kota_bekliyor_ekrani():
+    """Ilk acilista her hesap icin kirmizi '⚠ kota okunamadi' karti ciziliyordu;
+    oysa ortada ariza yok, olcum suruyordu. Gecici durum ile gercek hata ayni
+    ekranda gosterilirse kullanici var olmayan bir sorunu kovalar."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru("kota ölçülüyor" in G.HTML, "bekleme metni gomulu olmali")
+        # Bekleme dali, hata dalindan ONCE gelmeli; yoksa !q.ok once yakalar.
+        # Sira, islevin KENDI govdesinde aranir: "kota okunamadi" dizesi ceviri
+        # tablosunda da geciyor ve tum dosyada arayan bir denetim yanilir
+        # (once boyle yazildi ve yanlis yerde kirmizi verdi).
+        bas = G.HTML.find("function hesapSerit")
+        dogru(bas > 0, "hesapSerit islevi gomulu olmali")
+        govde = G.HTML[bas:bas + 2500]
+        i_bek = govde.find("q.bekliyor")
+        i_hata = govde.find("kota okunamadı")
+        dogru(0 < i_bek < i_hata,
+              f"bekleme dali hata dalindan once olmali (bekliyor={i_bek}, hata={i_hata})")
+        # Akis kapaliysa da kendiliginden tazelensin
+        dogru("kotaTimer" in G.HTML, "bekleyen kota icin kisa araliktaki tazeleme olmali")
+    finally: o.temizle()
+
 @test("gomulu arayuz paketi bastan sona kosuyor", "arayuz")
 def t_paket_acilisi():
     """SINIF TESTI -- 1.9.0'da arayuz SESSIZCE oldu ve canliya oyle gitti.
