@@ -26,7 +26,7 @@ Boylece neyin yayinlandigi her zaman bilincli bir karar olur.
 
 KULLANIM
 --------
-  tools/transcript-gorselleri.py                 # tum oturumlar
+  tools/transcript-gorselleri.py                 # bu repoya dokunmus TUM oturumlar
   tools/transcript-gorselleri.py --son 1         # yalniz en son oturum
   tools/transcript-gorselleri.py --hedef <dizin>
 """
@@ -50,10 +50,9 @@ EXTENSIONS = {
 }
 
 
-def project_dir() -> Path:
-    """Claude Code'un bu repo icin kullandigi klasor: yoldaki '/' ve bosluklar '-' olur."""
-    slug = str(REPO_ROOT).replace("/", "-").replace(" ", "-")
-    return Path.home() / ".claude" / "projects" / slug
+# Oturum klasorunu bulma isi tools/transcript_oturumlar.py'ye tasindi: yalnizca
+# bu projenin klasorune bakmak yetmiyordu, baska projelerden bu repoda calisilan
+# oturumlar da var (2026-08-09: 1.9.0'in tamami oyle yazildi).
 
 
 def find_images(node, found):
@@ -109,12 +108,19 @@ def main() -> int:
     parser.add_argument("--son", type=int, default=0, help="Yalniz en son N oturum.")
     args = parser.parse_args()
 
-    source = project_dir()
-    if not source.is_dir():
-        print(f"HATA: transcript klasoru bulunamadi: {source}", file=sys.stderr)
-        return 1
+    # Oturum listesi yedekleme betigiyle AYNI yerden gelir: bu projenin klasoru
+    # + baska projelerin bu repoya dokunmus oturumlari. Iki arac ayri liste
+    # kullanirsa biri gelisir oteki geride kalir; bu projede tam olarak boyle
+    # bir ayrisma yasandi (bkz. tools/transcript_oturumlar.py).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import transcript_oturumlar as tos
 
-    sessions = sorted(source.glob("*.jsonl"), key=os.path.getmtime, reverse=True)
+    sessions = [yol for _proje, yol in tos.oturumlar()]
+    if not sessions:
+        print(f"HATA: bu repoya dokunmus oturum bulunamadi: {tos.projeler_kok()}",
+              file=sys.stderr)
+        return 1
+    sessions.sort(key=os.path.getmtime, reverse=True)
     if args.son > 0:
         sessions = sessions[: args.son]
 

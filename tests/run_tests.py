@@ -10,6 +10,7 @@ Gercek Drive'a veya gercek bir Proxmox'a dokunmaz: rclone ve pgrep sahte
 surumlerle degistirilir (tests/mock/). Her test kendi gecici dizininde calisir.
 """
 import os, re, sys, json, time, fcntl, shutil, tempfile, subprocess, importlib.util, base64, urllib.request, urllib.error, urllib.parse
+import pathlib
 
 os.environ.setdefault("PVE_GDRIVE_QUIET", "1")   # log satirlari test ciktisini bogmasin
 KOK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1460,6 +1461,79 @@ def t_depo_duzelt():
             dogru(k in icerik, f"'{k}' korunmali/eklenmeli: {icerik}")
         dogru(not G.depo_duzelt("yok-boyle", "icerik")["ok"], "olmayan depo reddedilmeli")
     finally: o.temizle()
+
+@test("transcript yedegi BASKA projelerin oturumlarini da aliyor", "kurulum")
+def t_transcript_yabanci_oturumlar():
+    """Claude Code oturumlari calisma dizinine gore klasorleniyor, ama is her
+    zaman bu klasorden yapilmiyor: 2026-08-09'da 1.9.0'in tamami (kod, test,
+    commit, dagitim) baska bir projenin oturumunda yazildi. Yedekleme betigi
+    yalnizca bu projenin klasorune baktigi icin o kayit -- rclone filtre
+    tuzaginin olculdugu kayit -- yedeklenmiyordu.
+
+    Yanlis eslesmeye de dikkat: yalnizca proje ADI gecen bir sohbet degil, repo
+    YOLU gecen oturum alinmali."""
+    o = Ortam()
+    try:
+        kok = os.path.join(o.dizin, "projeler")
+        sys.path.insert(0, os.path.join(KOK, "tools"))
+        import transcript_oturumlar as tos
+        kendi = tos.proje_slug(pathlib.Path(KOK))
+
+        os.makedirs(os.path.join(kok, kendi))
+        os.makedirs(os.path.join(kok, "-Users-x-baska"))
+        os.makedirs(os.path.join(kok, "-Users-x-ilgisiz"))
+        def yaz(yol, icerik):
+            with open(yol, "w", encoding="utf-8") as f: f.write(icerik)
+        yaz(os.path.join(kok, kendi, "kendi.jsonl"), '{"a":1}\n')
+        # Yabanci ama bu repoda calismis: repo YOLU geciyor
+        yaz(os.path.join(kok, "-Users-x-baska", "yabanci.jsonl"),
+            '{"cwd":"' + KOK + '"}\n')
+        # Yalnizca proje ADINI anan sohbet: alinmamali
+        yaz(os.path.join(kok, "-Users-x-ilgisiz", "laf.jsonl"),
+            '{"metin":"pve-gdrive-backup diye bir sey duydum"}\n')
+
+        eski = os.environ.get("PGD_PROJELER_KOK")
+        os.environ["PGD_PROJELER_KOK"] = kok
+        try:
+            bulunan = {(pr, os.path.basename(y)) for pr, y in tos.oturumlar(pathlib.Path(KOK))}
+            dogru((kendi, "kendi.jsonl") in bulunan, f"kendi oturumu alinmali: {bulunan}")
+            dogru(("-Users-x-baska", "yabanci.jsonl") in bulunan,
+                  f"repoya dokunmus yabanci oturum alinmali: {bulunan}")
+            dogru(not any(p == "-Users-x-ilgisiz" for p, _ in bulunan),
+                  f"yalnizca adi anan sohbet ALINMAMALI: {bulunan}")
+
+            # Betigin kendisi: gercekten kopyaliyor mu, nereye, hangi izinle?
+            hedef = os.path.join(o.dizin, "yedek")
+            ort = dict(os.environ, PGD_PROJELER_KOK=kok, PGD_TRANSCRIPT_HEDEF=hedef)
+            r = subprocess.run(["bash", os.path.join(KOK, "tools", "transcript-yedekle.sh")],
+                               capture_output=True, text=True, env=ort, timeout=120)
+            dogru(r.returncode == 0, f"yedekleme betigi hata verdi: {r.stderr[:300]}")
+            k_yol = os.path.join(hedef, "kendi.jsonl")
+            y_yol = os.path.join(hedef, "baska-projeler", "-Users-x-baska", "yabanci.jsonl")
+            dogru(os.path.exists(k_yol), "kendi oturumu kopyalanmadi")
+            dogru(os.path.exists(y_yol), f"yabanci oturum kopyalanmadi: {r.stdout[-300:]}")
+            dogru(not os.path.exists(os.path.join(hedef, "baska-projeler", "-Users-x-ilgisiz")),
+                  "ilgisiz proje kopyalanmamaliydi")
+            for yol in (k_yol, y_yol):
+                dogru(os.stat(yol).st_mode & 0o077 == 0,
+                      f"ham sohbet baskasina acik: {oct(os.stat(yol).st_mode)}")
+        finally:
+            if eski is None: os.environ.pop("PGD_PROJELER_KOK", None)
+            else: os.environ["PGD_PROJELER_KOK"] = eski
+    finally: o.temizle()
+
+@test("iki transcript araci AYNI oturum listesini kullaniyor", "kurulum")
+def t_transcript_tek_liste():
+    """Yedekleme ile gorsel cikarma ayri listeler kullanirsa biri gelisir, oteki
+    geride kalir: gorseller yedeklenmemis bir oturumdan cikar ya da tersi."""
+    yed = open(os.path.join(KOK, "tools", "transcript-yedekle.sh")).read()
+    gor = open(os.path.join(KOK, "tools", "transcript-gorselleri.py")).read()
+    dogru("transcript_oturumlar.py" in yed, "yedekleme betigi ortak listeyi kullanmali")
+    dogru("import transcript_oturumlar" in gor, "gorsel araci ortak listeyi kullanmali")
+    dogru("projects/-Users-" not in yed,
+          "yedekleme betigi oturum klasorunu artik sabit yazmamali")
+    dogru("def project_dir" not in gor,
+          "gorsel aracinda kendi klasor bulma kopyasi kalmamali")
 
 @test("temiz kurulumun urettigi config urunun semasina uyuyor", "kurulum")
 def t_kurulum_conf_semasi():

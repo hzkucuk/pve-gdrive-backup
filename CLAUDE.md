@@ -202,7 +202,14 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 
 `tools/transcript-yedekle.sh` çalıştır — `/clear` veya `/compact` **öncesi ve
 sonrası**. Claude Code'un `~/.claude/projects/` klasörü bize ait değil; sürüm
-yükseltmesi ya da disk temizliği onu götürebilir. İçinde yalnızca sohbet değil,
+yükseltmesi ya da disk temizliği onu götürebilir.
+
+Betik yalnızca bu projenin oturum klasörüne bakmaz: **bu repoya dokunmuş her
+oturumu** alır, başka bir projeden çalışılmış olsa bile (2026-08-09: 1.9.0'ın
+tamamı MssqlRealtime oturumunda yazıldı ve yedeklenmiyordu). Yabancı oturumlar
+`yedek/baska-projeler/<proje>/` altına, hangi projeden geldikleri belli olacak
+şekilde kopyalanır. Liste tek yerden gelir: `tools/transcript_oturumlar.py` —
+görsel çıkarıcı da aynı listeyi kullanır. İçinde yalnızca sohbet değil,
 ürün sahibinin paylaştığı ve üzerine işaretlediği ekran görüntüleri de var —
 bu projede kararların çoğu onlardan çıktı.
 
