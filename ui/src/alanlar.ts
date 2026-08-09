@@ -30,6 +30,7 @@ const PLAN_ALANLARI: Alan[] = [
   { id: "e-enabled", anahtar: "enabled", tip: "onay",  adim: 0 },
   // 2. Kaynak
   { id: "e-src",     anahtar: "src_dir", tip: "metin", adim: 2, mesaj: C("kaynak klasör gerekli") },
+  { id: "e-inc",     anahtar: "include_patterns", tip: "liste", adim: 0 },
   // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
   // 4. Saklama
   { id: "e-kd", anahtar: "keep_days",        tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },
@@ -96,6 +97,40 @@ const PLAN_ALANLARI: Alan[] = [
   { id: "e-bwstep", anahtar: "bw_auto_step_pct",    tip: "sayi", adim: 6, min: 1, max: 90, vars: 25,
     kosul: () => chk("e-bwauto"), mesaj: C("1-90 arası yüzde") },
 ];
+
+/**
+ * Alan tablosundaki tipi DOM girdisine uygular: type, min, max, step.
+ *
+ * Dogrulama zaten tablodan turuyordu ama GIRDININ KENDISI duz metin kutusuydu:
+ * saat alaninda telefonda saat secici cikmiyor, sayi alaninda ok tuslari ve
+ * artir/azalt calismiyordu. Kural tek yerde durunca yeni bir alan eklendiginde
+ * kontrolu koymayi unutmak da mumkun olmuyor.
+ *
+ * HTML'de yazan deger varsa ona dokunulmaz; yalnizca eksik olan tamamlanir.
+ */
+function alanTipleriniUygula(): void {
+  const tipHtml: Record<AlanTipi, string> = {
+    metin: "text", sayi: "number", onay: "checkbox", saat: "time", liste: "text",
+  };
+  for (const a of PLAN_ALANLARI) {
+    const e = document.getElementById(a.id) as HTMLInputElement | null;
+    // <select> ile gelen alanlar (or. rapor gunu) kendi kontrolunu zaten tasir.
+    if (!e || e.tagName !== "INPUT") continue;
+    const ist = tipHtml[a.tip];
+    if (ist && e.type !== ist) e.type = ist;
+    if (a.tip === "sayi") {
+      if (a.min !== undefined && !e.hasAttribute("min")) e.min = String(a.min);
+      if (a.max !== undefined && !e.hasAttribute("max")) e.max = String(a.max);
+      // Ondalik sinirli bir alanda step varsayilani 1'dir ve 0.4 gecersiz sayilir.
+      if (!e.hasAttribute("step")) {
+        const tam = Number.isInteger(a.min ?? 0) && Number.isInteger(a.max ?? 0);
+        e.step = tam ? "1" : "any";
+      }
+    }
+    // Saatte saniye alani istemiyoruz: SS:DD dogrulamasiyla ayni hassasiyet.
+    if (a.tip === "saat" && !e.hasAttribute("step")) e.step = "60";
+  }
+}
 
 /** Formu bir plandan (veya varsayilanlardan) doldurur. */
 function alanlariDoldur(v: Record<string, unknown>): void {

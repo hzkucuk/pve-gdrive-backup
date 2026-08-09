@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.8.1"
+SURUM = "1.9.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -243,6 +243,9 @@ PLAN_DEFAULTS = {
     "vzdump_wait_min": 60,    # en fazla bu kadar dakika bekle, sonra bu turu atla (0 = hic bekleme)
     "min_age_min": 10,        # dosya en az bu kadar dakikadir degismemisse yukle (yarim dosya gitmesin)
     "skip_patterns": ["*.dat", "*.tmp", "*.part"],   # yazilmakta olan dosyalar
+    # Bos = klasordeki her sey (atlanacak desenler haric). Doluysa YALNIZCA bu
+    # desenlere uyanlar yuklenir: "sadece 100 numarali misafir" gibi secimler icin.
+    "include_patterns": [],
     "prune_on_failure": False,  # kopyalama basarisizsa retention CALISMASIN (varsayilan guvenli)
     "smtp_profile": "",       # bos = ilk profil
     "mail_to": "",
@@ -388,6 +391,10 @@ def norm_plan(p):
     except Exception: q["bw_auto_smooth"] = PLAN_DEFAULTS["bw_auto_smooth"]
     if not isinstance(q.get("skip_patterns"), list):
         q["skip_patterns"] = list(PLAN_DEFAULTS["skip_patterns"])
+    if not isinstance(q.get("include_patterns"), list):
+        q["include_patterns"] = list(PLAN_DEFAULTS["include_patterns"])
+    # Bos dizeler filtreyi sessizce "hicbir sey" haline getirir: temizlenir.
+    q["include_patterns"] = [str(x).strip() for x in q["include_patterns"] if str(x).strip()]
     if not RE_SAAT.match(str(q.get("report_at", ""))): q["report_at"] = "09:00"
     try: q["report_day"] = min(7, max(1, int(q["report_day"])))
     except Exception: q["report_day"] = 1
@@ -1529,6 +1536,19 @@ def _desen_uyar(ad, desenler):
         if fnmatch.fnmatch(ad, d): return True, d
     return False, ""
 
+def _dahil_uyar(ad, desenler):
+    """Dosya adi dahil etme desenlerinden birine uyuyor mu?
+
+    _desen_uyar ile ayni ihtiyat: yol kurali ya da gelismis sozdizimi iceren desende
+    arayuz kesin konusmaz, None doner ve dosya "belirsiz" etiketlenir. Karar yine
+    rclone'undur; buradaki is yalnizca kullaniciya ne olacagini onceden gostermek."""
+    for d in desenler or []:
+        d = str(d).strip()
+        if not d: continue
+        if "/" in d or "{" in d or "**" in d: return None, d
+        if fnmatch.fnmatch(ad, d): return True, d
+    return False, ""
+
 def kok_icinde_mi(yol):
     """Gezginle ayni sinir: verilen yol browse_roots altinda mi?
     Listeleme ucu de dosya adi sizdirir, gezginle ayni kurala tabi olmali."""
@@ -1554,9 +1574,10 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         return {"ok": False, "hata": f"klasor okunamadi: {src_dir}"}
     re_d = dump_re()
     desenler = p.get("skip_patterns") or []
+    dahil_desen = [str(x).strip() for x in (p.get("include_patterns") or []) if str(x).strip()]
     min_age = float(p.get("min_age_min") or 0)
     simdi = time.time()
-    kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0
+    kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0; filtre_disi = 0
     for ad in adlar:
         yol = os.path.join(src_dir, ad)
         try:
@@ -1568,11 +1589,20 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         toplam += boyut
         yas_dk = (simdi - mtime) / 60.0
         uyar, desen = _desen_uyar(ad, desenler)
+        dahil, dahil_d = (True, "") if not dahil_desen else _dahil_uyar(ad, dahil_desen)
         dump = bool(re_d.match(ad)); konf = bool(RE_HOSTCONF.match(ad))
         if uyar is None:
             durum, neden = "belirsiz", f"desen elle degerlendirilmeli: {desen}"
         elif uyar:
+            # Atlama kurallari dahil etme kurallarindan once gelir; rclone --filter
+            # sirasi da boyle kuruluyor (bkz. do_copy).
             durum, neden = "atlanir", f"desen: {desen}"
+        elif dahil is None:
+            durum, neden = "belirsiz", f"dahil deseni elle degerlendirilmeli: {dahil_d}"
+            desen = desen or dahil_d
+        elif not dahil:
+            durum, neden = "filtre_disi", "dahil etme filtresine uymuyor"
+            filtre_disi += 1
         elif min_age > 0 and yas_dk < min_age:
             durum, neden = "bekler", f"{int(min_age)} dk'dan yeni ({int(yas_dk)} dk)"
         else:
@@ -1588,10 +1618,12 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         kayitlar.append({"ad": ad, "boyut": boyut, "mtime": int(mtime),
                          "yas_dk": int(yas_dk), "durum": durum, "neden": neden,
                          "desen": desen or "", "min_age": int(min_age),
+                         "dahil_desen": dahil_d or "",
                          "dump": dump, "konf": konf})
     kayitlar.sort(key=lambda k: -k["mtime"])
     return {"ok": True, "toplam_dosya": len(kayitlar), "toplam_boyut": toplam,
             "yuklenecek": yuklenecek, "saklama_disi": saklama_disi,
+            "filtre_disi": filtre_disi, "filtre_acik": bool(dahil_desen),
             "limit": lim, "kirpildi": len(kayitlar) > lim,
             "dosyalar": kayitlar[:lim]}
 
@@ -1764,6 +1796,29 @@ def plan_hedefle(p, hedef):
     q = dict(p); q["remote"] = hedef
     return q
 
+def filtre_kurallari(p):
+    """rclone filtre argumanlari, SIRALI.
+
+    Olculdu 2026-08-09 (rclone 1.75.0): --include ile --exclude birlikte verilince rclone
+        ERROR : Using --filter is recommended instead of both --include and --exclude
+                as the order they are parsed in is indeterminate
+    basiyor ve iki farkli sirada da *.tmp dosyasi listeye giriyordu. Yani dahil etme
+    filtresi acikken skip_patterns garantisi kayboluyor ve yazilmakta olan yarim bir
+    yedek Drive'a cikabiliyordu. --filter kurallari verildikleri sirada degerlendirilir,
+    ilk eslesen kazanir; bu yuzden atlama kurallari her zaman once yazilir.
+
+    Ayri fonksiyon olmasinin sebebi: uretilen kural dizisi testte gercek rclone'a
+    verilip arayuzun tahminiyle karsilastirilabilsin."""
+    args = []
+    for pat in (p.get("skip_patterns") or []):
+        pat = str(pat).strip()
+        if pat: args += ["--filter", "- " + pat]
+    dahil = [str(x).strip() for x in (p.get("include_patterns") or []) if str(x).strip()]
+    if dahil:
+        for pat in dahil: args += ["--filter", "+ " + pat]
+        args += ["--filter", "- *"]     # gerisi disarida kalir
+    return args
+
 def do_copy(p):
     args = ["copy", p["src_dir"], p["remote"],
             "--transfers", str(p["transfers"]), "--checkers", str(p["checkers"]),
@@ -1771,8 +1826,7 @@ def do_copy(p):
             "--bwlimit", (p.get("bw_auto_max") or p.get("bwlimit") or "off")
                          if p.get("bwlimit_auto") else bwlimit_arg(p),
             "--stats-one-line", "--stats", f"{int(cfg().get('stats_interval_sec') or 5)}s", "-v"]
-    # Yazilmakta olan dosyalar hic alinmasin
-    for pat in (p.get("skip_patterns") or []): args += ["--exclude", pat]
+    args += filtre_kurallari(p)
     # Son N dakikadir degismemis dosyalar alinsin: vzdump yazarken yakalamayalim
     if float(p.get("min_age_min") or 0) > 0: args += ["--min-age", f"{int(float(p['min_age_min']))}m"]
     args += ["--buffer-size", str(p.get("buffer_size") or "16M")]
@@ -4421,6 +4475,8 @@ class H(BaseHTTPRequestHandler):
             plan = get_plan(q.get("plan", [""])[0]) or {}
             # Plan kaydedilmeden de bakilabilsin: alanlar sorgudan gelebilir.
             if q.get("skip"): plan = dict(plan, skip_patterns=unquote(q["skip"][0]).split())
+            if q.get("inc") is not None:
+                plan = dict(plan, include_patterns=unquote(q["inc"][0]).split())
             if q.get("mage"): plan = dict(plan, min_age_min=q["mage"][0])
             if not src:
                 self._json({"ok": False, "hata": "kaynak klasor secilmedi"})
@@ -5270,6 +5326,7 @@ input[type=checkbox]{width:auto}
 .ksl-atla{background:#2a2118;color:#e8c07d;border:1px solid #4a3a1a}
 .ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
+.ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
 .hint{font-size:11px;color:#6e7c8c;margin-top:4px;line-height:1.45}
 .hint b{color:#9fb4c9}
 .eg{font-size:11px;color:#7d8fa3;background:#0f151d;border-left:2px solid #2d3d50;padding:5px 8px;margin-top:5px;border-radius:0 6px 6px 0}
@@ -5470,6 +5527,14 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
   <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
+      <div><input id="e-inc" placeholder="*100* *101*" onchange="kaynakListeYukle(true)">
+        <div class="errmsg" id="err-inc"></div>
+        <div class="eg">Boşlukla ayır. <b>Boş bırakırsan hepsi yüklenir.</b>
+          Örnek: <code>*100*</code> → yalnızca adında <b>100</b> geçen dosyalar;
+          <code>vzdump-qemu-*</code> → yalnızca VM'ler.
+          <b>Atlanacak desenler her zaman önce işler</b>, yani <code>*.tmp</code> filtreye uysa bile yüklenmez.
+          Aşağıdaki liste hangi dosyanın gideceğini tek tek gösterir.</div></div></div>
     <div class="btns" style="margin-bottom:8px">
       <button class="sm" onclick="kaynakListeYukle()">📄 Dosyaları listele</button>
       <button class="sm" id="ksl-yenile" onclick="kaynakListeYukle(true)" style="display:none">↻ Yenile</button>
@@ -5572,7 +5637,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
   <div class="wbaslik"><b>5. Zamanlama</b> <span class="small">Ne zaman çalışsın, çakışma nasıl önlensin</span></div>
   <fieldset><legend>Zamanlama</legend>
     <div class="f"><label class="tip" title="Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.">Saat</label>
-      <div><input id="e-runat" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
+      <div><input type="time" id="e-runat" step="60" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
         <div class="eg">Proxmox işin 21:00'de başlıyorsa <b>03:00</b> güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.</div></div></div>
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
       <div><div class="wd" id="e-wd"></div>
@@ -5702,7 +5767,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Raporun gönderileceği gün.">Gün</label>
       <div><select id="e-rday"></select></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği saat.">Saat</label>
-      <div><input id="e-rat" placeholder="09:00"><div class="errmsg" id="err-rat"></div></div></div>
+      <div><input type="time" id="e-rat" step="60" placeholder="09:00"><div class="errmsg" id="err-rat"></div></div></div>
     <div class="f"><label class="tip" title="Rapor kaç günlük dönemi kapsasın.">Dönem (gün)</label>
       <div><input type="number" min="1" id="e-rdays"><div class="errmsg" id="err-rdays"></div></div></div>
     <div class="f"><label class="tip" title="Bu kadar gündür başarılı yedek yoksa raporda uyarı çıkar.">Uyarı eşiği (gün)</label>
@@ -6019,6 +6084,14 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
  * Karşılığı olmayan metin Türkçe görünür (arayüz bozulmaz).
  */
 const EN = {
+    /* --- dahil etme filtresi --- */
+    "filtre dışı": "filtered out", "filtre: ": "filter: ",
+    " tanesi dışarıda": " left out",
+    "dahil etme filtresine uymuyor — yüklenmez": "does not match the include filter — not uploaded",
+    "Dahil edilecek desenler": "Include patterns",
+    "⚠ hiçbir dosya eşleşmedi": "⚠ no file matched",
+    "Bu filtreyle bu turda hiçbir şey yüklenmez. Desen yanlışsa plan sorunsuz görünür ama yedek alınmaz; Drive'daki eskiler de saklama süresi dolunca silinir.": "Nothing will be uploaded this round with this filter. If the pattern is wrong the plan still looks healthy while no backup is taken, and the older copies on Drive are deleted once their retention expires.",
+    "Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.": "Leave empty to upload everything in the folder. Fill it in and ONLY files matching these patterns are uploaded.",
     /* --- başlık ve genel --- */
     "🗄️ Proxmox → Google Drive Yedek": "🗄️ Proxmox → Google Drive Backup",
     "⚙ Ayarlar": "⚙ Settings", "+ Yeni Plan": "+ New Plan", "Vazgeç": "Cancel",
@@ -8252,6 +8325,7 @@ async function kaynakListeYukle(yenile) {
     const q = "/api/kaynak-dosyalar?src=" + encodeURIComponent(src)
         + "&plan=" + encodeURIComponent(sel || "")
         + "&skip=" + encodeURIComponent(val("e-skip"))
+        + "&inc=" + encodeURIComponent(val("e-inc"))
         + "&mage=" + encodeURIComponent(val("e-mage"));
     let j;
     try {
@@ -8272,9 +8346,23 @@ async function kaynakListeYukle(yenile) {
         (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
         (j.yuklenecek || 0) + C(" tanesi yüklenir"),
     ];
+    // Filtre acikken kac dosyanin ELENDIGI ozetin bir parcasi: "yalnizca 100'u
+    // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
+    if (j.filtre_acik)
+        ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
+    // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
+    // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
+    // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.
+    const hicYok = j.filtre_acik && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
     if (j.saklama_disi)
         ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
+    if (hicYok)
+        ozet.push('<span class="kap-hata">' + C("⚠ hiçbir dosya eşleşmedi") + "</span>");
     setHtml("ksl-ozet", ozet.join(" · ")
+        + (hicYok ? '<br><span class="uyari-metin">'
+            + C("Bu filtreyle bu turda hiçbir şey yüklenmez. Desen yanlışsa plan sorunsuz "
+                + "görünür ama yedek alınmaz; Drive'daki eskiler de saklama süresi dolunca silinir.")
+            + "</span>" : "")
         + (j.kirpildi ? '<br><span class="uyari-metin">' + C("liste ilk ")
             + (j.limit || 0) + C(" satırla sınırlandı (kaynak_liste_limit)") + "</span>" : ""));
     if (!d.length) {
@@ -8288,6 +8376,8 @@ async function kaynakListeYukle(yenile) {
             return '<span class="ksl-r ksl-bekle">' + C("bekler") + "</span>";
         if (x.durum === "belirsiz")
             return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
+        if (x.durum === "filtre_disi")
+            return '<span class="ksl-r ksl-disi">' + C("filtre dışı") + "</span>";
         if (!x.dump && !x.konf)
             return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
         return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
@@ -8301,6 +8391,8 @@ async function kaynakListeYukle(yenile) {
             return C("desen elle değerlendirilmeli: ") + "<code>" + esc(x.desen) + "</code>";
         if (x.durum === "bekler")
             return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
+        if (x.durum === "filtre_disi")
+            return C("dahil etme filtresine uymuyor — yüklenmez");
         if (x.dump)
             return C("saklama: gün kuralı işler");
         if (x.konf)
@@ -9414,6 +9506,7 @@ function menuleriTanimla() {
     sagTik("#plans, .wrap > header, #detail", genelMenu);
 }
 dilBaslat();
+alanTipleriniUygula();
 surukleKur();
 menuKur();
 menuleriTanimla();
@@ -9431,6 +9524,7 @@ const PLAN_ALANLARI = [
     { id: "e-enabled", anahtar: "enabled", tip: "onay", adim: 0 },
     // 2. Kaynak
     { id: "e-src", anahtar: "src_dir", tip: "metin", adim: 2, mesaj: C("kaynak klasör gerekli") },
+    { id: "e-inc", anahtar: "include_patterns", tip: "liste", adim: 0 },
     // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
     // 4. Saklama
     { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },
@@ -9497,6 +9591,45 @@ const PLAN_ALANLARI = [
     { id: "e-bwstep", anahtar: "bw_auto_step_pct", tip: "sayi", adim: 6, min: 1, max: 90, vars: 25,
         kosul: () => chk("e-bwauto"), mesaj: C("1-90 arası yüzde") },
 ];
+/**
+ * Alan tablosundaki tipi DOM girdisine uygular: type, min, max, step.
+ *
+ * Dogrulama zaten tablodan turuyordu ama GIRDININ KENDISI duz metin kutusuydu:
+ * saat alaninda telefonda saat secici cikmiyor, sayi alaninda ok tuslari ve
+ * artir/azalt calismiyordu. Kural tek yerde durunca yeni bir alan eklendiginde
+ * kontrolu koymayi unutmak da mumkun olmuyor.
+ *
+ * HTML'de yazan deger varsa ona dokunulmaz; yalnizca eksik olan tamamlanir.
+ */
+function alanTipleriniUygula() {
+    var _a, _b;
+    const tipHtml = {
+        metin: "text", sayi: "number", onay: "checkbox", saat: "time", liste: "text",
+    };
+    for (const a of PLAN_ALANLARI) {
+        const e = document.getElementById(a.id);
+        // <select> ile gelen alanlar (or. rapor gunu) kendi kontrolunu zaten tasir.
+        if (!e || e.tagName !== "INPUT")
+            continue;
+        const ist = tipHtml[a.tip];
+        if (ist && e.type !== ist)
+            e.type = ist;
+        if (a.tip === "sayi") {
+            if (a.min !== undefined && !e.hasAttribute("min"))
+                e.min = String(a.min);
+            if (a.max !== undefined && !e.hasAttribute("max"))
+                e.max = String(a.max);
+            // Ondalik sinirli bir alanda step varsayilani 1'dir ve 0.4 gecersiz sayilir.
+            if (!e.hasAttribute("step")) {
+                const tam = Number.isInteger((_a = a.min) !== null && _a !== void 0 ? _a : 0) && Number.isInteger((_b = a.max) !== null && _b !== void 0 ? _b : 0);
+                e.step = tam ? "1" : "any";
+            }
+        }
+        // Saatte saniye alani istemiyoruz: SS:DD dogrulamasiyla ayni hassasiyet.
+        if (a.tip === "saat" && !e.hasAttribute("step"))
+            e.step = "60";
+    }
+}
 /** Formu bir plandan (veya varsayilanlardan) doldurur. */
 function alanlariDoldur(v) {
     var _a;

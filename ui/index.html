@@ -77,6 +77,14 @@
           Yukarıdaki listeden tıklayarak seçebilirsin.</div></div></div>
   </fieldset>
   <fieldset><legend>Klasördeki dosyalar</legend>
+    <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
+      <div><input id="e-inc" placeholder="*100* *101*" onchange="kaynakListeYukle(true)">
+        <div class="errmsg" id="err-inc"></div>
+        <div class="eg">Boşlukla ayır. <b>Boş bırakırsan hepsi yüklenir.</b>
+          Örnek: <code>*100*</code> → yalnızca adında <b>100</b> geçen dosyalar;
+          <code>vzdump-qemu-*</code> → yalnızca VM'ler.
+          <b>Atlanacak desenler her zaman önce işler</b>, yani <code>*.tmp</code> filtreye uysa bile yüklenmez.
+          Aşağıdaki liste hangi dosyanın gideceğini tek tek gösterir.</div></div></div>
     <div class="btns" style="margin-bottom:8px">
       <button class="sm" onclick="kaynakListeYukle()">📄 Dosyaları listele</button>
       <button class="sm" id="ksl-yenile" onclick="kaynakListeYukle(true)" style="display:none">↻ Yenile</button>
@@ -179,7 +187,7 @@
   <div class="wbaslik"><b>5. Zamanlama</b> <span class="small">Ne zaman çalışsın, çakışma nasıl önlensin</span></div>
   <fieldset><legend>Zamanlama</legend>
     <div class="f"><label class="tip" title="Planın başlayacağı saat (24 saat biçimi). Proxmox'un kendi yedek işi bittikten sonrasını seç.">Saat</label>
-      <div><input id="e-runat" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
+      <div><input type="time" id="e-runat" step="60" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
         <div class="eg">Proxmox işin 21:00'de başlıyorsa <b>03:00</b> güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.</div></div></div>
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
       <div><div class="wd" id="e-wd"></div>
@@ -309,7 +317,7 @@
     <div class="f"><label class="tip" title="Raporun gönderileceği gün.">Gün</label>
       <div><select id="e-rday"></select></div></div>
     <div class="f"><label class="tip" title="Raporun gönderileceği saat.">Saat</label>
-      <div><input id="e-rat" placeholder="09:00"><div class="errmsg" id="err-rat"></div></div></div>
+      <div><input type="time" id="e-rat" step="60" placeholder="09:00"><div class="errmsg" id="err-rat"></div></div></div>
     <div class="f"><label class="tip" title="Rapor kaç günlük dönemi kapsasın.">Dönem (gün)</label>
       <div><input type="number" min="1" id="e-rdays"><div class="errmsg" id="err-rdays"></div></div></div>
     <div class="f"><label class="tip" title="Bu kadar gündür başarılı yedek yoksa raporda uyarı çıkar.">Uyarı eşiği (gün)</label>

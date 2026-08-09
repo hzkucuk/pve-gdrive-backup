@@ -1116,11 +1116,13 @@ async function savePlan(): Promise<void> {
 interface KaynakDosya {
   ad: string; boyut: number; mtime: number; yas_dk: number;
   durum: string; neden: string; desen: string; min_age: number;
+  dahil_desen: string;
   dump: boolean; konf: boolean;
 }
 interface KaynakListe {
   ok: boolean; hata?: string; toplam_dosya?: number; toplam_boyut?: number;
   yuklenecek?: number; saklama_disi?: number; limit?: number; kirpildi?: boolean;
+  filtre_disi?: number; filtre_acik?: boolean;
   dosyalar?: KaynakDosya[];
 }
 
@@ -1136,6 +1138,7 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
   const q = "/api/kaynak-dosyalar?src=" + encodeURIComponent(src)
     + "&plan=" + encodeURIComponent(sel || "")
     + "&skip=" + encodeURIComponent(val("e-skip"))
+    + "&inc=" + encodeURIComponent(val("e-inc"))
     + "&mage=" + encodeURIComponent(val("e-mage"));
   let j: KaynakListe;
   try { j = await api<KaynakListe>(q); }
@@ -1150,8 +1153,20 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
     (j.yuklenecek || 0) + C(" tanesi yüklenir"),
   ];
+  // Filtre acikken kac dosyanin ELENDIGI ozetin bir parcasi: "yalnizca 100'u
+  // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
+  if (j.filtre_acik) ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
+  // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
+  // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
+  // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.
+  const hicYok = j.filtre_acik && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
   if (j.saklama_disi) ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
+  if (hicYok) ozet.push('<span class="kap-hata">' + C("⚠ hiçbir dosya eşleşmedi") + "</span>");
   setHtml("ksl-ozet", ozet.join(" · ")
+    + (hicYok ? '<br><span class="uyari-metin">'
+      + C("Bu filtreyle bu turda hiçbir şey yüklenmez. Desen yanlışsa plan sorunsuz "
+        + "görünür ama yedek alınmaz; Drive'daki eskiler de saklama süresi dolunca silinir.")
+      + "</span>" : "")
     + (j.kirpildi ? '<br><span class="uyari-metin">' + C("liste ilk ")
       + (j.limit || 0) + C(" satırla sınırlandı (kaynak_liste_limit)") + "</span>" : ""));
   if (!d.length) { setHtml("ksl-liste", '<div class="hint">' + C("klasörde dosya yok") + "</div>"); return; }
@@ -1159,6 +1174,7 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     if (x.durum === "atlanir") return '<span class="ksl-r ksl-atla">' + C("atlanır") + "</span>";
     if (x.durum === "bekler") return '<span class="ksl-r ksl-bekle">' + C("bekler") + "</span>";
     if (x.durum === "belirsiz") return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
+    if (x.durum === "filtre_disi") return '<span class="ksl-r ksl-disi">' + C("filtre dışı") + "</span>";
     if (!x.dump && !x.konf) return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
     return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
   };
@@ -1168,6 +1184,7 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     if (x.durum === "atlanir") return C("desen: ") + "<code>" + esc(x.desen) + "</code>";
     if (x.durum === "belirsiz") return C("desen elle değerlendirilmeli: ") + "<code>" + esc(x.desen) + "</code>";
     if (x.durum === "bekler") return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
+    if (x.durum === "filtre_disi") return C("dahil etme filtresine uymuyor — yüklenmez");
     if (x.dump) return C("saklama: gün kuralı işler");
     if (x.konf) return C("saklama: yapılandırma kuralı işler");
     return "<b>" + C("yüklenir ama hiç silinmez") + "</b> — " + C("ad kalıbına uymuyor");
@@ -2161,6 +2178,7 @@ function menuleriTanimla(): void {
 }
 
 dilBaslat();
+alanTipleriniUygula();
 surukleKur();
 menuKur();
 menuleriTanimla();

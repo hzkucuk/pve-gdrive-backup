@@ -51,6 +51,7 @@ hangi planın vaktinin geldiğine kod karar verir. Kaçırılan çalışma telaf
 | `vzdump_wait_min` | `60` | En fazla bekleme; dolarsa tur atlanır. `0` = hemen atla |
 | `min_age_min` | `10` | Sadece bu kadar dakikadır değişmemiş dosyaları yükle |
 | `skip_patterns` | `["*.dat","*.tmp","*.part"]` | Yazılmakta olan dosyalar, hiç yüklenmez |
+| `include_patterns` | `[]` | **Boş = hepsi.** Doluysa yalnızca bu desenlere uyan dosyalar yüklenir (ör. `*100*`). `skip_patterns` her zaman önce işler |
 | `prune_on_failure` | `false` | Yükleme başarısızsa retention çalışsın mı. **Kapalı bırak** |
 
 vzdump tespiti üç bağımsız sinyalle yapılır: `/run/vzdump.lock` kilidi, `pgrep -f` ile süreç
@@ -257,9 +258,18 @@ görünür kılar:
 | `atlanır` | `skip_patterns` desenine uyuyor, hiç yüklenmez |
 | `bekler` | `min_age_min`'den yeni; bu turda alınmaz, sonraki turda alınır |
 | `saklama dışı` | **Yüklenir ama hiç silinmez** — `dump_regex`'e uymadığı için `do_prune` onu görmez, Drive'da birikir |
+| `filtre dışı` | `include_patterns` doluyken desene uymuyor, yüklenmez. Listeden **gizlenmez**: neyin dışarıda kaldığı görünür olmalı |
 
 `atlanır` etiketi tahmin değil: aynı kararı gerçek rclone'un `--exclude` bayrağıyla
 karşılaştıran bir test var (`atlanacak desen tahmini gercek rclone ile ayni`).
+`filtre dışı` için de aynısı var (`dahil etme filtresi tahmini gercek rclone ile ayni`).
+
+> 🔴 **Ölçüldü 2026-08-09 (rclone 1.75.0).** Dahil etme filtresi `--include` ile
+> kurulamaz: `--include` ve `--exclude` birlikte verilince rclone
+> *"the order they are parsed in is indeterminate"* hatası basıyor ve iki farklı sırada da
+> `*.tmp` dosyası filtreden **geçti** — yani filtre açıkken yazılmakta olan yarım bir
+> yedek Drive'a çıkabilirdi. Ürün bu yüzden sıralı `--filter` kuralları üretir
+> (`filtre_kurallari`): önce atlama, sonra dahil etme, en sonda `- *`.
 Desen `/`, `{}` veya `**` içeriyorsa arayüz kesin konuşmaz, `belirsiz` der.
 | `allow_account_cleanup` | `false` | Aşağıya bak |
 | `smtp_profiles` | `[]` | Gönderici profilleri |

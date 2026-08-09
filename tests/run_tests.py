@@ -2590,6 +2590,162 @@ def t_desen_rclone_uyumu():
                       f"desen {desenler} / {a}: tahmin={tahmin} rclone={a not in kopyalanan}")
     finally: o.temizle()
 
+@test("dahil etme filtresi: liste ne yuklenecegini dosya dosya gosterir", "kaynak")
+def t_dahil_filtresi_liste():
+    """Filtre acikken kullanici 'hangi dosyalar gidecek' sorusunu listeden
+    cevaplayabilmeli. Filtre disi kalanlar gizlenmez, isaretlenir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        p = o.plan(skip_patterns=["*.dat"], min_age_min=0, include_patterns=["*100*"])
+        G.load_cfg()
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst", 4096, yas_sn=7200)
+        o.dosya("vzdump-qemu-101-2026_08_08-03_00_00.vma.zst", 4096, yas_sn=7200)
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.dat", 512, yas_sn=7200)
+        o.dosya("notlar.txt", 128, yas_sn=7200)
+        r = G.kaynak_dosyalar(o.dump, p)
+        d = {x["ad"]: x for x in r["dosyalar"]}
+        dogru(len(d) == 4, f"4 dosyanin tamami listelenmeli, {len(d)} geldi")
+        dogru(d["vzdump-qemu-100-2026_08_08-03_00_00.vma.zst"]["durum"] == "yuklenir",
+              "desene uyan dosya yuklenir olmali")
+        dogru(d["vzdump-qemu-101-2026_08_08-03_00_00.vma.zst"]["durum"] == "filtre_disi",
+              "desene uymayan dosya filtre_disi olmali")
+        dogru(d["notlar.txt"]["durum"] == "filtre_disi", "filtre disi kalan digeri de isaretlenmeli")
+        # Atlama kurallari dahil etme kurallarindan ONCE gelir: *100*'e uysa da .dat atlanir
+        dogru(d["vzdump-qemu-100-2026_08_08-03_00_00.vma.dat"]["durum"] == "atlanir",
+              "atlama deseni dahil etme filtresinden once gelmeli")
+        dogru(r["filtre_disi"] == 2, f"filtre_disi sayaci 2 olmali, {r['filtre_disi']}")
+        dogru(r["yuklenecek"] == 1, f"yuklenecek 1 olmali, {r['yuklenecek']}")
+        dogru(r["filtre_acik"] is True, "filtre acik bayragi bildirilmeli")
+
+        # Filtre bosken hicbir sey elenmez
+        p2 = o.plan(skip_patterns=["*.dat"], min_age_min=0, include_patterns=[])
+        r2 = G.kaynak_dosyalar(o.dump, p2)
+        dogru(r2["filtre_disi"] == 0, "filtre bosken filtre_disi olmamali")
+        dogru(r2["yuklenecek"] == 3, f"filtre bosken 3 dosya yuklenmeli, {r2['yuklenecek']}")
+    finally: o.temizle()
+
+@test("dahil etme filtresi tahmini gercek rclone ile ayni", "kaynak")
+def t_dahil_filtresi_rclone_uyumu():
+    """Bu testin asil isi bir tuzagi bekcilemek.
+
+    Olculdu 2026-08-09: --include ile --exclude birlikte verilince rclone sirayi
+    belirsiz sayiyor ve *.tmp dosyasi filtreden GECIYOR. Yani "sadece 100'u yedekle"
+    diyen bir kullanici, yazilmakta olan yarim bir dosyayi Drive'a gonderebilirdi.
+    Urun bu yuzden --filter kullaniyor; burada gercek rclone ile dogrulanir."""
+    gercek = None
+    for aday in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone", "/usr/bin/rclone"):
+        if os.path.exists(aday): gercek = aday; break
+    if not gercek:
+        print("      (gercek rclone yok, karsilastirma atlandi)")
+        return
+    o = Ortam()
+    try:
+        G = o.modul()
+        adlar = ["vzdump-qemu-100-2026_08_08-03_00_00.vma.zst",
+                 "vzdump-qemu-101-2026_08_08-03_00_00.vma.zst",
+                 "vzdump-lxc-100-2026_08_08-04_00_00.tar.zst",
+                 "vzdump-qemu-100-2026_08_09-03_00_00.vma.dat",
+                 "vzdump-qemu-100-yarim.tmp", "notlar.txt"]
+        kaynak = os.path.join(o.dizin, "dk"); hedef = os.path.join(o.dizin, "dh")
+        os.makedirs(kaynak, exist_ok=True)
+        for a in adlar:
+            with open(os.path.join(kaynak, a), "wb") as f: f.write(b"x" * 16)
+        senaryolar = [
+            (["*.dat", "*.tmp"], []),
+            (["*.dat", "*.tmp"], ["*100*"]),
+            (["*.dat", "*.tmp"], ["*100*", "*101*"]),
+            (["*.dat", "*.tmp"], ["vzdump-qemu-*"]),
+            ([], ["*100*"]),
+        ]
+        for atla, dahil in senaryolar:
+            shutil.rmtree(hedef, ignore_errors=True); os.makedirs(hedef)
+            p = {"skip_patterns": atla, "include_patterns": dahil}
+            args = [gercek, "copy", kaynak, hedef, "-q"] + G.filtre_kurallari(p)
+            subprocess.run(args, check=True)
+            kopyalanan = set(os.listdir(hedef))
+            # 1) Yarim dosya asla gecmemeli
+            if "*.tmp" in atla:
+                dogru("vzdump-qemu-100-yarim.tmp" not in kopyalanan,
+                      f"atla={atla} dahil={dahil}: yarim .tmp dosyasi kopyalandi")
+            # 2) Arayuzun tahmini rclone'un kararina esit olmali
+            for a in adlar:
+                uyar = bool(G._desen_uyar(a, atla)[0])
+                icinde = True if not dahil else bool(G._dahil_uyar(a, dahil)[0])
+                tahmin = (not uyar) and icinde
+                dogru(tahmin == (a in kopyalanan),
+                      f"atla={atla} dahil={dahil} / {a}: tahmin={tahmin} rclone={a in kopyalanan}")
+    finally: o.temizle()
+
+@test("dahil etme filtresi HTTP ucundan canli onizlenebilir", "kaynak")
+def t_dahil_filtresi_ucu():
+    """Filtre plan kaydedilmeden denenebilmeli: kullanici desen yazip listeyi
+    aninda gorur, sonra kaydeder. Uc formdan gelen deseni kullanmazsa onizleme
+    kayitli eski desene gore etiketlenir ve kullaniciya yanlis sey gosterilir."""
+    o = Ortam()
+    try:
+        o.plan(skip_patterns=["*.dat"], min_age_min=0)     # planda dahil filtresi YOK
+        o.dosya("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst", 2048, yas_sn=7200)
+        o.dosya("vzdump-qemu-101-2026_08_08-03_00_00.vma.zst", 2048, yas_sn=7200)
+        o.dosya("vzdump-qemu-100-2026_08_09-03_00_00.vma.dat", 64, yas_sn=7200)
+        c = o.oku_cfg(); c["browse_roots"] = [o.dizin]; o.yaz_cfg(c)
+        ist = o.sunucu()
+        taban = ("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+                 + "&plan=p1&skip=" + urllib.parse.quote("*.dat") + "&mage=0")
+
+        j = json.load(ist.istek(taban + "&inc=" + urllib.parse.quote("*100*")))
+        dogru(j["ok"], f"uc basarili donmeli: {j}")
+        d = {x["ad"]: x["durum"] for x in j["dosyalar"]}
+        dogru(d.get("vzdump-qemu-100-2026_08_08-03_00_00.vma.zst") == "yuklenir",
+              f"filtreye uyan yuklenir olmali: {d}")
+        dogru(d.get("vzdump-qemu-101-2026_08_08-03_00_00.vma.zst") == "filtre_disi",
+              f"filtreye uymayan filtre_disi olmali: {d}")
+        dogru(d.get("vzdump-qemu-100-2026_08_09-03_00_00.vma.dat") == "atlanir",
+              f"atlama deseni filtreden once gelmeli: {d}")
+        dogru(j["filtre_acik"] and j["filtre_disi"] == 1, f"filtre ozeti yanlis: {j}")
+        # Filtre disi dosya listeden GIZLENMEZ; kullanici neyin disarida kaldigini gormeli
+        dogru(len(j["dosyalar"]) == 3, f"3 dosyanin tamami listelenmeli: {len(j['dosyalar'])}")
+
+        # Filtre bos gonderilirse plandaki gibi davranilmali (hicbir sey elenmez)
+        j2 = json.load(ist.istek(taban + "&inc="))
+        dogru(not j2.get("filtre_acik"), f"bos filtre acik sayilmamali: {j2.get('filtre_acik')}")
+        dogru(j2["yuklenecek"] == 2, f"bos filtrede 2 dosya yuklenmeli: {j2['yuklenecek']}")
+    finally: o.temizle()
+
+@test("form alanlari tipine uygun kontrolle ciziliyor", "arayuz")
+def t_alan_tipleri():
+    """Dogrulama tablodan turuyordu ama girdinin KENDISI duz metin kutusuydu:
+    saat alaninda telefonda saat secici cikmiyor, sayi alaninda artir/azalt
+    calismiyordu. Tip artik tek kaynaktan (alan tablosu) uygulanir."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        # 1) Saat alanlari HTML'de dogrudan saat secici olmali (JS'ten once de dogru)
+        for aid in ("e-runat", "e-rat"):
+            dogru(re.search(r'<input[^>]*type="time"[^>]*id="' + aid + '"', G.HTML),
+                  f"{aid} type=time olmali")
+        # 2) Tipleri tablodan uygulayan islev gomulu ve baslangicta cagriliyor
+        dogru("function alanTipleriniUygula" in G.HTML, "tip uygulayici gomulu olmali")
+        dogru(re.search(r"alanTipleriniUygula\(\);", G.HTML), "baslangicta cagrilmali")
+        # 3) Tabloda min/max tasiyan her sayi alani icin HTML'de number girdisi var
+        tablo = re.findall(r'\{\s*id:\s*"(e-[^"]+)"[^}]*?tip:\s*"sayi"', G.HTML)
+        dogru(len(tablo) >= 10, f"sayi alani sayisi beklenenden az: {len(tablo)}")
+        for aid in tablo:
+            m = re.search(r'<(input|select)[^>]*id="' + aid + '"', G.HTML)
+            if not m: continue           # select ile gelenler kendi kontrolunu tasir
+            if m.group(1) == "select": continue
+            dogru(re.search(r'<input[^>]*type="number"[^>]*id="' + aid + '"', G.HTML)
+                  or re.search(r'<input[^>]*id="' + aid + '"[^>]*type="number"', G.HTML),
+                  f"{aid} number girdisi olmali")
+        # 4) Hicbir dosyanin eslesmedigi filtre SESSIZ kalmamali (kural 5)
+        dogru("hiçbir dosya eşleşmedi" in G.HTML, "bos filtre uyarisi gomulu olmali")
+        dogru("saklama süresi dolunca silinir" in G.HTML,
+              "uyari, eskilerin erimesi riskini de soylemeli")
+        # 5) Dahil etme filtresi alani ve canli onizleme baglantisi
+        dogru('id="e-inc"' in G.HTML, "dahil etme filtresi alani olmali")
+        dogru("&inc=" in G.HTML, "filtre listeleme sorgusuna eklenmeli")
+    finally: o.temizle()
+
 @test("DURDURULAN KOSUDA HICBIR YEDEK SILINMEZ", "durdur")
 def t_durdur_silmez():
     """Projenin en onemli kurali, durdurma yolundan gecen hali.

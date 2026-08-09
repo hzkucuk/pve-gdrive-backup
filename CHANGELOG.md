@@ -2,6 +2,63 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.9.0 — 2026-08-09
+
+### Yedeklenecek dosyalar desenle seçilebiliyor
+
+Şimdiye kadar yalnızca **atlanacak** desenler vardı; "sadece 100 numaralı misafiri
+yedekle" demenin yolu yoktu. Yeni `include_patterns` alanı bunu tersinden çözüyor:
+boş bırakılırsa klasördeki her şey yüklenir, doldurulursa **yalnızca** desene uyanlar.
+
+Alan, sihirbazın **2. Kaynak** adımında dosya listesinin hemen üstünde; desen yazınca
+liste anında yenileniyor. Filtre dışı kalan dosyalar listeden **gizlenmiyor**,
+`filtre dışı` rozetiyle işaretleniyor — neyin yedeklenmediğini görmeden karar verilemez.
+Özet satırı kaç dosyanın dışarıda kaldığını da yazıyor.
+
+> 🔴 **Ölçüldü 2026-08-09, rclone 1.75.0 — ve bu ölçüm bir veri kaybı tuzağını önledi.**
+> Filtrenin doğal kurulumu `--include` bayrağıydı. Gerçek rclone ile denendiğinde:
+>
+> ```
+> ERROR : Using --filter is recommended instead of both --include and --exclude
+>         as the order they are parsed in is indeterminate
+> ```
+>
+> İki farklı sırada da `vzdump-qemu-100-yarim.tmp` **filtreden geçti**. Yani dahil etme
+> filtresi açık bir planda `skip_patterns` garantisi kayboluyor ve yazılmakta olan yarım
+> bir yedek Drive'a çıkabiliyordu. Ürün bu yüzden sıralı `--filter` kuralları üretiyor:
+> önce atlama kuralları, sonra dahil etme, en sonda `- *`. Guard testi bunu gerçek
+> rclone ile doğruluyor ve naif kurgu geri konduğunda **düşüyor** (denendi).
+
+> **Host'ta da doğrulandı — 2026-08-09 20:1x, Proxmox `pve`, rclone v1.60.1-DEV.**
+> Kural dizisi host'un kendi rclone sürümüyle, gerçek `/mnt/pve/Usb1Tb/dump` klasöründe
+> (60 dosya) `rclone lsf` ile çalıştırıldı; hiçbir şey yazılmadı, Drive'a dokunulmadı:
+>
+> ```
+> filtresiz (yalnız atlama)          60
+> *100*        (alt dize)            12
+> vzdump-*-100-*  (alan hedefli)     12
+> *100*.tar.zst  (yalnız arşiv)       4
+> ```
+>
+> Yani `--filter` sözdizimi 1.60.1'de de beklendiği gibi çalışıyor; ölçüm artık yalnız
+> geliştirme makinesindeki 1.75.0'a dayanmıyor.
+
+### Form alanları tipine uygun kontrolle çiziliyor
+
+Saat alanları (`run_at`, `report_at`) düz metin kutusuydu: telefonda saat seçici
+çıkmıyor, yazım hatası ancak kaydederken anlaşılıyordu. Artık `type="time"`.
+
+Doğrulama zaten tek bir alan tablosundan türüyordu; şimdi **girdinin kendisi de**
+oradan türüyor (`alanTipleriniUygula`): sayı alanlarına `min`/`max`/`step`, saat
+alanlarına dakika hassasiyeti otomatik uygulanıyor. Böylece yeni bir alan eklendiğinde
+kontrolü koymayı unutmak mümkün değil. Ondalık sınırlı alanlarda (`bw_auto_smooth`,
+0.05–1) `step` varsayılanı 1 olduğu için 0.4 değeri tarayıcıda geçersiz sayılıyordu;
+tablo ondalık sınır görünce `step="any"` veriyor.
+
+**Doğrulama:** `python3 tests/run_tests.py` → **122 geçti, 0 kaldı** (önce 118).
+Dört yeni test: filtre listesi etiketleri, gerçek rclone uyumu, HTTP ucundan canlı
+önizleme, form alanı tipleri.
+
 ## 1.8.1 — 2026-08-09
 
 ### Komutlar tek yerde toplandı

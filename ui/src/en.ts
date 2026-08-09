@@ -3,6 +3,16 @@
  * Karşılığı olmayan metin Türkçe görünür (arayüz bozulmaz).
  */
 const EN: Record<string, string> = {
+  /* --- dahil etme filtresi --- */
+  "filtre dışı": "filtered out", "filtre: ": "filter: ",
+  " tanesi dışarıda": " left out",
+  "dahil etme filtresine uymuyor — yüklenmez": "does not match the include filter — not uploaded",
+  "Dahil edilecek desenler": "Include patterns",
+  "⚠ hiçbir dosya eşleşmedi": "⚠ no file matched",
+  "Bu filtreyle bu turda hiçbir şey yüklenmez. Desen yanlışsa plan sorunsuz görünür ama yedek alınmaz; Drive'daki eskiler de saklama süresi dolunca silinir.":
+    "Nothing will be uploaded this round with this filter. If the pattern is wrong the plan still looks healthy while no backup is taken, and the older copies on Drive are deleted once their retention expires.",
+  "Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.":
+    "Leave empty to upload everything in the folder. Fill it in and ONLY files matching these patterns are uploaded.",
   /* --- başlık ve genel --- */
   "🗄️ Proxmox → Google Drive Yedek": "🗄️ Proxmox → Google Drive Backup",
   "⚙ Ayarlar": "⚙ Settings", "+ Yeni Plan": "+ New Plan", "Vazgeç": "Cancel",

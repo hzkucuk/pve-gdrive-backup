@@ -1,8 +1,77 @@
-# Kaldığımız yer — 2026-08-09
+# Kaldığımız yer — 2026-08-09 (son güncelleme 20:2x)
 
 Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o günkü durum**.
 
 ## Hemen bakılacaklar
+
+0. **1.9.0 KOD HAZIR, DAĞITILMADI — commit de edilmedi.** (2026-08-09 20:1x)
+
+   Çalışma ağacında duruyor, host'ta hâlâ **1.8.1** çalışıyor. İki yeni özellik:
+
+   - **Dahil etme filtresi** (`include_patterns`): boş = hepsi, doluysa yalnızca
+     desene uyanlar yüklenir. Sihirbaz *2. Kaynak* adımında, dosya listesinin
+     üstünde; desen yazınca liste anında yenilenir. Filtre dışı kalanlar
+     **gizlenmez**, `filtre dışı` rozetiyle işaretlenir.
+   - **Tipli girdi kontrolleri**: `run_at` / `report_at` artık `type="time"`.
+     Girdi tipi de artık alan tablosundan türüyor (`alanTipleriniUygula`) —
+     sayıya `min`/`max`/`step`, saate dakika hassasiyeti otomatik.
+
+   🔴 **Ölçülmüş tuzak — bu bilgi kaybolmasın:** filtreyi `--include` ile kurmak
+   YANLIŞ. rclone `--include` ve `--exclude` birlikte verilince
+   *"the order they are parsed in is indeterminate"* hatası basıyor ve iki farklı
+   sırada da `*.tmp` dosyası filtreden **geçti** — yani filtre açık bir planda
+   `skip_patterns` garantisi kayboluyor ve yazılmakta olan yarım bir yedek
+   Drive'a çıkabiliyordu. Ürün bu yüzden sıralı `--filter` üretiyor
+   (`filtre_kurallari`): önce atlama, sonra dahil etme, en sonda `- *`.
+   Guard testi bunu gerçek rclone ile doğruluyor ve naif kurgu geri konduğunda
+   **düşüyor** (denendi).
+
+   Doğrulama: `python3 tests/run_tests.py` → **122 geçti, 0 kaldı** (önce 118).
+   Host'ta rclone **v1.60.1-DEV** ile gerçek `/mnt/pve/Usb1Tb/dump` klasöründe
+   (60 dosya) `rclone lsf` ile de ölçüldü, hiçbir şey yazılmadı:
+
+   ```
+   filtresiz (yalnız atlama)          60
+   *100*        (alt dize)            12
+   vzdump-*-100-*  (alan hedefli)     12
+   *100*.tar.zst  (yalnız arşiv)       4
+   ```
+
+   **Sıradaki adımlar:**
+   ```bash
+   cd ~/source/repos/pve-gdrive-backup
+   python3 tests/run_tests.py        # 122 beklenir
+   python3 build_ui.py               # gömülü arayüzü tazele
+   git add -A && git commit          # 1.9.0
+   ./dagit.sh                        # elle scp YOK (kural 6b)
+   ```
+
+   ✅ **Tick timer sorusu cevaplandı (ölçüldü 2026-08-09 20:2x).** `dagit.sh`
+   timer'a **dokunmuyor**, yalnız `pve-gdrive-ui`'yi yeniden başlatıyor — ve bu
+   yeterli:
+
+   - `$HEDEF.new` ile `$HEDEF` aynı dizinde, `/usr/local/bin` → `rpool/ROOT/pve-1`
+     (ölçüldü). Yani `mv` tek dosya sistemi içinde **atomik rename**: dağıtım
+     sırasında başlayan bir tick ya eski inode'u ya yeni dosyayı görür, **yarım
+     dosya çalıştırılmaz**.
+   - `systemctl restart pve-gdrive-ui` yalnız arayüzü döndürür; tick ayrı bir
+     birim, süren bir yedek kesilmez.
+   - Plan başına `flock` var (`/tmp/pve-gdrive-<plan>.lock`), üst üste koşu olmaz.
+   - 1.9.0 şema göçü içermiyor: yalnız güvenli varsayılanlı yeni bir plan alanı
+     (`include_patterns: []`) eklendi, eski planlar olduğu gibi yüklenir.
+
+   Dağıtım anı için host durumu (2026-08-09 20:2x): rclone **çalışmıyor**,
+   `pve-gdrive-tick.service` inactive, plan `gunluk` **KAPALI**, sonraki slot
+   2026-08-10 03:00. Yani pencere tamamen sakin.
+
+   Ürün sahibine önerilen ama henüz yapılmayan: arayüzdeki desen örneklerine
+   `vzdump-*-100-*` ve `*100*.tar.zst` eklensin. Sebebi ölçüldü — `*100*` alt dize
+   eşleşmesi olduğu için `.log` ve `.tar.zst.notes` dosyalarını da alıyor; bunlar
+   `dump_regex`'e uymadığı için **"saklama dışı"** olur: yüklenir ama hiç silinmez.
+
+   Host durumu (2026-08-09 20:14): `pve-gdrive-ui.service` active/enabled,
+   `/usr/local/bin/pve_gdrive.py serve`, sha256 `26ad07f5…`, SURUM 1.8.1;
+   `pve-gdrive-tick.timer` active; PVE 8.4.19, 31 gündür ayakta.
 
 1. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
    2026-08-09 00:41'de ürün sahibinin isteğiyle kesildi (29,8 GB / 215,9 GB,
