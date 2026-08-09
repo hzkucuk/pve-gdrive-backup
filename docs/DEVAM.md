@@ -1,10 +1,39 @@
-# Kaldığımız yer — 2026-08-09 (son güncelleme 23:2x)
+# Kaldığımız yer — 2026-08-10 (son güncelleme 00:0x)
 
 Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o günkü durum**.
 
 ## Hemen bakılacaklar
 
-0. **1.10.1 canlıda.** (2026-08-09 23:5x)
+0. **v1.10.1 YAYINLANDI ve canlıda.** (2026-08-10 00:0x)
+
+   GitHub release: `v1.10.1` — varlık `pve_gdrive.py`. Güncelleme adresi
+   (`releases/latest/download/pve_gdrive.py`) indirilip karşılaştırıldı:
+   `sha256 259224af1b9b3298…`, yereldeki ve host'taki dosyayla **birebir aynı**.
+   Host'ta güncelleme denetimi koşuldu: `{'ok': True, 'surum': '1.10.1'}`.
+
+   Önceki yayın v1.8.1'di; 1.9.0 hiç yayınlanmadı (arayüzü açılmıyordu), yani
+   kullanıcılar bozuk sürümü hiç görmedi.
+
+   **Kurulum betikleri de bu sürümde elden geçti.** Etkileşimsiz kurulumun
+   yapılandırma üreticisi `install.sh` içinde gömülüydü; artık
+   `tools/varsayilan-conf.py`. Testler iki kusur yakaladı: sihirbaz dalı
+   yapılandırma yolunu sabit yazıyordu (`PVE_GDRIVE_CONF` yok sayılıyordu,
+   `kurulum.py` ise tanıyordu) ve üretilen arayüz şifresi `/tmp`'de **0644**
+   duruyordu. İkisi de düzeltildi.
+
+   Gerçek Debian 12 kabında, sahte `systemctl` ile denendi:
+   temiz kurulum (config 600, 4 birim, durum dizini 700, kaynak
+   `/etc/pve/storage.cfg`'den bulundu) · yükseltme (mevcut config'e
+   dokunulmuyor: 2 plan, filtre, `enabled`, `keep_days`, kullanıcı adı korundu) ·
+   tek satırlık kurulum (`curl … | bash`, GitHub'dan 1.10.1 kurdu).
+
+   ⚠️ **Yeni kural (CLAUDE.md 9b):** her iş bitiminde kurulum betikleri
+   güncellenir ve gerçek Linux'ta test edilir. Ürün ile betikler ayrı yaşıyor
+   ve sessizce ayrışıyor.
+
+   Testler: **131 geçti, 0 kaldı.**
+
+1. **1.10.1: hesap kotası ilk açılışta gelmiyordu.** (2026-08-09 23:5x)
 
    Hesap kotası ilk açılışta gelmiyordu, F5 gerekiyordu. Üç kusur birden:
    ölçüm sürerken ekranda kırmızı `⚠ kota okunamadı` yazıyordu (ortada arıza
@@ -20,7 +49,7 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
    `sha256 259224af1b9b3298…` — yerel ile host birebir aynı, HTTP 200.
    Testler: **128 geçti, 0 kaldı.**
 
-1. **1.10.0: misafir seçici ve arayüzün açılış hatası.** (2026-08-09 23:1x)
+2. **1.10.0: misafir seçici ve arayüzün açılış hatası.** (2026-08-09 23:1x)
 
    Commit `4bde2e0` → push → `./dagit.sh`. Doğrulama betiğin sözüne değil,
    çalışan sürecin açtığı dosyaya dayanıyor:
@@ -77,7 +106,7 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
    Testler: **126 geçti, 0 kaldı** (1.9.0'da 122).
 
-2. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
+3. **215 GB'lik yükleme DURDURULDU, plan duraklatılmış durumda.**
    2026-08-09 00:41'de ürün sahibinin isteğiyle kesildi (29,8 GB / 215,9 GB,
    %14). rclone'a SIGTERM verildi; `prune_on_failure=False` olduğu önceden
    okunmuştu, **hiçbir yedek silinmedi** (log: `retention ATLANDI`). Hata maili
@@ -92,14 +121,14 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
      '/usr/local/bin/pve-gdrive plans; tail -30 /var/log/pve-gdrive.log'
    ```
 
-3. **İkinci sunucu yarım** — `10.0.0.253`. Yapılmayanlar:
+4. **İkinci sunucu yarım** — `10.0.0.253`. Yapılmayanlar:
    - Google hesabı bağlanmadı (tünel: `ssh -N -L 53682:127.0.0.1:53682 root@10.0.0.253`)
    - Telegram kurulmadı — **sunucu etiketi ver**, yoksa iki host aynı sohbete
      yazıp hangisi olduğu anlaşılmaz
    - Plan hâlâ **kapalı**
    - Kaynak hazır: `/USB_4T_R1/yedek/dump` (2.8 TB boş)
 
-4. **`10.0.0.253` — vzdump 3 TB'lık mount point'i de alıyor.** CT 100
+5. **`10.0.0.253` — vzdump 3 TB'lık mount point'i de alıyor.** CT 100
    (urbackupserver) `mp0 = /urbackupdisk, backup=1, size=3000G`. Log doğruladı:
    `including mount point mp0`. Üç sorun: (a) hedef `/USB_4T_R1/yedek/dump`
    **aynı havuzda**, 2,8 TB boş — sığmayabilir, (b) aynı havuza yedek gerçek
@@ -107,12 +136,12 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
    Öneri: `pct set 100 -mp0 ...,backup=0` (UrBackup'ın veri diski zaten
    başkalarının yedeği). Önce deneme yedeği alıp boyutu ölç.
 
-5. **`10.0.0.253` — Proxmox Notes linki yok.** Marmaradaki link bu sohbetin
+6. **`10.0.0.253` — Proxmox Notes linki yok.** Marmaradaki link bu sohbetin
    başında `proxmox-link.sh` ile eklenmişti; yeni makinede hiç çalışmadı.
    Çözüm: `/opt/pve-gdrive-backup/proxmox-link.sh` ya da 1.7.1+ sürümde
    *Ayarlar → Bakım ve taşıma → Proxmox'a link ekle* (bu ikisine birden yazar).
 
-6. **Google hesabı Windows 11 makinesinden bağlanacak.** Win10 1809+/Win11'de
+7. **Google hesabı Windows 11 makinesinden bağlanacak.** Win10 1809+/Win11'de
    OpenSSH istemcisi kurulu gelir. Tünel o makinede açılacak, tarayıcı da orada
    olacak. Ağ izin listesi kontrol edilsin: `pve-gdrive aglar`.
 
