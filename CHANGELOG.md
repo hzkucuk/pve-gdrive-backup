@@ -2,6 +2,24 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.11.1 — 2026-10-15
+
+### "Son 1 gün"ü seçince ne kadar gideceği yazmıyordu
+
+Ürün sahibinin bildirdiği: yaş sınırı seçiliyor ama kaç GB yükleneceği görünmüyor; özet
+satırı yalnızca dosya sayısı veriyordu.
+
+- Yaş alanının hemen altında, düğmeye basınca: `Son 1 gün: 3 dosya · 48.1 GB yüklenir ·
+  9 dosya (144.4 GB) eski, gitmez`.
+- Özet satırı: `6 tanesi yüklenir (96.3 GB, en fazla)`; eski ve Drive'da silinmiş dosyaların
+  boyutu da yazılır.
+- Misafir kartı, bir kısmı dışarıda kaldıysa giden miktarı ayrıca gösterir (`· yüklenir 19.6 GB`).
+- **"En fazla"** diye yazılır: önizleme Drive'ı listelemez, Drive'da aynı boyut/zamanla
+  duran dosyayı rclone atlar.
+
+**Doğrulandı.** Yeni test (yüklenecek / eski / budanan / misafir boyutları) — 157 geçti,
+0 kaldı. Tarayıcıda canlıdaki boyutlara benzer 12 seyrek dosyayla (10–21 GB) denendi.
+
 ## 1.11.0 — 2026-10-15
 
 ### Saklamayla silinen yedek her koşuda yeniden yükleniyordu

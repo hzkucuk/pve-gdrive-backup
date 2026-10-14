@@ -1179,6 +1179,7 @@ interface KaynakListe {
   yuklenecek?: number; saklama_disi?: number; limit?: number; kirpildi?: boolean;
   filtre_disi?: number; filtre_acik?: boolean;
   yas_disi?: number; max_gun?: number; budanan?: number;
+  yuk_boyut?: number; yas_disi_boyut?: number; budanan_boyut?: number;
   misafirler?: Misafir[];
   dosyalar?: KaynakDosya[];
 }
@@ -1262,7 +1263,9 @@ function misafirCiz(list: Misafir[], filtreAcik: boolean): void {
     + ' onchange="misafirSec(\'' + esc(m.desen) + "', " + (m.secili ? "true" : "false") + ')">'
     + '<span class="msf-ad">' + esc(m.ad) + "</span></label>"
     + '<span class="msf-bilgi">' + m.set + C(" set · ") + m.dosya + C(" dosya · ")
-    + hb(m.boyut) + "</span>"
+    + hb(m.boyut)
+    // Filtre/yas siniri bir kismini disarida biraktiysa giden miktar ayrica yazilir
+    + (m.yuk_boyut !== m.boyut ? C(" · yüklenir ") + hb(m.yuk_boyut) : "") + "</span>"
     + '<button type="button" class="msf-yalniz" title="' + C("Yalnızca bunu yedekle")
     + '" onclick="misafirYalniz(\'' + esc(m.desen) + '\')">' + C("yalnız") + "</button>"
     + "</div>").join("")
@@ -1329,6 +1332,22 @@ function calismaAraligiGun(): number {
   return enUzun;
 }
 
+/** Yas alaninin hemen altinda: secilen sinirla ne kadar gidecek. Dugmeye basan
+ *  kullanici sonucu listeyi kaydirmadan, bastigi yerde gormeli. */
+function yasOzetCiz(j: KaynakListe | null): void {
+  if (!j || !j.ok) { setHtml("e-mxage-ozet", ""); return; }
+  const gun = j.max_gun || 0;
+  const bas = gun ? C("Son ") + gun + C(" gün: ") : C("Sınır yok: ");
+  let h = bas + "<b>" + (j.yuklenecek || 0) + C(" dosya · ") + hb(j.yuk_boyut || 0) + "</b>"
+    + C(" yüklenir");
+  if (gun) h += " · " + (j.yas_disi || 0) + C(" dosya (") + hb(j.yas_disi_boyut || 0)
+    + C(") eski, gitmez");
+  // Ust sinir oldugu soylenmeli: Drive'da zaten duran ayni dosyayi rclone atlar.
+  h += '<span class="small"> — ' + C("Drive'da zaten olanlar atlanır; bu en fazla gidecek miktar.")
+    + "</span>";
+  setHtml("e-mxage-ozet", h);
+}
+
 function yasUyariCiz(): void {
   const gun = Number(val("e-mxage")) || 0;
   if (gun <= 0) { setHtml("e-mxage-uyari", ""); return; }
@@ -1380,13 +1399,17 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
   const d = j.dosyalar || [];
   const ozet = [
     (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
-    (j.yuklenecek || 0) + C(" tanesi yüklenir"),
+    (j.yuklenecek || 0) + C(" tanesi yüklenir") + " (<b>" + hb(j.yuk_boyut || 0) + "</b>"
+      + C(", en fazla") + ")",
   ];
+  yasOzetCiz(j);
   // Filtre acikken kac dosyanin ELENDIGI ozetin bir parcasi: "yalnizca 100'u
   // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
   if (j.filtre_acik) ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
-  if (j.max_gun) ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski"));
-  if (j.budanan) ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez"));
+  if (j.max_gun) ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski")
+    + " (" + hb(j.yas_disi_boyut || 0) + ")");
+  if (j.budanan) ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez")
+    + " (" + hb(j.budanan_boyut || 0) + ")");
   // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
   // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
   // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.

@@ -97,6 +97,8 @@ input[type=checkbox]{width:auto}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
 .yas-hizli{display:inline-flex;flex-wrap:wrap;gap:4px}
+.yas-ozet{margin-top:5px;font-size:12px;color:#c9d6e3}
+.yas-ozet b{color:#7ee2a8}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
 /* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */

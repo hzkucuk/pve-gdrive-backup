@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.11.0"
+SURUM = "1.11.1"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -1621,6 +1621,8 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
     simdi = time.time()
     kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0; filtre_disi = 0
     yas_disi = 0; budanan_n = 0
+    # Boyutlar: "son 1 gunu sectim, ne kadar gidecek?" sorusu sayi ile degil GB ile sorulur.
+    yuk_boyut = 0; yas_disi_boyut = 0; budanan_boyut = 0
     misafirler = {}
     for ad in adlar:
         yol = os.path.join(src_dir, ad)
@@ -1641,7 +1643,7 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         if ad in budanan:
             # rclone sirasiyla ayni: budanan kurali en once yazilir (bkz. filtre_kurallari)
             durum, neden = "budandi", "Drive'da saklama suresi doldu, tekrar yuklenmez"
-            budanan_n += 1
+            budanan_n += 1; budanan_boyut += boyut
         elif uyar is None:
             durum, neden = "belirsiz", f"desen elle degerlendirilmeli: {desen}"
         elif uyar:
@@ -1658,10 +1660,10 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
             durum, neden = "bekler", f"{int(min_age)} dk'dan yeni ({int(yas_dk)} dk)"
         elif max_gun > 0 and yas_dk > max_gun * 1440:
             durum, neden = "eski", f"son {max_gun:g} gunden eski ({yas_dk / 1440:.1f} gun)"
-            yas_disi += 1
+            yas_disi += 1; yas_disi_boyut += boyut
         else:
             durum = "yuklenir"
-            yuklenecek += 1
+            yuklenecek += 1; yuk_boyut += boyut
             if dump: neden = "saklama: gun kurali"
             elif konf: neden = "saklama: yapilandirma kurali"
             else:
@@ -1700,6 +1702,10 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
     m_liste.sort(key=lambda g: (g["tip"], int(g["vmid"]) if g["vmid"].isdigit() else 0))
     return {"ok": True, "toplam_dosya": len(kayitlar), "toplam_boyut": toplam,
             "yuklenecek": yuklenecek, "saklama_disi": saklama_disi,
+            # Ust sinir: Drive'da ayni boyut/zamanla duran dosyayi rclone atlar; onizleme
+            # Drive'i listelemez (API cagrisi), bu yuzden "en fazla" olarak gosterilir.
+            "yuk_boyut": yuk_boyut, "yas_disi_boyut": yas_disi_boyut,
+            "budanan_boyut": budanan_boyut,
             "misafirler": m_liste,
             "filtre_disi": filtre_disi, "filtre_acik": bool(dahil_desen),
             "yas_disi": yas_disi, "max_gun": max_gun, "budanan": budanan_n,
@@ -5662,6 +5668,8 @@ input[type=checkbox]{width:auto}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
 .yas-hizli{display:inline-flex;flex-wrap:wrap;gap:4px}
+.yas-ozet{margin-top:5px;font-size:12px;color:#c9d6e3}
+.yas-ozet b{color:#7ee2a8}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
 /* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */
@@ -5906,6 +5914,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
           <button type="button" class="sm" onclick="yasSec(3)">son 3 gün</button>
           <button type="button" class="sm" onclick="yasSec(7)">son 7 gün</button></span></div>
         <div class="errmsg" id="err-mxage"></div>
+        <div id="e-mxage-ozet" class="yas-ozet"></div>
         <div id="e-mxage-uyari"></div>
         <div class="eg">Yaş, dosyanın diskteki yazılma zamanından ölçülür. Proxmox yedeği
           21:00'de, bu plan 03:00'te çalışıyorsa dünkü yedek ~6 saatliktir: <b>son 1 gün</b> yeter.
@@ -6480,6 +6489,10 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
  */
 const EN = {
     /* --- yas siniri ve budanan --- */
+    ", en fazla": ", at most", "Son ": "Last ", " gün: ": " days: ", "Sınır yok: ": "No limit: ",
+    " dosya · ": " files · ", " yüklenir": " uploaded", " dosya (": " files (",
+    ") eski, gitmez": ") too old, not sent", " · yüklenir ": " · uploads ",
+    "Drive'da zaten olanlar atlanır; bu en fazla gidecek miktar.": "Files already on Drive are skipped; this is the maximum that will be sent.",
     "Yalnızca son … gün": "Only the last … days",
     "Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.": "Only files written in the last N days are uploaded. Older ones stay in the folder and do not go to Drive. 0 = no age limit.",
     "hepsi": "all", "son 1 gün": "last 1 day", "son 2 gün": "last 2 days",
@@ -8861,7 +8874,9 @@ function misafirCiz(list, filtreAcik) {
         + ' onchange="misafirSec(\'' + esc(m.desen) + "', " + (m.secili ? "true" : "false") + ')">'
         + '<span class="msf-ad">' + esc(m.ad) + "</span></label>"
         + '<span class="msf-bilgi">' + m.set + C(" set · ") + m.dosya + C(" dosya · ")
-        + hb(m.boyut) + "</span>"
+        + hb(m.boyut)
+        // Filtre/yas siniri bir kismini disarida biraktiysa giden miktar ayrica yazilir
+        + (m.yuk_boyut !== m.boyut ? C(" · yüklenir ") + hb(m.yuk_boyut) : "") + "</span>"
         + '<button type="button" class="msf-yalniz" title="' + C("Yalnızca bunu yedekle")
         + '" onclick="misafirYalniz(\'' + esc(m.desen) + '\')">' + C("yalnız") + "</button>"
         + "</div>").join("")
@@ -8926,6 +8941,25 @@ function calismaAraligiGun() {
         enUzun = Math.max(enUzun, gunler[i] - gunler[i - 1]);
     return enUzun;
 }
+/** Yas alaninin hemen altinda: secilen sinirla ne kadar gidecek. Dugmeye basan
+ *  kullanici sonucu listeyi kaydirmadan, bastigi yerde gormeli. */
+function yasOzetCiz(j) {
+    if (!j || !j.ok) {
+        setHtml("e-mxage-ozet", "");
+        return;
+    }
+    const gun = j.max_gun || 0;
+    const bas = gun ? C("Son ") + gun + C(" gün: ") : C("Sınır yok: ");
+    let h = bas + "<b>" + (j.yuklenecek || 0) + C(" dosya · ") + hb(j.yuk_boyut || 0) + "</b>"
+        + C(" yüklenir");
+    if (gun)
+        h += " · " + (j.yas_disi || 0) + C(" dosya (") + hb(j.yas_disi_boyut || 0)
+            + C(") eski, gitmez");
+    // Ust sinir oldugu soylenmeli: Drive'da zaten duran ayni dosyayi rclone atlar.
+    h += '<span class="small"> — ' + C("Drive'da zaten olanlar atlanır; bu en fazla gidecek miktar.")
+        + "</span>";
+    setHtml("e-mxage-ozet", h);
+}
 function yasUyariCiz() {
     const gun = Number(val("e-mxage")) || 0;
     if (gun <= 0) {
@@ -8988,16 +9022,20 @@ async function kaynakListeYukle(yenile) {
     const d = j.dosyalar || [];
     const ozet = [
         (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
-        (j.yuklenecek || 0) + C(" tanesi yüklenir"),
+        (j.yuklenecek || 0) + C(" tanesi yüklenir") + " (<b>" + hb(j.yuk_boyut || 0) + "</b>"
+            + C(", en fazla") + ")",
     ];
+    yasOzetCiz(j);
     // Filtre acikken kac dosyanin ELENDIGI ozetin bir parcasi: "yalnizca 100'u
     // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
     if (j.filtre_acik)
         ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
     if (j.max_gun)
-        ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski"));
+        ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski")
+            + " (" + hb(j.yas_disi_boyut || 0) + ")");
     if (j.budanan)
-        ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez"));
+        ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez")
+            + " (" + hb(j.budanan_boyut || 0) + ")");
     // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
     // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
     // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.

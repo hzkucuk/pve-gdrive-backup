@@ -4,6 +4,10 @@
  */
 const EN: Record<string, string> = {
   /* --- yas siniri ve budanan --- */
+  ", en fazla": ", at most", "Son ": "Last ", " gün: ": " days: ", "Sınır yok: ": "No limit: ",
+  " dosya · ": " files · ", " yüklenir": " uploaded", " dosya (": " files (",
+  ") eski, gitmez": ") too old, not sent", " · yüklenir ": " · uploads ",
+  "Drive'da zaten olanlar atlanır; bu en fazla gidecek miktar.": "Files already on Drive are skipped; this is the maximum that will be sent.",
   "Yalnızca son … gün": "Only the last … days",
   "Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.":
     "Only files written in the last N days are uploaded. Older ones stay in the folder and do not go to Drive. 0 = no age limit.",

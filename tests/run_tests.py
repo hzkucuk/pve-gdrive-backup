@@ -3041,6 +3041,29 @@ def t_yas_siniri_liste():
         dogru(not j1["filtre_acik"], "bos inc kayitli desenin yerine gecmeli (filtre yok)")
     finally: o.temizle()
 
+@test("onizleme yuklenecek / eski / budanan BOYUTUNU soyler", "budanan")
+def t_yas_boyut_ozeti():
+    """Urun sahibi 2026-10-15: 'son 1 gunu seciyorum, kac GB yukleyecegini soylemiyor.'"""
+    o = Ortam()
+    try:
+        o.plan(min_age_min=10, max_age_days=1, keep_days=1, keep_count=0)
+        G = o.modul()
+        o.dosya("vzdump-qemu-100-2026_10_14-21_00_00.vma.zst", 3000, yas_sn=6 * 3600)
+        o.dosya("vzdump-qemu-100-2026_10_14-21_00_00.vma.zst.notes", 5, yas_sn=6 * 3600)
+        o.dosya("vzdump-qemu-100-2026_10_12-21_00_00.vma.zst", 2000, yas_sn=54 * 3600)
+        o.dosya("vzdump-qemu-100-2026_10_10-21_00_00.vma.zst", 700, yas_sn=100 * 3600)
+        G.budanan_ekle(G.get_plan("p1"), ["vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"])
+        r = G.kaynak_dosyalar(o.dump, G.get_plan("p1"))
+        esit((r["yuklenecek"], r["yuk_boyut"]), (2, 3005), "yuklenecek boyut")
+        esit((r["yas_disi"], r["yas_disi_boyut"]), (1, 2000), "eski boyut")
+        esit((r["budanan"], r["budanan_boyut"]), (1, 700), "budanan boyut")
+        m = {g["ad"]: g for g in r["misafirler"]}["qemu-100"]
+        esit((m["boyut"], m["yuk_boyut"]), (5705, 3005), "misafir karti giden boyutu bilmeli")
+        dogru('id="e-mxage-ozet"' in G.HTML and "function yasOzetCiz" in G.HTML,
+              "yas alaninin altinda boyut ozeti gomulu olmali")
+        dogru("en fazla gidecek miktar" in G.HTML, "ust sinir oldugu soylenmeli")
+    finally: o.temizle()
+
 @test("yas siniri ve budanan tahmini GERCEK rclone ile ayni", "budanan")
 def t_yas_budanan_rclone_uyumu():
     """Arayuzun 'yuklenir / eski / budandi' tahmini, rclone'un fiili kararina
