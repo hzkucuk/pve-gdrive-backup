@@ -4,6 +4,17 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
 ## Hemen bakılacaklar
 
+0. **v1.11.1 YAYINLANDI (latest) ve canlıda.** (2026-10-15 02:07)
+
+   Yaş sınırı seçilince kaç GB gideceği yaş alanının altında, özet satırında ve misafir
+   kartlarında yazıyor ("en fazla" — önizleme Drive'ı listelemez). Commit `a01376a`,
+   `./dagit.sh` pid 3106521; yerel = release = çalışan: `8e6de5cbc34ce33a…`.
+   `v1.10.2` arşiv sürümü olarak (latest DEĞİL) yayında; varlık üretimde çalışmış dosya.
+
+   Küçük gözlem (düzeltilmedi): servis açılışında aynı hesap için İKİ eşzamanlı
+   `rclone about` görüldü. Bekleyen yol (`bekle=True`) arka plan işini (`_KOTA_ISLER`)
+   kontrol etmiyor; açık arayüz + açılış ölçümü çakışıyor olabilir. Ölçülmedi.
+
 0. **v1.11.0 YAYINLANDI ve canlıda.** (2026-10-15 01:5x)
 
    GitHub release `v1.11.0` (varlık `pve_gdrive.py`), commit `fddb236`. `./dagit.sh`:
