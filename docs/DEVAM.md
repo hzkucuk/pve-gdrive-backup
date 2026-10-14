@@ -4,6 +4,15 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
 ## Hemen bakılacaklar
 
+0. **v1.11.2 YAYINLANDI (latest) ve canlıda.** (2026-10-15 02:20)
+
+   Güvenlik: hesap/hedef adı `-` ile başlarsa rclone bayrak okuyordu; tek doğrulayıcı
+   (`hesap_adi_gecerli`/`hedef_gecerli`) tüm girişlerde. Dağıtım öncesi canlı adlar
+   (`sametdrive`, `sametdrive:proxmox-yedek`) yeni kuraldan geçiyor diye ölçüldü.
+   Commit `6472715`; yerel = release = çalışan: `07bea7b8b4470032…`.
+   `origin/HEAD` yerelde tanımlandı: `/security-review` artık çalışır (gönderilmemiş
+   değişikliğe bakar).
+
 0. **v1.11.1 YAYINLANDI (latest) ve canlıda.** (2026-10-15 02:07)
 
    Yaş sınırı seçilince kaç GB gideceği yaş alanının altında, özet satırında ve misafir
