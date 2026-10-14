@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.11.1"
+SURUM = "1.11.2"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -3283,7 +3283,23 @@ def kota_bekleme_tmo():
     """Kullanicinin ekran basinda bekledigi kota sorgulari icin zaman asimi."""
     return float(cfg().get("quota_wait_timeout_sec") or 45)
 
+# rclone'a KONUMSAL arguman olarak giden hesap/hedef adlari. "-" ile baslayan bir ad
+# rclone tarafindan BAYRAK diye okunur: guvenlik incelemesi 2026-10-15'te
+# `about "--log-file=<yol>:"` ile root olarak dosya olusturulabildigi olculdu.
+# Kabuk yok (arguman listesi), ama bayrak enjeksiyonu yine de olur.
+RE_HESAP_ADI = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_. +@-]*$")
+
+def hesap_adi_gecerli(ad):
+    return bool(RE_HESAP_ADI.match(str(ad or "")))
+
+def hedef_gecerli(hedef):
+    """'hesap:klasor' -- hesap kismi gecerli ad, arguman '-' ile baslamaz."""
+    h = str(hedef or "")
+    return ":" in h and hesap_adi_gecerli(h.split(":", 1)[0])
+
 def remote_quota(name, timeout=None):
+    if not hesap_adi_gecerli(name):
+        return {"ok": False, "error": "gecersiz hesap adi"}
     tmo = float(timeout if timeout is not None else (cfg().get("quota_timeout_sec") or 120))
     rc, out, err = rclone(["about", f"{name}:", "--json"], timeout=tmo)
     if rc != 0: return {"ok": False, "error": kota_hata_metni(err, tmo)}
@@ -3419,7 +3435,8 @@ def remote_var_mi(name):
 def remote_create(name, token, tur="drive"):
     if tur not in SAGLAYICILAR:
         return {"ok": False, "msg": f"desteklenmeyen saglayici: {tur}"}
-    name = re.sub(r"[^A-Za-z0-9_-]", "", str(name or "")).strip()
+    # Bastaki "-" da atilir: kalirsa `config create -x ...` bayrak olarak okunur.
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(name or "")).strip().lstrip("-")
     if not name: return {"ok": False, "msg": "gecersiz hesap adi"}
     if any(r["name"] == name for r in rclone_remotes()):
         return {"ok": False, "msg": f"'{name}' zaten var"}
@@ -3451,6 +3468,9 @@ def remote_create(name, token, tur="drive"):
         " ama kota okunamadi: " + str(q.get("error", ""))[:80]), "name": name}
 
 def remote_delete(name):
+    # Yalnizca TANIMLI hesap: ad dogrudan `rclone config delete <ad>`a gider.
+    if not hesap_adi_gecerli(name) or name not in {r["name"] for r in rclone_remotes()}:
+        return {"ok": False, "msg": "tanimli hesap degil"}
     used = [p["name"] for p in cfg().get("plans", []) if p["remote"].split(":")[0] == name]
     if used: return {"ok": False, "msg": "su planlar kullaniyor: " + ", ".join(used)}
     yedek = rclone_conf_yedekle(f"sil-{name}")
@@ -4728,7 +4748,12 @@ class H(BaseHTTPRequestHandler):
             hesap = q.get("hesap", [""])[0]
             a = kaynak_analiz(src) if src else {"ok": False, "hata": "kaynak klasor secilmedi"}
             # Kapasite planlayicida kullanici zaten bekliyor: guncel kota alinir.
-            kota = remote_quota_onbellekli(hesap, bekle=True) if hesap else {}
+            # Yalnizca tanimli hesap: rastgele ad onbellege kalici kayit eklemesin
+            # (/api/remote/test ile ayni sinif, guvenlik incelemesi 2026-10-15).
+            if hesap and hesap not in {r["name"] for r in rclone_remotes()}:
+                kota = {"ok": False, "error": "tanimli hesap degil"}
+            else:
+                kota = remote_quota_onbellekli(hesap, bekle=True) if hesap else {}
             cevap = {"analiz": a, "kota": kota}
             if a.get("ok") and kota.get("ok"):
                 cevap["oneri"] = saklama_oneri(a, kota)
@@ -4789,10 +4814,11 @@ class H(BaseHTTPRequestHandler):
             if q.get("mxage") is not None: plan = dict(plan, max_age_days=q["mxage"][0] or 0)
             # Formdaki hedef (kaydedilmemis olabilir): budanan kaydi hedef basina tutulur.
             if q.get("remote") and q["remote"][0].strip(): plan = dict(plan, remote=q["remote"][0].strip())
-            for k in ("kd", "kc"):          # formdaki saklama: budanan karari ona gore
+            for k, anahtar, ust in (("kd", "keep_days", 3650.0), ("kc", "keep_count", 999.0)):
+                # inf/nan/1e309 -> int() OverflowError -> 500 idi (guvenlik incelemesi).
                 if q.get(k) and q[k][0].strip():
-                    try: plan = dict(plan, **{"keep_days" if k == "kd" else "keep_count": int(float(q[k][0]))})
-                    except ValueError: pass
+                    x = sayi_sinirla(q[k][0], 0.0, ust, -1.0)
+                    if x >= 0: plan = dict(plan, **{anahtar: int(x)})
             if not src:
                 self._json({"ok": False, "hata": "kaynak klasor secilmedi"})
             elif not kok_icinde_mi(src):
@@ -4938,6 +4964,11 @@ def save_plan(data):
     if not str(data.get("name") or "").strip(): return {"ok": False, "msg": "plan adi bos olamaz"}
     if not str(data.get("remote") or "").strip(): return {"ok": False, "msg": "remote bos olamaz"}
     if ":" not in str(data.get("remote")): return {"ok": False, "msg": "remote 'ad:klasor' biciminde olmali"}
+    if not hedef_gecerli(str(data.get("remote")).strip()):
+        return {"ok": False, "msg": "gecersiz hesap adi (harf/rakam ile baslamali)"}
+    for h in (data.get("yedek_hedefler") or []):
+        if str(h or "").strip() and not hedef_gecerli(str(h).strip()):
+            return {"ok": False, "msg": f"gecersiz yedek hedef: {str(h)[:60]}"}
     for alan, etiket in (("bwlimit", "hiz siniri"), ("bwlimit_schedule", "hiz cizelgesi")):
         if alan in data:
             ok, msg = bwlimit_gecerli(data[alan])

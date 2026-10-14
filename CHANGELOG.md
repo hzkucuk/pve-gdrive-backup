@@ -2,6 +2,28 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.11.2 — 2026-10-15
+
+### Güvenlik incelemesi: hesap adı rclone'a bayrak olarak gidebiliyordu
+
+Hesap/hedef adları rclone'a konumsal argüman olarak gidiyor. Kabuk yok (argüman
+listesi), ama rclone `-` ile başlayan argümanı **bayrak** okur. Ölçüldü: yerel rclone
+`about "--log-file=<yol>:" --json` ile o yolda dosya oluşturdu; host'ta bu root olur.
+Giriş kimlik doğrulaması arkasında, içerik saldırganın elinde değil — düşük önem.
+
+Sınıf tarandı, her giriş tek doğrulayıcıdan (`hesap_adi_gecerli`, `hedef_gecerli`) geçiyor:
+`remote_quota`, hesap silme (artık yalnızca tanımlı hesap), hesap ekleme (baştaki `-`
+atılır), plan hedefi ve yedek hedefler (kaydederken), `/api/analiz` (yalnızca tanımlı
+hesap — rastgele ad kota önbelleğine kalıcı kayıt da ekliyordu).
+
+Ayrıca önizlemede `kd`/`kc` için `inf`/`1e309` 500 döndürüyordu → sınırlanır, 200.
+
+İnceleme veri kaybı açısından temiz: yeni `budanacak_setler` eski `do_prune` seçimiyle
+2000 rastgele senaryoda birebir aynı.
+
+**Doğrulandı.** Sınıfı yakalayan test (rclone'a giden her çağrı izlenir, `-` ile başlayan
+argüman yok) eski kodla düştü, yeni kodla geçiyor. 158 geçti, 0 kaldı.
+
 ## 1.11.1 — 2026-10-15
 
 ### "Son 1 gün"ü seçince ne kadar gideceği yazmıyordu

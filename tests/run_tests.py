@@ -3367,6 +3367,45 @@ def t_kota_bayat_dolu():
               "bayat+dolu kirmizi kalmali (CSS sirasi grisi kazandirmasin)")
     finally: o.temizle()
 
+@test("'-' ile baslayan hesap/hedef adi rclone'a HIC gitmez (bayrak enjeksiyonu)", "guvenlik")
+def t_hesap_adi_bayrak():
+    """Guvenlik incelemesi 2026-10-15: `rclone about "--log-file=<yol>:"` root olarak
+    dosya olusturdu. Ad arguman listesiyle gidiyor (kabuk yok) ama rclone '-' ile
+    baslayan konumsal argumani BAYRAK okur. Sinif: adi rclone'a giden her giris."""
+    o = Ortam()
+    try:
+        o.plan()
+        ist = o.sunucu(); G = ist.G
+        cagri = []
+        gercek = G.rclone
+        def izle(a, *x, **k):
+            cagri.append(list(a)); return gercek(a, *x, **k)
+        o.yamala(G, "rclone", izle)
+        kotu = "--log-file=/tmp/pgd-enj"
+        bayrakli = lambda: [c for c in cagri if any(str(a).startswith("--log-file") for a in c)]
+        dogru(not G.remote_quota(kotu).get("ok"), "remote_quota reddetmeli")
+        dogru(not G.remote_delete(kotu).get("ok"), "remote_delete reddetmeli")
+        r = G.remote_create("-x", "{}", "drive")
+        dogru(not any(c[:3] == ["config", "create", "-x"] for c in cagri), f"bastaki '-' atilmali: {cagri[-3:]}")
+        for hedef, yedek in ((kotu + ":k", []), ("gdrive:k", [kotu + ":k"])):
+            j = G.save_plan({"name": "x", "remote": hedef, "yedek_hedefler": yedek, "src_dir": o.dump})
+            dogru(not j.get("ok"), f"save_plan kabul etmemeli: {hedef} {yedek} -> {j}")
+        j = json.load(ist.istek("/api/analiz?src=" + urllib.parse.quote(o.dump)
+                                + "&hesap=" + urllib.parse.quote(kotu)))
+        dogru(not j["kota"].get("ok") and kotu not in G._KOTA_ONBELLEK, f"analiz: {j['kota']}")
+        j = json.load(ist.istek("/api/analiz?src=" + urllib.parse.quote(o.dump) + "&hesap=yokboyle"))
+        dogru("yokboyle" not in G._KOTA_ONBELLEK, "tanimsiz hesap onbellege girmemeli")
+        esit(bayrakli(), [], "rclone'a '-' ile baslayan ad GITMEMELI")
+        # Gecerli adlar hala calisir
+        dogru(G.hedef_gecerli("gdrive:proxmox-yedek") and G.hesap_adi_gecerli("samet_drive.2"),
+              "gecerli adlar reddedilmemeli")
+        # kd/kc sonsuz -> 500 degil
+        for v in ("1e309", "inf", "nan", "-5", "abc"):
+            r = ist.istek("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+                          + "&plan=p1&kd=" + v + "&kc=" + v)
+            esit(r.status, 200, f"kd/kc={v}")
+    finally: o.temizle()
+
 @test("form alanlari tipine uygun kontrolle ciziliyor", "arayuz")
 def t_alan_tipleri():
     """Dogrulama tablodan turuyordu ama girdinin KENDISI duz metin kutusuydu:
