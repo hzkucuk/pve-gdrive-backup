@@ -2,6 +2,143 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.11.0 — 2026-10-15
+
+### Saklamayla silinen yedek her koşuda yeniden yükleniyordu
+
+Proxmox diskte `keep-daily=4`, plan Drive'da `keep_days=3 / keep_count=3` tutuyor.
+Drive'dan silinen en eski set diskte durmaya devam ediyor; `rclone copy` Drive çöpündeki
+dosyayı görmediği için onu "eksik" sayıp baştan yüklüyor, aynı koşunun budaması da yine
+çöpe atıyordu (canlı ayarlarla tur başına ~45 GB). Günde tek koşuda Proxmox o seti akşam
+sildiği için sessiz kalıyordu; gündüz elle "Yedekle" denince ya da `keep_count` düşünce
+döngü başlıyordu.
+
+**Test bunu neden yakalamadı:** sahte rclone çöpteki dosyayı da "var" sayıp atlıyordu.
+Mock düzeltildi (çöpteki dosya görünmez, `--filter` sırası ve `--min-age/--max-age`
+uygulanır, dosya başına yükleme sayacı tutulur). "Koşu sonunda Drive'da yok" kontrolü
+de döngüyü göremezdi — dosya aynı koşuda yine çöpe gidiyor; artık **yükleme sayısı** ölçülür.
+
+Düzeltme: `do_prune` sildiği adları hedef başına `budanan` kaydına yazar, `rclone copy`
+bunları ilk filtre kuralı olarak (`- /ad`, köke sabitli, kaçırılmış) dışlar. Diskten kalkan
+ad kayıttan düşer; kaynak okunamaz ya da boş görünürse (USB bağlı değil) kayda dokunulmaz.
+
+### Yeni: "Yalnızca son N gün" (`max_age_days`)
+
+Misafir seçicinin altında. `0` = sınır yok (varsayılan). Hızlı seçim: hepsi / son 1 / 2 / 3 / 7 gün.
+rclone `--max-age` ile uygulanır; liste sınır dışını `eski` rozetiyle gösterir. Plan N günden
+seyrek çalışıyorsa (haftanın günleri) arayüz "arada kalan yedekler hiç yüklenmez" diye uyarır.
+
+### Aynı kökten çıkanlar
+
+- **Önizleme boş kutuyu yok sayıyordu.** `parse_qs` boş değeri atıyordu; dahil desen kutusu
+  boşaltılınca liste kayıtlı eski desene göre etiketleniyordu.
+- **Düzenleyici `onchange` özniteliklerini eziyordu.** Otomatik bant genişliği kutusu
+  işaretlenince ayar kutusu açılmıyor, elle yazılan desen listeye yansımıyordu. Artık
+  zincirlenir; özgün işleyici bir kez saklanır (her açılışta zincir büyümez).
+- **Form modaldan taşıyordu.** `fieldset` ve `.f` sütunu en geniş içeriğe göre büyüyordu.
+  Ölçüldü: eski CSS'te 43 öğe taşıyordu (fieldset +60 px); şimdi 760/560/420/360/320 px'de 0.
+
+### Kod incelemesi (1.10.2 kota işi)
+
+- Hesap testi, rclone hata verse de önbellekteki eski değerle "başarılı" diyordu → taze sonuç.
+- Kalıcı hata (iptal edilmiş jeton) da "ölçüm gecikti" diye gösteriliyordu → yalnızca hız
+  sınırı / zaman aşımı bayat sayılır.
+- Bayat kart doluluk alarmını (kırmızı çubuk) siliyordu → ikisi birlikte.
+- `quota_retry_sec` sağlıklı kaydı da kısıtlıyordu → yalnızca başarısız/bayatta.
+- Kota ayarları sunucuda yalnızca alttan (1) kırpılıyordu → arayüzle aynı alt/üst sınır.
+
+### Güvenlik incelemesi (hepsi düşük)
+
+- Budanan kuralı sabitlenmemişti: alt klasördeki aynı adlı dosya da dışlanıyordu → `- /ad`.
+- rclone kural sonundaki boşluğu kırpıyor: `"X.vma "` budanınca `"X.vma"` dışarıda kalırdı
+  → böyle adlar kayda alınmaz (gerçek rclone ile ölçüldü).
+- `inf`/`nan`: `min_age_min=inf` her koşuyu `do_copy`'de çökertiyordu; `mxage=inf` geçersiz JSON
+  üretiyordu → tüm yaş değerleri sonlu ve sınırlı. Kopyalamada beklenmedik istisna artık
+  koşuyu düşürmez, başarısız deneme sayılır ve yedek hedef denenir (silme yok).
+
+### İkinci kod incelemesi (9 bulgu)
+
+- **Budanan kaydı kalıcıydı.** `keep_days` yanlışlıkla 7→2 düşürülüp geri alınsa, arada
+  budanan 5 gün diskte durduğu hâlde bir daha hiç yüklenmezdi. Artık kayıt her koşuda
+  *bugünkü* kuralla sınanır (`budanacak_setler` — `do_prune` ile tek karar noktası);
+  kural gevşediyse ad düşer ve dosya yeniden yüklenir, günlüğe yazılır.
+- Önizleme budanan kararını formdaki **hedefe ve saklama değerlerine** göre verir;
+  filtrede birebir eşleşmeyen ad "silindi" gösterilmez.
+- Kota: bekleyen çağrılar (hesap ekranı, planlayıcı) da `quota_retry_sec`'e uyar — hız
+  sınırındaki hesap her açılışta 45 sn bekletmez; bayat kayıt TTL içinde "taze" sayılmaz.
+- Hesap testi yalnızca tanımlı hesabı önbelleğe yazar (bellek sınırsız büyümesin).
+- `yas_kurallari` ve günlük satırı normalize edilmemiş (metin) değerde patlamaz.
+- `vzdump_wait_min`/`min_age_min` üst sınırı 1440 değil 1 yıl: yükseltmede elle yazılmış
+  büyük değer sessizce kırpılmaz (yalnızca sonluluk garanti edilir).
+- `budanan_ayikla` state.json'ı tek kez okur, yalnızca değişiklikte yazar.
+- README'ye özet satır; ayarların tam tablosu `docs/OZELLIKLER.md`'de.
+
+**Doğrulandı.** Tüm paket **156 geçti, 0 kaldı**. İkinci incelemenin 5 yeni testi bir önceki
+kodla koşuldu, beşi de düştü. Yeni testler eski kodla koşuldu ve
+düştü (döngü kontrolü, boş `inc`, kota ×4, güvenlik ×2); ölçüm kontrolü testi kayıt
+kapatılınca mock'un döngüyü gerçekten gösterdiğini (2. yükleme) doğrular. Yaş ve budanan
+tahmini gerçek rclone 1.75 ile karşılaştırıldı. Arayüz yerelde sahte rclone ile tarayıcıda
+denendi. Debian 12 kabında temiz kurulum, yükseltme (`max_age_days=2`, `ui_port`, budanan
+kaydı korundu) ve `kur.sh` çıkış 0; taze kurulumda `max_age_days=0`.
+
+## 1.10.2 — 2026-08-10
+
+### Hesap kartı "hata / zaman aşımı" diyordu; ortada arıza yoktu
+
+Ürün sahibinin bildirdiği kusur: `sametdrive` kartı kırmızı, altında `⚠ zaman aşımı`.
+
+**Ölçüm (üretim host'u, aynı komut arka arkaya):**
+
+```
+rclone about sametdrive: --json
+1: 50.1 sn     ← 45 sn'lik sınırın üstünde  →  ekranda "hata"
+2:  0.99 sn
+3:  0.92 sn  …  12: 0.95 sn
+```
+
+Yavaş koşunun `-vv` günlüğü sebebi verdi:
+
+```
+DEBUG : pacer: low level retry 1/10 (error googleapi: Error 403:
+        Quota exceeded ... 'drive.googleapis.com'
+        for consumer 'project_number:202264815644', rateLimitExceeded)
+DEBUG : pacer: Rate limited, increasing sleep to 1.828852923s → 2.951910351s → 4.784887814s
+```
+
+`202264815644` rclone'un **herkese açık OAuth projesi**. Yapılandırmada `client_id`
+yoksa (bizde yok) hesap, dakikalık Drive API kotasını tüm rclone kullanıcılarıyla
+paylaşır. Google ara ara `403 rateLimitExceeded` döner, rclone üstel geri çekilmeyle
+10 kez tekrar dener; toplam süre 45 sn'lik sabit sınırı aşınca ekranda arıza görünür.
+Ağ ya da hesap sorunu yok: DNS 6 ms, host yükü 0.66, ardışık 11 koşu ~1 sn.
+
+Üç kusur düzeltildi:
+
+1. **Geçici hata, eldeki doğru değeri siliyordu.** Arka plan tazelemesi sonucu
+   koşulsuz önbelleğe yazıyordu; 15 dakikalık sağlam kota tek bir hız sınırı hatasıyla
+   eziliyordu. Artık başarısız ölçüm eski değeri silmez: kart normal çizilir,
+   `⏳ ölçüm gecikti · N dk önceki değer` yazar. Kırmızı "hata" kartı yalnızca
+   **hiç** sağlam ölçüm yokken çıkar.
+2. **Başarısız sonuç 15 dakika "taze" sayılıyordu.** Artık yalnızca başarılı ölçüm
+   tazedir; hata yolunda tekrar aralığını `quota_retry_sec` belirler (arka arkaya
+   deneme hız sınırının süresini uzatır).
+3. **45 sn sabit kodluydu.** Sınır ayardan gelir; arka plan (`quota_timeout_sec`,
+   120 sn) ile kullanıcının ekran başında beklediği yol (`quota_wait_timeout_sec`,
+   45 sn) ayrıdır. Hız sınırı hatası artık ham API JSON'u yerine
+   `Google hız sınırı (paylaşılan rclone kimliği) - tekrar denenecek` diye yazılır.
+
+Yeni ayarlar arayüzde (Ayarlar → Bellek ve dayanıklılık): kota önbelleği, kota
+sorgusu zaman aşımı, beklenen kota sorgusu, kota tekrar denemesi.
+
+**Doğrulandı.** 5 yeni test yazıldı ve **eski kodla koşuldu**: dördü de düştü
+(`{'ok': False, 'error': 'zaman asimi'}` — ekranda görülen kartın ta kendisi),
+arayüz testi de bayat dalını bulamadı. Yeni kodla hepsi geçiyor.
+Tüm paket: **138 geçti, 0 kaldı**. Gerçek Debian 12 kabında sahte `systemctl` ile
+temiz kurulum (çıkış 0) ve yükseltme (`ui_port` ve elle değiştirilmiş
+`quota_timeout_sec=300` korundu) denendi.
+
+**Not:** kalıcı çözüm kendi Google Cloud projemizin `client_id`/`client_secret`'ını
+kullanmaktır; o zaman hız sınırı paylaşılmaz. Ürün henüz `client_id` alanı sunmuyor.
+
 ## 1.10.1 — 2026-08-09
 
 ### Hesap kotası ilk açılışta gelmiyordu, F5 gerekiyordu

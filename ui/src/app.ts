@@ -540,6 +540,13 @@ function ceviriUygula(): void { if (dilAl() !== "tr") sayfayiCevir(); }
 
 /** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
  *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
+function yasMetni(dk?: number): string {
+  const d = Math.max(0, Math.round(dk || 0));
+  if (d < 60) return d + C(" dk");
+  const sa = Math.floor(d / 60);
+  return sa < 24 ? sa + C(" sa") : Math.floor(sa / 24) + C(" gün");
+}
+
 function hesapSerit(): void {
   const h = (S && S.hesaplar) || [];
   if (!h.length) { setHtml("hesapserit", ""); return; }
@@ -567,12 +574,24 @@ function hesapSerit(): void {
         + esc(q.error || C("kota okunamadı")) + "</div></div>";
     }
     const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
-    const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
-    return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="Yönetmek için tıkla">'
+    // Bayat deger = son tazeleme basarisiz oldu ama gosterilen sayi DOGRU.
+    // Bunu kirmizi "hata" yapmak yanlis alarmdi: Google'in hiz sinirina takilan
+    // tek bir sorgu yuzunden hesap bozuk sanilirdi.
+    // Doluluk alarmi bayatlikla KAYBOLMAMALI: %95 dolu hesap hiz sinirina takildi
+    // diye gri cubuga donerse "disk doluyor" uyarisi tam yanlis anda kaybolur.
+    const sinif = (q.bayat ? " bayat" : "")
+      + (pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : ""));
+    const alt = q.bayat
+      ? "⏳ " + C("ölçüm gecikti · ") + yasMetni(q.bayat_yas_dk) + C(" önceki değer")
+      : hb(q.used) + " / " + hb(q.total) + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "");
+    const ipucu = q.bayat
+      ? C("Son ölçüm başarısız: ") + (q.bayat_hata || C("kota okunamadı"))
+        + C(" — gösterilen değer eski ama doğru.")
+      : "Yönetmek için tıkla";
+    return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="' + esc(ipucu) + '">'
       + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
       + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
-      + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
-      + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "") + "</div></div>";
+      + '<div class="alt">' + alt + "</div></div>";
   }).join(""));
 }
 
@@ -741,7 +760,7 @@ function kullaniciCiz(): void {
 const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI: string[][] = [
-  ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
+  ["e-name"], ["e-src", "e-mxage"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
   ["e-runat", "e-wvm", "e-mage", "e-cool"],
   ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
   ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
@@ -994,7 +1013,7 @@ function preset(k: string): void {
     c.checked = v.weekdays.indexOf(Number(c.value)) >= 0;
   });
   setVal("e-bwsch", ""); good("e-bwsch");
-  ramHint(); saklamaIpucu(); markDirty();
+  ramHint(); saklamaIpucu(); yasUyariCiz(); markDirty();
   flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
 }
 /** Saklama alanlarinin yardim metni yazilan degere gore guncellenir.
@@ -1053,7 +1072,7 @@ function openEditor(pid: string | null): void {
     bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
     transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [] as string[],
     mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
-    wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
+    wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10, max_age_days: 0,
     skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
     host_config_enabled: true, host_config_json: true, host_config_keep_count: 30,
     report_day: 1, report_at: "09:00", report_days: 7, report_stale_days: 2,
@@ -1076,7 +1095,21 @@ function openEditor(pid: string | null): void {
   loadSmtpSelect(v.smtp_profile); void loadStorages();
   ramHint(); saklamaIpucu(); bwLinkKipi();
   Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
-    .forEach((e: HTMLElement) => { e.oninput = markDirty; e.onchange = markDirty; });
+    .forEach((e: HTMLElement) => {
+      // HTML'de yazili onchange/oninput (or. e-bwauto -> bwAutoToggle) EZILMEZ, zincirlenir.
+      // Once eziliyordu: otomatik bant genisligi kutusu isaretlenince ayar kutusu acilmiyor,
+      // elle yazilan dahil deseni listeye yansimiyordu. Ozgun isleyici YALNIZCA ilk
+      // acilista saklanir; yoksa her acilis bir onceki sarmalayiciyi sarar ve zincir
+      // her acilista bir kat buyur (50 acilis = her degisiklikte 50 kat isleyici).
+      if (!ozgunIsleyici.has(e)) ozgunIsleyici.set(e, { ch: e.onchange, inp: e.oninput });
+      const { ch, inp } = ozgunIsleyici.get(e)!;
+      e.oninput = (ev: Event) => { markDirty(); if (inp) inp.call(e, ev); };
+      e.onchange = (ev: Event) => { markDirty(); if (ch) ch.call(e, ev); };
+    });
+  // Onizlemeyi yenilemesi gereken alanlar.
+  fld("e-inc").onchange = () => { markDirty(); void kaynakListeYukle(true); };
+  fld("e-mxage").onchange = yasDegisti;
+  yasUyariCiz();
   fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
   fld("e-acct").onchange = () => { yhOzet(); markDirty(); };
   fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
@@ -1133,7 +1166,7 @@ async function savePlan(): Promise<void> {
 interface KaynakDosya {
   ad: string; boyut: number; mtime: number; yas_dk: number;
   durum: string; neden: string; desen: string; min_age: number;
-  dahil_desen: string; misafir: string;
+  dahil_desen: string; misafir: string; max_gun?: number;
   dump: boolean; konf: boolean;
 }
 interface Misafir {
@@ -1145,6 +1178,7 @@ interface KaynakListe {
   ok: boolean; hata?: string; toplam_dosya?: number; toplam_boyut?: number;
   yuklenecek?: number; saklama_disi?: number; limit?: number; kirpildi?: boolean;
   filtre_disi?: number; filtre_acik?: boolean;
+  yas_disi?: number; max_gun?: number; budanan?: number;
   misafirler?: Misafir[];
   dosyalar?: KaynakDosya[];
 }
@@ -1264,6 +1298,51 @@ function incUyariCiz(): void {
   }).join(""));
 }
 
+/** Duzenleyici girdilerinin HTML'den gelen ozgun isleyicileri (bkz. openEditor). */
+const ozgunIsleyici = new WeakMap<HTMLElement, { ch: ((this: GlobalEventHandlers, ev: Event) => unknown) | null;
+  inp: ((this: GlobalEventHandlers, ev: Event) => unknown) | null }>();
+
+/* ---------- yas siniri ----------
+ * "Yalnizca son N gunun dosyalari". Misafir secimiyle birlikte isler.
+ * Tuzak: plan N gunden seyrek calisirsa arada kalan yedekler HIC yuklenmez --
+ * hata vermez, sessizce eksik kalir. Bu yuzden calisma araligiyla karsilastirilir.
+ */
+function yasSec(gun: number): void {
+  setVal("e-mxage", String(gun));
+  yasDegisti();
+}
+
+function yasDegisti(): void {
+  markDirty();
+  yasUyariCiz();
+  void kaynakListeYukle(true);
+}
+
+/** Secili haftanin gunlerine gore iki calisma arasindaki en uzun bosluk (gun). */
+function calismaAraligiGun(): number {
+  const gunler = Array.prototype.slice.call(document.querySelectorAll("#e-wd input:checked"))
+    .map((c: HTMLInputElement) => Number(c.value)).filter((x: number) => x >= 1 && x <= 7)
+    .sort((a: number, b: number) => a - b);
+  if (!gunler.length || gunler.length === 7) return 1;
+  let enUzun = 7 - gunler[gunler.length - 1] + gunler[0];      // haftanin donusu
+  for (let i = 1; i < gunler.length; i++) enUzun = Math.max(enUzun, gunler[i] - gunler[i - 1]);
+  return enUzun;
+}
+
+function yasUyariCiz(): void {
+  const gun = Number(val("e-mxage")) || 0;
+  if (gun <= 0) { setHtml("e-mxage-uyari", ""); return; }
+  const aralik = calismaAraligiGun();
+  if (gun < aralik) {
+    setHtml("e-mxage-uyari", '<div class="uyari-metin">⚠ ' + C("Plan en fazla ") + aralik
+      + C(" günde bir çalışıyor ama sınır ") + gun + C(" gün: arada kalan yedekler hiç yüklenmez. ")
+      + C("Sınırı en az ") + aralik + C(" yap ya da 0 bırak.") + "</div>");
+    return;
+  }
+  setHtml("e-mxage-uyari", '<div class="hint">' + C("Bir koşu atlanır ya da başarısız olursa, ")
+    + C("o günün yedeği bir sonraki koşuda sınırın dışında kalabilir.") + "</div>");
+}
+
 function incDuzelt(eski: string, yeni: string): void {
   incYaz(incJetonlar().map((x) => (x === eski ? yeni : x)));
 }
@@ -1281,7 +1360,12 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     + "&plan=" + encodeURIComponent(sel || "")
     + "&skip=" + encodeURIComponent(val("e-skip"))
     + "&inc=" + encodeURIComponent(val("e-inc"))
-    + "&mage=" + encodeURIComponent(val("e-mage"));
+    + "&mage=" + encodeURIComponent(val("e-mage"))
+    + "&mxage=" + encodeURIComponent(val("e-mxage"))
+    // Budanan karari hedefe ve saklama kuralina bagli: formdaki (kaydedilmemis) degerler.
+    + "&remote=" + encodeURIComponent(val("e-acct") ? val("e-acct") + ":"
+      + val("e-folder").trim().replace(/^\/+/, "") : "")
+    + "&kd=" + encodeURIComponent(val("e-kd")) + "&kc=" + encodeURIComponent(val("e-kc"));
   let j: KaynakListe;
   try { j = await api<KaynakListe>(q); }
   catch { setTxt("ksl-ozet", C("klasör okunamadı")); return; }
@@ -1292,6 +1376,7 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
   }
   misafirCiz(j.misafirler || [], !!j.filtre_acik);
   incUyariCiz();
+  yasUyariCiz();
   const d = j.dosyalar || [];
   const ozet = [
     (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
@@ -1300,10 +1385,12 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
   // Filtre acikken kac dosyanin ELENDIGI ozetin bir parcasi: "yalnizca 100'u
   // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
   if (j.filtre_acik) ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
+  if (j.max_gun) ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski"));
+  if (j.budanan) ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez"));
   // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
   // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
   // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.
-  const hicYok = j.filtre_acik && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
+  const hicYok = (j.filtre_acik || !!j.max_gun) && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
   if (j.saklama_disi) ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
   if (hicYok) ozet.push('<span class="kap-hata">' + C("⚠ hiçbir dosya eşleşmedi") + "</span>");
   setHtml("ksl-ozet", ozet.join(" · ")
@@ -1319,6 +1406,8 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     if (x.durum === "bekler") return '<span class="ksl-r ksl-bekle">' + C("bekler") + "</span>";
     if (x.durum === "belirsiz") return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
     if (x.durum === "filtre_disi") return '<span class="ksl-r ksl-disi">' + C("filtre dışı") + "</span>";
+    if (x.durum === "eski") return '<span class="ksl-r ksl-disi">' + C("eski") + "</span>";
+    if (x.durum === "budandi") return '<span class="ksl-r ksl-disi">' + C("Drive'da silindi") + "</span>";
     if (!x.dump && !x.konf) return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
     return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
   };
@@ -1329,6 +1418,9 @@ async function kaynakListeYukle(yenile?: boolean): Promise<void> {
     if (x.durum === "belirsiz") return C("desen elle değerlendirilmeli: ") + "<code>" + esc(x.desen) + "</code>";
     if (x.durum === "bekler") return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
     if (x.durum === "filtre_disi") return C("dahil etme filtresine uymuyor — yüklenmez");
+    if (x.durum === "eski") return C("son ") + x.max_gun + C(" günden eski (")
+      + (x.yas_dk / 1440).toFixed(1) + C(" gün) — yüklenmez");
+    if (x.durum === "budandi") return C("saklama süresi dolup Drive'dan silindi — tekrar yüklenmez");
     if (x.dump) return C("saklama: gün kuralı işler");
     if (x.konf) return C("saklama: yapılandırma kuralı işler");
     return "<b>" + C("yüklenir ama hiç silinmez") + "</b> — " + C("ad kalıbına uymuyor");
@@ -1630,8 +1722,13 @@ async function renderAccounts(): Promise<void> {
   REM = j.remotes || [];
   setHtml("a-list", REM.length ? REM.map((r) => {
     const q = r.quota || {};
-    const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
-      + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
+    const line = q.ok
+      ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
+        + C("  ·  boş ") + hb(q.free || 0)
+        + (q.bayat ? ' <span class="bayat-not">⏳ ' + C("ölçüm gecikti · ")
+            + yasMetni(q.bayat_yas_dk) + C(" önceki değer") + " · "
+            + esc(q.bayat_hata || "") + "</span>" : "")
+      : "⚠ " + esc(q.error || C("kota okunamadı"));
     return '<div class="card" data-hesap="' + esc(r.name) + '" style="margin-bottom:8px"><div style="display:flex;'
       + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
       + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
@@ -1991,6 +2088,8 @@ function openSettings(): void {
   setVal("g-tail", s.rclone_tail_lines); setVal("g-rows", s.snapshot_max_rows);
   setVal("g-logmb", s.log_max_mb); setVal("g-logkeep", s.log_keep);
   setVal("g-tmo", s.rclone_timeout_min); setChk("g-cleanup", s.allow_account_cleanup);
+  setVal("g-qcache", s.quota_cache_min); setVal("g-qtmo", s.quota_timeout_sec);
+  setVal("g-qwait", s.quota_wait_timeout_sec); setVal("g-qretry", s.quota_retry_sec);
   setVal("g-cert", s.ssl_cert || ""); setVal("g-key", s.ssl_key || "");
   setVal("g-nets", (s.allow_networks || []).join(", "));
   setChk("g-upcheck", s.update_check !== false); setChk("g-upauto", !!s.update_auto);
@@ -2027,6 +2126,10 @@ async function saveSettings(): Promise<void> {
   ok = vNum("g-logmb", 0, 1000, "0-1000 MB") && ok;
   ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
   ok = vNum("g-tmo", 0, 1440, C("0-1440 dk")) && ok;
+  ok = vNum("g-qcache", 1, 1440, C("1-1440 dk")) && ok;
+  ok = vNum("g-qtmo", 5, 600, C("5-600 sn")) && ok;
+  ok = vNum("g-qwait", 5, 600, C("5-600 sn")) && ok;
+  ok = vNum("g-qretry", 5, 3600, C("5-3600 sn")) && ok;
   ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
   const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
   const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
@@ -2040,6 +2143,8 @@ async function saveSettings(): Promise<void> {
     rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
     log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),
     rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
+    quota_cache_min: Number(val("g-qcache")), quota_timeout_sec: Number(val("g-qtmo")),
+    quota_wait_timeout_sec: Number(val("g-qwait")), quota_retry_sec: Number(val("g-qretry")),
     ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
     allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
     update_check: chk("g-upcheck"), update_auto: chk("g-upauto"), update_url: val("g-upurl"),

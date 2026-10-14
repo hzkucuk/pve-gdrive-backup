@@ -50,6 +50,7 @@ hangi planın vaktinin geldiğine kod karar verir. Kaçırılan çalışma telaf
 | `wait_for_vzdump` | `true` | Proxmox yedeği çalışırken yükleme başlatma |
 | `vzdump_wait_min` | `60` | En fazla bekleme; dolarsa tur atlanır. `0` = hemen atla |
 | `min_age_min` | `10` | Sadece bu kadar dakikadır değişmemiş dosyaları yükle |
+| `max_age_days` | `0` | **Yalnızca son N günde yazılmış dosyaları yükle** (rclone `--max-age`). `0` = sınır yok, hepsi. Arayüzde misafir seçicinin altında; hızlı seçim: hepsi / son 1 / 2 / 3 / 7 gün. Plan N günden seyrek çalışırsa arada kalan yedekler **hiç yüklenmez** — arayüz bunu haftanın günleriyle karşılaştırıp uyarır |
 | `skip_patterns` | `["*.dat","*.tmp","*.part"]` | Yazılmakta olan dosyalar, hiç yüklenmez |
 | `include_patterns` | `[]` | **Boş = hepsi.** Doluysa yalnızca bu desenlere uyan dosyalar yüklenir (ör. `*100*`). `skip_patterns` her zaman önce işler |
 | *(misafir seçici)* | — | **2. Kaynak** adımındaki kutucuklar. `yalnız` tek tıkla filtreyi o misafire ayarlar, seçim `include_patterns`'a `vzdump-<tip>-<id>-*` olarak yazılır |
@@ -194,6 +195,10 @@ jetonu ister. Yanıtlarda `X-Frame-Options`, `X-Content-Type-Options`, `Referrer
 | `stats_interval_sec` | `5` | İlerleme bildirim sıklığı |
 | `purge_batch` | `50` | Çöp temizliğinde tek çağrıda silinecek dosya |
 | `purge_timeout_min` | `30` | Çöp temizliği zaman aşımı |
+| `quota_cache_min` | `15` | Hesap kotası kaç dakika önbellekte tutulsun |
+| `quota_timeout_sec` | `120` | Arka plan kota sorgusu zaman aşımı |
+| `quota_wait_timeout_sec` | `45` | Kullanıcının beklediği kota sorgusu (test, planlayıcı) |
+| `quota_retry_sec` | `60` | Başarısız kota sorgusundan sonra en erken tekrar |
 | `kaynak_liste_limit` | `500` | Kaynak dosya listesinde arayüze gönderilen azami satır |
 | `cooldown_hours` (plan) | `6` | Başarılı koşudan sonra planlı slotun atlanma penceresi (saat) |
 | `durdur_kontrol_sn` | `2` | Durdurma isteğinin yoklanma sıklığı |
@@ -201,6 +206,18 @@ jetonu ister. Yanıtlarda `X-Frame-Options`, `X-Content-Type-Options`, `Referrer
 
 rclone çıktısı satır satır okunur ve yalnızca son N satır tutulur — 200.000 satırlık çıktıda
 ölçülen bellek artışı 0.05 MB (tümünü yakalayan yöntemde 39 MB).
+
+**Kota sorgusu neden bazen yavaş?** rclone'a kendi `client_id`'ni vermediysen hesap,
+rclone'un herkese açık Google projesini (`project_number:202264815644`) kullanır ve
+dakikalık Drive API kotasını tüm dünyayla paylaşır. Google ara ara `403 rateLimitExceeded`
+döner, rclone üstel geri çekilmeyle 10 kez tekrar dener. Ölçüldü (2026-08-10, üretim host):
+aynı `rclone about` komutu 11 kez ~1 sn sürerken 1 kez 50 sn sürdü. Bu yüzden:
+
+- arka plan zaman aşımı geniş tutulur (`quota_timeout_sec`),
+- **başarısız ölçüm eldeki doğru değeri silmez** — kart "ölçüm gecikti · N dk önceki değer"
+  der, kırmızı "hata" kartına dönmez,
+- başarısız sorgudan sonra `quota_retry_sec` boyunca yeniden denenmez (arka arkaya deneme
+  hız sınırını uzatır).
 
 ### Diğer
 
@@ -260,6 +277,25 @@ görünür kılar:
 | `bekler` | `min_age_min`'den yeni; bu turda alınmaz, sonraki turda alınır |
 | `saklama dışı` | **Yüklenir ama hiç silinmez** — `dump_regex`'e uymadığı için `do_prune` onu görmez, Drive'da birikir |
 | `filtre dışı` | `include_patterns` doluyken desene uymuyor, yüklenmez. Listeden **gizlenmez**: neyin dışarıda kaldığı görünür olmalı |
+| `eski` | `max_age_days`'ten eski; yüklenmez, klasörde kalır |
+| `Drive'da silindi` | Saklama kuralı bu dosyayı Drive'dan zaten sildi; diskte durduğu hâlde **tekrar yüklenmez** (aşağıya bak) |
+
+#### Budanan kaydı — silineni yeniden yükleme döngüsü
+
+Proxmox diskte Drive'dan **daha uzun** tutuyorsa (ör. `keep-daily=4`, plan `keep_days=3`),
+Drive'dan silinen en eski set diskte durmaya devam eder. `rclone copy` Drive çöpündeki
+dosyayı görmez, onu "eksik" sayıp baştan yükler; aynı koşunun budaması da yine çöpe atar.
+Canlı ayarlarla bu tur başına ~45 GB demekti.
+
+Artık `do_prune` sildiği adları plan durumunda hedef başına (`budanan`) tutar ve
+`rclone copy` bunları ilk `--filter` kuralı olarak dışlar. `drive_trash` kaydı bu işe
+yaramazdı: çöp boşaltılınca o kayıt düşer ve döngü geri gelir.
+
+- Kayıt **hedef başına**: yedek hedefe düşüldüğünde orada eksik olan dosya atlanmaz.
+- Diskten kalkan ad kayıttan düşer (sınırsız büyümez).
+- Kayıt **kalıcı değil**: her koşuda bugünkü `keep_days`/`keep_count` ile yeniden sınanır.
+  Kural gevşediyse (ör. `keep_days` yükseltildi) ad düşer ve dosya **yeniden yüklenir**.
+- Kaynak **okunamazsa ya da boş görünürse** (USB disk bağlı değil) kayda dokunulmaz.
 
 `atlanır` etiketi tahmin değil: aynı kararı gerçek rclone'un `--exclude` bayrağıyla
 karşılaştıran bir test var (`atlanacak desen tahmini gercek rclone ile ayni`).

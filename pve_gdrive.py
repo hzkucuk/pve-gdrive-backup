@@ -23,7 +23,7 @@ Komutlar:
   python3 pve_gdrive.py ice-aktar         # stdin'den ayar yukler
 """
 import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, threading, fnmatch
-import hashlib, secrets, random, ssl, ipaddress, shutil, tempfile, io
+import hashlib, secrets, random, ssl, ipaddress, shutil, tempfile, io, math
 import urllib.request, urllib.parse, html as _html
 from collections import deque
 from datetime import datetime, timedelta
@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.10.1"
+SURUM = "1.11.0"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -84,6 +84,14 @@ GLOBAL_DEFAULTS = {
     "update_sha256": "",
     "update_backup_keep": 5,      # saklanacak eski surum sayisi
     "quota_cache_min": 15,        # hesap kotasi kac dakika onbellekte tutulsun
+    # Kota sorgusu zaman asimlari. Google, rclone'un ortak OAuth projesini
+    # ara ara hiz sinirina takiyor (403 rateLimitExceeded); rclone ustel
+    # geri cekilmeyle 10 kez tekrar deniyor. Olculdu 2026-08-10: ayni komut
+    # 11 kez 1 sn surerken 1 kez 50 sn surdu. Arka planda kimse beklemedigi
+    # icin sinir genis; kullanicinin bekledigi yerde kisa tutulur.
+    "quota_timeout_sec": 120,     # arka plan kota sorgusu icin zaman asimi
+    "quota_wait_timeout_sec": 45, # kullanicinin bekledigi kota sorgusu (test, planlayici)
+    "quota_retry_sec": 60,        # basarisiz kota sorgusundan sonra en erken tekrar
     "oneri_pay_pct": 60,          # saklama onerisi bos alanin en fazla bu yuzdesini kullanir
     # Zamanlayici: systemd timer yerine surecin kendi icinde calissin mi.
     # null = otomatik: systemd timer yoksa surec ici zamanlayici acilir
@@ -242,6 +250,9 @@ PLAN_DEFAULTS = {
     "wait_for_vzdump": True,  # vzdump calisiyorsa yuklemeye baslama
     "vzdump_wait_min": 60,    # en fazla bu kadar dakika bekle, sonra bu turu atla (0 = hic bekleme)
     "min_age_min": 10,        # dosya en az bu kadar dakikadir degismemisse yukle (yarim dosya gitmesin)
+    # Yalnizca son N gunde yazilmis dosyalar yuklenir (0 = yas siniri yok, hepsi).
+    # Plan calisma araligindan kisa tutulursa arada kalan yedekler HIC yuklenmez.
+    "max_age_days": 0,
     "skip_patterns": ["*.dat", "*.tmp", "*.part"],   # yazilmakta olan dosyalar
     # Bos = klasordeki her sey (atlanacak desenler haric). Doluysa YALNIZCA bu
     # desenlere uyanlar yuklenir: "sadece 100 numarali misafir" gibi secimler icin.
@@ -404,9 +415,12 @@ def norm_plan(p):
         except Exception: q[k] = PLAN_DEFAULTS[k]
     try: q["cooldown_hours"] = max(0.0, min(168.0, float(q.get("cooldown_hours", 6))))
     except (TypeError, ValueError): q["cooldown_hours"] = 6
-    for k in ("vzdump_wait_min", "min_age_min"):
-        try: q[k] = max(0.0, float(q[k]))
-        except Exception: q[k] = PLAN_DEFAULTS[k]
+    # Sonlu ve sinirli: json.loads "Infinity" kabul eder; inf/nan int()'e girince
+    # her kosu do_copy'de patliyordu (yedek yok, ama sessizce).
+    # Ust sinir yalnizca sonlulugu garanti eder (1 yil); eskiden sinirsizdi ve
+    # arayuzun 1440'i elle yazilmis buyuk degerleri yukseltmede sessizce kirpmasin.
+    for k, ust in (("vzdump_wait_min", 525600.0), ("min_age_min", 525600.0), ("max_age_days", 3650.0)):
+        q[k] = sayi_sinirla(q.get(k), 0.0, ust, PLAN_DEFAULTS[k])
     for k in ("wait_for_vzdump", "prune_on_failure"):
         q[k] = bool(q.get(k, PLAN_DEFAULTS[k]))
     try: q["drive_trash_days"] = max(0.0, float(q["drive_trash_days"]))
@@ -1595,9 +1609,18 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
     re_d = dump_re()
     desenler = p.get("skip_patterns") or []
     dahil_desen = [str(x).strip() for x in (p.get("include_patterns") or []) if str(x).strip()]
-    min_age = float(p.get("min_age_min") or 0)
+    # Sorgudan gelen deger norm_plan'dan gecmez: ayni sinirlar burada da uygulanir
+    # (inf -> json.dumps "Infinity" yazar, tarayici JSON'u cozemezdi).
+    min_age = sayi_sinirla(p.get("min_age_min"), 0.0, 525600.0, 0.0)
+    max_gun = sayi_sinirla(p.get("max_age_days"), 0.0, 3650.0, 0.0)
+    # do_copy ile AYNI karar (budanan_gecerli): kural gevsediyse "silindi" denmez.
+    try:
+        budanan = budanan_gecerli(p, budanan_oku(p), set(adlar)) if adlar else budanan_oku(p)
+    except Exception as e:
+        yut("kaynak_dosyalar", e); budanan = {}
     simdi = time.time()
     kayitlar = []; toplam = 0; yuklenecek = 0; saklama_disi = 0; filtre_disi = 0
+    yas_disi = 0; budanan_n = 0
     misafirler = {}
     for ad in adlar:
         yol = os.path.join(src_dir, ad)
@@ -1615,7 +1638,11 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         dump = bool(m_d); konf = bool(RE_HOSTCONF.match(ad))
         m_tip, m_vmid = _misafir_kimlik(m_d)
         misafir = f"{m_tip}-{m_vmid}" if m_tip and m_vmid else ""
-        if uyar is None:
+        if ad in budanan:
+            # rclone sirasiyla ayni: budanan kurali en once yazilir (bkz. filtre_kurallari)
+            durum, neden = "budandi", "Drive'da saklama suresi doldu, tekrar yuklenmez"
+            budanan_n += 1
+        elif uyar is None:
             durum, neden = "belirsiz", f"desen elle degerlendirilmeli: {desen}"
         elif uyar:
             # Atlama kurallari dahil etme kurallarindan once gelir; rclone --filter
@@ -1629,6 +1656,9 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
             filtre_disi += 1
         elif min_age > 0 and yas_dk < min_age:
             durum, neden = "bekler", f"{int(min_age)} dk'dan yeni ({int(yas_dk)} dk)"
+        elif max_gun > 0 and yas_dk > max_gun * 1440:
+            durum, neden = "eski", f"son {max_gun:g} gunden eski ({yas_dk / 1440:.1f} gun)"
+            yas_disi += 1
         else:
             durum = "yuklenir"
             yuklenecek += 1
@@ -1641,7 +1671,7 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
         # neden yalnizca API/gunluk icin ASCII ozet olarak kalir.
         kayitlar.append({"ad": ad, "boyut": boyut, "mtime": int(mtime),
                          "yas_dk": int(yas_dk), "durum": durum, "neden": neden,
-                         "desen": desen or "", "min_age": int(min_age),
+                         "desen": desen or "", "min_age": int(min_age), "max_gun": max_gun,
                          "dahil_desen": dahil_d or "", "misafir": misafir,
                          "dump": dump, "konf": konf})
         # Misafir ozeti: "sadece 100'u yedekle" karari dosya adi yazarak degil
@@ -1672,6 +1702,7 @@ def kaynak_dosyalar(src_dir, p=None, limit=None):
             "yuklenecek": yuklenecek, "saklama_disi": saklama_disi,
             "misafirler": m_liste,
             "filtre_disi": filtre_disi, "filtre_acik": bool(dahil_desen),
+            "yas_disi": yas_disi, "max_gun": max_gun, "budanan": budanan_n,
             "limit": lim, "kirpildi": len(kayitlar) > lim,
             "dosyalar": kayitlar[:lim]}
 
@@ -1844,8 +1875,116 @@ def plan_hedefle(p, hedef):
     q = dict(p); q["remote"] = hedef
     return q
 
-def filtre_kurallari(p):
+def sayi_sinirla(v, alt, ust, vars_):
+    """float'a cevirip [alt, ust] araligina kirpar; sayi degilse ya da sonlu
+    degilse (inf, nan) vars_ doner. Disaridan gelen her sayi buradan gecer."""
+    vars_ = float(vars_)
+    try: x = float(v if v not in (None, "") else vars_)
+    except (TypeError, ValueError): return vars_
+    if not math.isfinite(x): return vars_
+    return min(ust, max(alt, x))
+
+def budanan_ad_guvenli(ad):
+    """rclone filtre kuralinda birebir eslesebilecek ad mi?
+
+    Olculdu (rclone 1.75, guvenlik incelemesi 2026-10-15): kuralin sonundaki
+    bosluk kirpilir -- "X.vma " budanirsa kural "X.vma"yi, yani BASKA ve
+    budanmamis bir dosyayi dislar. Satir sonu iceren kural hicbir seye uymaz.
+    Boyle adlar kayda alinmaz: en kotu ihtimalle yeniden yuklenir, ama baska bir
+    yedegin sessizce disarida kalmasindan iyidir."""
+    ad = str(ad or "")
+    return bool(ad) and ad == ad.strip() and not any(c in ad for c in "\n\r/\\")
+
+def glob_kacir(ad):
+    """Dosya adini rclone filtre kaliplarinda birebir eslesecek hale getirir.
+    vzdump adlarinda ozel karakter yok ama elle konmus bir dosyada olabilir;
+    kacirilmazsa '[1]' gibi bir parca baska dosyalari da dislar."""
+    return re.sub(r"([\\*?\[\]{}])", r"\\\1", str(ad))
+
+def yas_kurallari(p):
+    """--min-age (yarim dosya gitmesin) ve --max-age (yalnizca son N gun)."""
+    # norm_plan'dan gecmemis bir plan (CLI, ice aktarma) da gelebilir: ayni sinirlar.
+    args = []
+    dk = sayi_sinirla(p.get("min_age_min"), 0.0, 525600.0, 0.0)
+    if dk > 0: args += ["--min-age", f"{int(dk)}m"]
+    gun = sayi_sinirla(p.get("max_age_days"), 0.0, 3650.0, 0.0)
+    if gun > 0: args += ["--max-age", f"{int(round(gun * 1440))}m"]
+    return args
+
+# ---------- BUDANAN KAYDI ----------
+# Saklama kurali bir seti Drive'dan silince ad burada tutulur. Kayit OLMADAN:
+# Drive'da 3 gun, diskte (Proxmox keep-daily) 4 gun tutuluyorsa en eski set
+# her kosuda yeniden yuklenip yeniden cope atilir. drive_trash kaydi bu ise
+# yaramaz: cop bosaltilinca o kayit duser ve dongu geri gelir.
+# Hedef basina tutulur: yedek hedefe dusuldugunde orada eksik olan dosya
+# birincildeki budama yuzunden atlanmasin.
+
+def _budanan_tum(st, pid):
+    return {h: dict(v) for h, v in (pstate(st, pid).get("budanan") or {}).items()
+            if isinstance(v, dict)}
+
+def budanan_oku(p):
+    """{ad: silinme_zamani} -- bu planin bu hedefinden saklama kuraliyla silinenler."""
+    if not p.get("id") or not p.get("remote"): return {}
+    return _budanan_tum(read_state(), p["id"]).get(p["remote"], {})
+
+def budanan_ekle(p, adlar):
+    if not adlar: return
+    tum = _budanan_tum(read_state(), p["id"])
+    h = tum.setdefault(p["remote"], {}); simdi = int(time.time())
+    for a in adlar:
+        if budanan_ad_guvenli(a): h.setdefault(a, simdi)
+        else: log(f"budanan kaydina alinmadi (filtrede birebir eslesmez): {a!r}", p.get("id"))
+    put_pstate(p["id"], {"budanan": tum})
+
+def budanan_gecerli(p, kayit, yerel):
+    """Kayittan, BUGUNKU kurallarla hala dislanmasi gereken adlar ({ad: zaman}).
+
+    Uc sart birden: (1) dosya kaynakta duruyor, (2) ad filtrede birebir eslesir,
+    (3) bugunku saklama kurali onu hala silerdi. Ucuncusu olmadan kayit kalici
+    olurdu: keep_days yanlislikla 7'den 2'ye inip geri alinsa, arada budanan 5 gun
+    diskte durdugu halde bir daha hic yuklenmezdi -- sessiz yedek kaybi.
+
+    Yerel liste Drive'in yerine gecer ve bu guvenli yondedir: Drive'daki yeni setler
+    yerelden yuklendigi icin bir setin Drive'daki sirasi yereldekinden buyuk olamaz.
+    Yani "yerelde tutulurdu" diyorsa Drive'da da tutulur; yeniden yukleme dongusu
+    geri gelmez."""
+    if not kayit: return {}
+    hala = {f["name"] for s in budanacak_setler(p, [{"Name": a, "Size": 0} for a in yerel])
+            for f in s["files"]}
+    return {a: t for a, t in kayit.items() if a in yerel and a in hala and budanan_ad_guvenli(a)}
+
+def budanan_ayikla(p):
+    """do_copy'nin dislayacagi kume; gecersiz kalan adlari kayittan dusurur.
+    Kaynak okunamazsa ya da BOS gorunuyorsa (USB disk bagli degil: baglama noktasi
+    bos bir dizindir) kayda dokunulmaz. Silinirse disk donunce budanan setler
+    yeniden yuklenir; bos klasorde zaten yuklenecek bir sey yok.
+    state.json tek kez okunur, yalnizca degisiklik varsa yazilir."""
+    tum = _budanan_tum(read_state(), p["id"])
+    kayit = tum.get(p["remote"]) or {}
+    if not kayit: return set()
+    try: yerel = set(os.listdir(p["src_dir"]))
+    except Exception as e:
+        yut("budanan_ayikla", e); return {a for a in kayit if budanan_ad_guvenli(a)}
+    if not yerel:
+        log("kaynak klasor bos gorunuyor (disk bagli mi?) - budanan kaydina dokunulmadi", p["id"])
+        return {a for a in kayit if budanan_ad_guvenli(a)}
+    kalan = budanan_gecerli(p, kayit, yerel)
+    if kalan != kayit:
+        geri = [a for a in kayit if a in yerel and a not in kalan]
+        if geri:
+            log(f"{len(geri)} dosya artik saklama kuralinin icinde, yeniden yuklenecek: "
+                f"{', '.join(sorted(geri)[:3])}" + (" ..." if len(geri) > 3 else ""), p["id"])
+        tum[p["remote"]] = kalan
+        put_pstate(p["id"], {"budanan": tum})
+    return set(kalan)
+
+def filtre_kurallari(p, budanan=()):
     """rclone filtre argumanlari, SIRALI.
+
+    budanan: saklama kuraliyla bu hedeften silinmis dosya adlari. Ilk sirada
+    dislanirlar; yoksa diskte duran dosya bir sonraki kosuda "Drive'da yok"
+    sayilip bastan yuklenir ve ayni kosunun budamasi onu yine cope atar.
 
     Olculdu 2026-08-09 (rclone 1.75.0): --include ile --exclude birlikte verilince rclone
         ERROR : Using --filter is recommended instead of both --include and --exclude
@@ -1858,6 +1997,10 @@ def filtre_kurallari(p):
     Ayri fonksiyon olmasinin sebebi: uretilen kural dizisi testte gercek rclone'a
     verilip arayuzun tahminiyle karsilastirilabilsin."""
     args = []
+    # "/" ile kok dizine sabitlenir: budanan adlar kaynagin en ust duzeyinden gelir
+    # (do_prune duz listeler). Sabitlenmezse alt klasordeki ayni adli dosya da dislanir.
+    for ad in sorted(budanan):
+        if budanan_ad_guvenli(ad): args += ["--filter", "- /" + glob_kacir(ad)]
     for pat in (p.get("skip_patterns") or []):
         pat = str(pat).strip()
         if pat: args += ["--filter", "- " + pat]
@@ -1874,9 +2017,15 @@ def do_copy(p):
             "--bwlimit", (p.get("bw_auto_max") or p.get("bwlimit") or "off")
                          if p.get("bwlimit_auto") else bwlimit_arg(p),
             "--stats-one-line", "--stats", f"{int(cfg().get('stats_interval_sec') or 5)}s", "-v"]
-    args += filtre_kurallari(p)
-    # Son N dakikadir degismemis dosyalar alinsin: vzdump yazarken yakalamayalim
-    if float(p.get("min_age_min") or 0) > 0: args += ["--min-age", f"{int(float(p['min_age_min']))}m"]
+    budanan = budanan_ayikla(p)
+    if budanan:
+        log(f"{len(budanan)} dosya saklama kuraliyla Drive'dan silinmisti, tekrar yuklenmeyecek", p["id"])
+    args += filtre_kurallari(p, budanan)
+    # min-age: vzdump yazarken yakalamayalim. max-age: yalnizca son N gun.
+    args += yas_kurallari(p)
+    gun = sayi_sinirla(p.get("max_age_days"), 0.0, 3650.0, 0.0)
+    if gun > 0:
+        log(f"yas siniri: yalnizca son {gun:g} gunun dosyalari yuklenir", p["id"])
     args += ["--buffer-size", str(p.get("buffer_size") or "16M")]
     if p.get("use_mmap"): args += ["--use-mmap"]          # bellegi OS'e geri verir
     if p.get("fast_list"): args += ["--fast-list"]        # daha az API cagrisi
@@ -2203,34 +2352,45 @@ def collect_sets(files):
         s["files"].append({"name": f["Name"], "size": int(f.get("Size", 0) or 0)})
     return sets
 
-def do_prune(p, files=None):
-    """keep_days disinda kalan setleri Google cop kutusuna gonderir.
+def budanacak_setler(p, files):
+    """Saklama kuralinin silecegi setler. TEK karar noktasi: hem do_prune hem
+    budanan kaydinin "hala gecerli mi" sinamasi bunu kullanir; iki ayri kopya
+    zamanla ayrisir ve kayit, kuralin artik tuttugu bir seti dislamaya devam eder.
     keep_count taban: misafir basina en yeni N set gun sinirina bakilmadan korunur."""
-    keep_days = int(p["keep_days"]); keep_count = int(p["keep_count"])
+    keep_days = int(p.get("keep_days", PLAN_DEFAULTS["keep_days"]))
+    keep_count = int(p.get("keep_count", PLAN_DEFAULTS["keep_count"]))
     cutoff = time.time() - keep_days * 86400
     by_guest = {}
-    for s in collect_sets(lsjson(p["remote"]) if files is None else files).values():
+    for s in collect_sets(files).values():
         by_guest.setdefault(s["guest"], []).append(s)
-    st = read_state(); tracked = pstate(st, p["id"]).get("drive_trash", [])
-    known = {e["name"] for e in tracked}
-    moved = 0
-    for guest, lst in by_guest.items():
+    secilen = []
+    for lst in by_guest.values():
         lst.sort(key=lambda s: (s["epoch"], s["dt"]), reverse=True)
         for i, s in enumerate(lst):
             if i < keep_count: continue            # guvenlik tabani
             if s["epoch"] >= cutoff: continue      # gun siniri icinde
-            for fi in s["files"]:
-                fn = fi["name"]
-                rc, o, e = rclone(["deletefile", f"{p['remote']}/{fn}"])   # varsayilan: Drive copune
-                if rc == 0:
-                    moved += 1
-                    log(f"drive copune tasindi: {fn}", p["id"])
-                    if fn not in known:
-                        tracked.append({"name": fn, "size": fi["size"], "trashed_at": int(time.time())})
-                        known.add(fn)
-                else:
-                    log(f"cope tasima HATA {fn}: {(e or '').strip()}", p["id"])
+            secilen.append(s)
+    return secilen
+
+def do_prune(p, files=None):
+    """keep_days disinda kalan setleri Google cop kutusuna gonderir."""
+    st = read_state(); tracked = pstate(st, p["id"]).get("drive_trash", [])
+    known = {e["name"] for e in tracked}
+    moved = 0; budanan = []
+    for s in budanacak_setler(p, lsjson(p["remote"]) if files is None else files):
+        for fi in s["files"]:
+            fn = fi["name"]
+            rc, o, e = rclone(["deletefile", f"{p['remote']}/{fn}"])   # varsayilan: Drive copune
+            if rc == 0:
+                moved += 1; budanan.append(fn)
+                log(f"drive copune tasindi: {fn}", p["id"])
+                if fn not in known:
+                    tracked.append({"name": fn, "size": fi["size"], "trashed_at": int(time.time())})
+                    known.add(fn)
+            else:
+                log(f"cope tasima HATA {fn}: {(e or '').strip()}", p["id"])
     if moved: put_pstate(p["id"], {"drive_trash": tracked})
+    budanan_ekle(p, budanan)
     return moved
 
 def drive_trash_names(p):
@@ -2705,7 +2865,13 @@ def _asama_kopyala(p, pid):
             set_progress(pid, {"hedef": hedef})
         # Kopyalama oncesi "kac dosya vardi" listelemesi yapilmaz: yuklenen sayisi
         # rclone'un kendi ozetinden gelir, bir tam uzak listeleme tasarruf edilir.
-        ok, uploaded = do_copy(plan_hedefle(p, hedef))
+        try:
+            ok, uploaded = do_copy(plan_hedefle(p, hedef))
+        except Exception as e:
+            # Beklenmedik istisna = basarisiz deneme. Kosu cokerse sonraki hedef
+            # hic denenmez; basarisiz sayilinca retention da calismaz (guvenli taraf).
+            log(f"kopyalama istisnasi ({hedef}): {type(e).__name__}: {e}", pid)
+            ok, uploaded = False, 0
         denemeler.append({"hedef": hedef, "ok": bool(ok), "yuklenen": uploaded})
         if ok:
             if i: log(f"yedek hedefe yazildi: {hedef} (birincil hedef basarisizdi)", pid)
@@ -3000,8 +3166,7 @@ def _kota_arkaplan(name):
     yeniledi diye gorur. Olculdu 2026-08-09: veri 3,2 sn'de hazirdi, 14 sn
     boyunca TEK bir olay bile gitmedi."""
     try:
-        veri = remote_quota(name)
-        _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
+        _kota_onbellek_yaz(name, remote_quota(name))
         if OLAY.abone_sayisi():
             olay_yolla("durum", public_status())
     except Exception as e:
@@ -3009,20 +3174,68 @@ def _kota_arkaplan(name):
     finally:
         _KOTA_ISLER.discard(name)
 
+def _kota_onbellek_yaz(name, veri):
+    """Olcum sonucunu onbellege yazar ve gosterilecek degeri dondurur.
+
+    BASARISIZ olcum, elde duran DOGRU degeri silmez. Google hiz sinirina
+    takilan tek bir sorgu yuzunden ekranin kirmizi 'hata' kartina donmesi
+    yanlis alarmdir: 10 dakika onceki kota hala dogrudur, yalnizca bayattir.
+    (Olculdu 2026-08-10: 'rclone about' cagrilarinin 12'de 1'i hiz sinirina
+    takilip 50 sn suruyor, digerleri 1 sn.)
+
+    Bayat kayitta "zaman" bilerek guncellenmez -- yas dogru gorunsun ve
+    onbellek taze sayilmasin diye. Tekrar denemeyi "son_deneme" kisitlar."""
+    simdi = time.time()
+    kayit = _KOTA_ONBELLEK.get(name)
+    if veri.get("ok"):
+        _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": simdi, "son_deneme": simdi}
+        return veri
+    eski = (kayit or {}).get("veri") or {}
+    # Yalnizca GECICI hata (hiz siniri / zaman asimi) eski degeri korur. Kalici
+    # hata (iptal edilmis jeton, kaldirilmis yetki) bayat gibi gosterilirse bozuk
+    # hesap gunlerce "olcum gecikti" der ve kirmizi kart hic cikmaz.
+    if eski.get("ok") and kota_hata_gecici(veri.get("error")):
+        bayat = dict(eski)
+        bayat["bayat"] = True
+        bayat["bayat_hata"] = veri.get("error") or ""
+        bayat["bayat_yas_dk"] = round((simdi - kayit["zaman"]) / 60, 1)
+        kayit["veri"] = bayat
+        kayit["son_deneme"] = simdi
+        return bayat
+    _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": simdi, "son_deneme": simdi}
+    return veri
+
 def remote_quota_onbellekli(name, zorla=False, bekle=False):
     """Onbellekten aninda doner; suresi dolduysa tazelemeyi ARKA PLANA atar.
 
     bekle=True yalnizca kullanicinin acikca bekledigi yerlerde (hesap testi,
     kapasite planlayici) kullanilir. Arayuz asla kota sorgusunu beklemez."""
-    ttl = float(cfg().get("quota_cache_min") or 15) * 60
+    C = cfg()
+    ttl = float(C.get("quota_cache_min") or 15) * 60
     kayit = _KOTA_ONBELLEK.get(name)
-    taze = kayit and (time.time() - kayit["zaman"]) < ttl
+    # Yalnizca BASARILI olcum "taze" sayilir. Basarisiz sonucu 15 dakika taze
+    # tutmak, gecici bir hiz sinirini ceyrek saatlik kirmizi karta cevirirdi;
+    # hata yolunda tekrar araligini quota_retry_sec belirler.
+    v = (kayit or {}).get("veri") or {}
+    # Bayat kayit ok=True tasir ama TAZE degildir: aksi halde ilk basarili olcumun
+    # zamani TTL icinde kaldikca tekrar deneme hic yapilmazdi.
+    taze = kayit and v.get("ok") and not v.get("bayat") \
+        and (time.time() - kayit["zaman"]) < ttl
     if taze and not zorla:
         return kayit["veri"]
+    # Basarisiz/bayat kayitta tekrar kisiti bekle=True icin de gecerli: yoksa hesap
+    # ekrani her acilista hiz sinirindaki hesap icin 45 sn bekler ve Google'i yine dover.
+    sorunlu = not v.get("ok") or v.get("bayat")
+    if kayit and sorunlu and not zorla and \
+            (time.time() - kayit.get("son_deneme", 0)) < float(C.get("quota_retry_sec") or 60):
+        return kayit["veri"]
     if bekle or zorla:
-        veri = remote_quota(name)
-        _KOTA_ONBELLEK[name] = {"veri": veri, "zaman": time.time()}
-        return veri
+        return _kota_onbellek_yaz(
+            name, remote_quota(name, kota_bekleme_tmo()))
+    # Basarisiz sorgudan hemen sonra tekrar denemek anlamsiz: hiz sinirina
+    # takildiysak arka arkaya deneme sinirin suresini uzatir. Arayuz bekleyen
+    # hesap gordugunde 3 sn'de bir yokladigi icin bu kisit olmadan rclone
+    # dakikada 20 kez calisirdi.
     if name not in _KOTA_ISLER:
         _KOTA_ISLER.add(name)
         threading.Thread(target=_kota_arkaplan, args=(name,), daemon=True).start()
@@ -3039,9 +3252,35 @@ def hesap_ozeti(zorla=False):
                     "pct": round(kullanilan / toplam * 100, 1) if toplam else None})
     return out
 
-def remote_quota(name):
-    rc, out, err = rclone(["about", f"{name}:", "--json"], timeout=45)
-    if rc != 0: return {"ok": False, "error": (err or "").strip()[:200]}
+def kota_hata_metni(err, tmo=None):
+    """rclone stderr'ini kullanicinin anlayacagi tek satira indirger.
+
+    'rateLimitExceeded' bir ariza degil: rclone'un ortak Google OAuth projesi
+    (client_id verilmemis kurulumlarda) tum dunyayla ayni dakikalik kotayi
+    paylasir. Bunu duz 'hata' diye gostermek kullaniciyi hesabini bozuk
+    sanmaya iter."""
+    e = (err or "").strip()
+    if "rateLimitExceeded" in e or "Quota exceeded for quota metric" in e \
+            or "userRateLimitExceeded" in e:
+        return "Google hiz siniri (paylasilan rclone kimligi) - tekrar denenecek"
+    if e == "zaman asimi":
+        return f"zaman asimi ({int(tmo or 0)} sn) - Google hiz siniri olabilir" if tmo \
+            else "zaman asimi"
+    return e[:200] or "bilinmeyen hata"
+
+def kota_hata_gecici(metin):
+    """kota_hata_metni ciktisi gecici bir durum mu (tekrar denemek anlamli)?"""
+    m = str(metin or "")
+    return m.startswith("Google hiz siniri") or m.startswith("zaman asimi")
+
+def kota_bekleme_tmo():
+    """Kullanicinin ekran basinda bekledigi kota sorgulari icin zaman asimi."""
+    return float(cfg().get("quota_wait_timeout_sec") or 45)
+
+def remote_quota(name, timeout=None):
+    tmo = float(timeout if timeout is not None else (cfg().get("quota_timeout_sec") or 120))
+    rc, out, err = rclone(["about", f"{name}:", "--json"], timeout=tmo)
+    if rc != 0: return {"ok": False, "error": kota_hata_metni(err, tmo)}
     try: q = json.loads(out); q["ok"] = True; return q
     except Exception as e:
         yut("remote_quota", e)
@@ -3198,7 +3437,7 @@ def remote_create(name, token, tur="drive"):
                                     f"yapilandirmada gorunmuyor ({RCLONE_CONF}). Loga bak."}
     try: os.chmod(RCLONE_CONF, 0o600)
     except Exception as e: yut("remote_create", e)
-    q = remote_quota(name)
+    q = remote_quota(name, kota_bekleme_tmo())
     _KOTA_ONBELLEK.pop(name, None)
     log(f"rclone hesabi eklendi ve dogrulandi: {name} ({saglayici(tur)['ad']})")
     return {"ok": True, "msg": f"'{name}' eklendi" + (
@@ -4214,7 +4453,8 @@ def public_status():
                           "allow_networks", "lan_hep_acik",
                           "update_check", "update_auto", "update_url", "update_backup_keep",
                           "update_izinli_hostlar", "update_sha256", "debug",
-                          "quota_cache_min", "dil",
+                          "quota_cache_min", "quota_timeout_sec",
+                          "quota_wait_timeout_sec", "quota_retry_sec", "dil",
                           "failure_mail", "failure_mail_to", "failure_smtp_profile",
                           "failure_mail_lines", "tick_uyari_dk", "butunluk_mail",
                           "telegram_enabled", "telegram_chat_id", "telegram_etiket",
@@ -4527,13 +4767,26 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/yol-analiz":
             self._json(yol_analiz(unquote(q.get("path", [""])[0])))
         elif p == "/api/kaynak-dosyalar":
+            # Bos deger ANLAMLIDIR: kutuyu bosaltan kullanici "filtre yok / sinir yok"
+            # diyor. Varsayilan parse_qs bos degeri atiyordu ve onizleme kayitli
+            # eski desene gore etiketleniyordu.
+            q = parse_qs(u.query, keep_blank_values=True)
             src = unquote(q.get("src", [""])[0])
             plan = get_plan(q.get("plan", [""])[0]) or {}
             # Plan kaydedilmeden de bakilabilsin: alanlar sorgudan gelebilir.
             if q.get("skip"): plan = dict(plan, skip_patterns=unquote(q["skip"][0]).split())
             if q.get("inc") is not None:
                 plan = dict(plan, include_patterns=unquote(q["inc"][0]).split())
-            if q.get("mage"): plan = dict(plan, min_age_min=q["mage"][0])
+            # Bos mage = kayitli degeri kullan (bos kutu "yas siniri 0" demek degil;
+            # 0 yazilirsa o gecerli). Yarim yazilan dosya onizlemede "yuklenir" gorunmesin.
+            if q.get("mage") and q["mage"][0].strip(): plan = dict(plan, min_age_min=q["mage"][0])
+            if q.get("mxage") is not None: plan = dict(plan, max_age_days=q["mxage"][0] or 0)
+            # Formdaki hedef (kaydedilmemis olabilir): budanan kaydi hedef basina tutulur.
+            if q.get("remote") and q["remote"][0].strip(): plan = dict(plan, remote=q["remote"][0].strip())
+            for k in ("kd", "kc"):          # formdaki saklama: budanan karari ona gore
+                if q.get(k) and q[k][0].strip():
+                    try: plan = dict(plan, **{"keep_days" if k == "kd" else "keep_count": int(float(q[k][0]))})
+                    except ValueError: pass
             if not src:
                 self._json({"ok": False, "hata": "kaynak klasor secilmedi"})
             elif not kok_icinde_mi(src):
@@ -4629,7 +4882,17 @@ class H(BaseHTTPRequestHandler):
         elif path == "/api/remote/delete":
             self._json(remote_delete(q.get("name", [""])[0]))
         elif path == "/api/remote/test":
-            n = q.get("name", [""])[0]; qq = remote_quota(n)
+            # Test kullanicinin bekledigi yerdir; sonucu onbellege de yaz ki
+            # basarili olcum aninda seride dussun.
+            # Rapor TAZE sonuctan verilir: onbellek eski degeri bayat diye dondurur,
+            # o zaman bozuk hesap "test basarili" gorunurdu.
+            n = q.get("name", [""])[0]
+            # Yalnizca tanimli hesap: rastgele adlar onbellege kalici kayit eklemesin
+            # (uzun calisan serviste bellek sinirsiz buyumesin).
+            if n not in {r["name"] for r in rclone_remotes()}:
+                self._json({"ok": False, "msg": f"{n}: tanimli hesap degil"}); return
+            qq = remote_quota(n, kota_bekleme_tmo())
+            _kota_onbellek_yaz(n, qq)
             self._json({"ok": bool(qq.get("ok")),
                         "msg": (f"{n}: {human(qq.get('used'))} / {human(qq.get('total'))} kullanimda, "
                                 f"cop {human(qq.get('trashed'))}") if qq.get("ok")
@@ -4780,6 +5043,13 @@ def save_settings(data):
               "failure_mail_lines", "tick_uyari_dk"):
         if k in data:
             try: C[k] = max(1, int(data[k]))
+            except Exception as e: yut("save_settings", e)
+    # Kota ayarlari arayuzdeki vNum sinirlariyla ayni (alt VE ust): 1 sn'lik zaman
+    # asimi her sorguyu oldurur, 100000 sn bir is parcacigini gunlerce kilitler.
+    for k, alt, ust in (("quota_cache_min", 1, 1440), ("quota_timeout_sec", 5, 600),
+                        ("quota_wait_timeout_sec", 5, 600), ("quota_retry_sec", 5, 3600)):
+        if k in data:
+            try: C[k] = min(ust, max(alt, int(data[k])))
             except Exception as e: yut("save_settings", e)
     if data.get("update_url"):
         yeni_url = str(data["update_url"])
@@ -5060,7 +5330,9 @@ def disa_aktar(sirlar=False):
             "ui_port", "ui_user", "ui_refresh_sec", "browse_roots", "dump_regex",
             "history_max", "log_tail_lines", "rclone_tail_lines", "snapshot_max_rows",
             "log_max_mb", "log_keep", "rclone_timeout_min", "stats_interval_sec",
-            "purge_batch", "quota_cache_min", "oneri_pay_pct", "allow_account_cleanup",
+            "purge_batch", "quota_cache_min", "quota_timeout_sec",
+            "quota_wait_timeout_sec", "quota_retry_sec",
+            "oneri_pay_pct", "allow_account_cleanup",
             "remember_enabled", "remember_days", "session_timeout_min",
             "update_check", "update_auto", "scheduler_interval_sec")},
     }
@@ -5340,10 +5612,13 @@ pre{background:#0a0e13;border:1px solid #232b36;border-radius:10px;padding:12px;
 .mask.show{display:flex}
 .modal{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px;width:100%;max-width:760px}
 .modal h2{font-size:16px;margin-bottom:4px}
-fieldset{border:1px solid #232b36;border-radius:10px;padding:12px;margin:12px 0}
+/* min-width:0 -- fieldset ve grid sutunu varsayilan olarak EN GENIS icerige gore
+   buyur (min-content). Uzun dosya adi / nowrap hucre formu modalin disina tasiyordu. */
+fieldset{border:1px solid #232b36;border-radius:10px;padding:12px;margin:12px 0;min-width:0}
 legend{font-size:12px;color:#8b97a5;padding:0 6px}
-.f{display:grid;grid-template-columns:170px 1fr;gap:8px;align-items:start;margin-bottom:10px}
-@media(max-width:640px){.f{grid-template-columns:1fr}}
+.f{display:grid;grid-template-columns:170px minmax(0,1fr);gap:8px;align-items:start;margin-bottom:10px}
+.f>div{min-width:0}
+@media(max-width:640px){.f{grid-template-columns:minmax(0,1fr)}}
 .f>label{font-size:12px;color:#9fb4c9;padding-top:7px;cursor:help;border-bottom:none}
 .f>label{border-bottom:none}
 .f>label.tip{text-decoration:underline dotted #46536380;text-underline-offset:3px}
@@ -5373,8 +5648,11 @@ input[type=checkbox]{width:auto}
   line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#c9d6e2}
 .ksl-sar{max-height:320px;overflow:auto;margin-top:6px}
 .ksl-sar table{width:100%;border-collapse:collapse}
+.ksl-sar td:nth-child(2),#ksl-ozet,.eg{overflow-wrap:anywhere}
 .ksl-sar td{padding:3px 6px;border-bottom:1px solid #1b2027;vertical-align:top;
   font-size:12px;word-break:break-all}
+/* Genel td kurali nowrap; burada ad ve aciklama kirilmali, yoksa liste yatay kayar. */
+.ksl-sar td:nth-child(2),.ksl-sar td:nth-child(4){white-space:normal}
 .ksl-sar td:nth-child(3){white-space:nowrap;color:#9fb4c9;text-align:right}
 .ksl-r{display:inline-block;min-width:74px;text-align:center;padding:1px 6px;
   border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
@@ -5383,6 +5661,7 @@ input[type=checkbox]{width:auto}
 .ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
+.yas-hizli{display:inline-flex;flex-wrap:wrap;gap:4px}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
 /* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */
@@ -5397,7 +5676,9 @@ input[type=checkbox]{width:auto}
 .msf.sec{background:#12291a;border-color:#1f4a2f}
 .msf .msf-ad{font-weight:600;color:#d6e2ee}
 .msf.sec .msf-ad{color:#7ee2a8}
-.msf .msf-bilgi{color:#7d8fa3;white-space:nowrap}
+.msf .msf-bilgi{color:#7d8fa3;min-width:0;overflow-wrap:anywhere}
+/* Dar ekranda kart kendi icinde satir kirar; yoksa telefonda modal disina tasiyordu. */
+.msf{max-width:100%;min-width:0;flex-wrap:wrap}
 .msf label{display:flex;align-items:center;gap:7px;cursor:pointer;margin:0}
 .msf-yalniz,.msf-hepsi{background:#1b2531;border:1px solid #2f3f52;color:#9fb4c9;
   border-radius:6px;font-size:10px;padding:2px 6px;cursor:pointer}
@@ -5411,7 +5692,8 @@ input[type=checkbox]{width:auto}
 .wd{display:flex;gap:5px;flex-wrap:wrap}
 .wd label,.cb{display:flex;align-items:center;gap:5px;background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer}
 .cbrow{display:flex;gap:6px;flex-wrap:wrap}
-.inline{display:flex;gap:6px;align-items:center}
+.inline{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.inline>input{flex:1 1 140px;min-width:0}
 .dirlist{max-height:300px;overflow:auto;border:1px solid #232b36;border-radius:8px;margin-top:8px}
 .dirlist div{padding:7px 10px;border-bottom:1px solid #1c2330;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
 .dirlist div:hover{background:#1c2330}
@@ -5449,6 +5731,14 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .hesap.dolu .mini i{background:#f85149}
 .hesap .alt{font-size:11px;color:#8b97a5}
 .hesap.hata{border-color:#5c1a1a}
+/* bayat = sayi dogru ama son tazeleme basarisiz; ariza degil, gecikme */
+.hesap.bayat{border-color:#3d3520}
+.hesap.bayat .mini i{background:#6e7681}
+.hesap.bayat .alt{color:#c9a227}
+/* Bayat + dolu: doluluk rengi korunur (alarm hiz siniri yuzunden kaybolmasin) */
+.hesap.bayat.uyari .mini i{background:#d29922}
+.hesap.bayat.dolu .mini i{background:#f85149}
+.bayat-not{color:#c9a227}
 
 /* --- kapasite planlayici --- */
 .kapasite{background:#0f151d;border:1px solid #232b36;border-radius:10px;padding:12px;margin-bottom:14px}
@@ -5607,8 +5897,22 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><div id="e-misafir" class="msf-kut"><span class="hint">Kaynak klasörü seçip
         <b>Dosyaları listele</b>'ye bas — klasördeki misafirler burada çıkar.</span></div>
         <div class="eg" id="e-misafir-not"></div></div></div>
+    <div class="f"><label class="tip" title="Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.">Yalnızca son … gün</label>
+      <div><div class="inline"><input type="number" min="0" max="3650" id="e-mxage" placeholder="0">
+        <span class="yas-hizli">
+          <button type="button" class="sm" onclick="yasSec(0)">hepsi</button>
+          <button type="button" class="sm" onclick="yasSec(1)">son 1 gün</button>
+          <button type="button" class="sm" onclick="yasSec(2)">son 2 gün</button>
+          <button type="button" class="sm" onclick="yasSec(3)">son 3 gün</button>
+          <button type="button" class="sm" onclick="yasSec(7)">son 7 gün</button></span></div>
+        <div class="errmsg" id="err-mxage"></div>
+        <div id="e-mxage-uyari"></div>
+        <div class="eg">Yaş, dosyanın diskteki yazılma zamanından ölçülür. Proxmox yedeği
+          21:00'de, bu plan 03:00'te çalışıyorsa dünkü yedek ~6 saatliktir: <b>son 1 gün</b> yeter.
+          <b>0</b> = sınır yok, klasördeki her şey (varsayılan). Misafir seçimiyle birlikte işler:
+          önce misafir, sonra yaş. Aşağıdaki liste sınırın dışında kalanları <b>eski</b> diye gösterir.</div></div></div>
     <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
-      <div><input id="e-inc" placeholder="hepsi" onchange="kaynakListeYukle(true)">
+      <div><input id="e-inc" placeholder="hepsi">
         <div class="errmsg" id="err-inc"></div>
         <div id="e-inc-uyari"></div>
         <div class="eg">Yukarıdan misafir işaretlersen bu kutu kendiliğinden yazılır;
@@ -5723,7 +6027,7 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input type="time" id="e-runat" step="60" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
         <div class="eg">Proxmox işin 21:00'de başlıyorsa <b>03:00</b> güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.</div></div></div>
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
-      <div><div class="wd" id="e-wd"></div>
+      <div><div class="wd" id="e-wd" onchange="yasUyariCiz()"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
     <div class="f"><label class="tip" title="Planlı saatten önceki bu kadar saat içinde başarılı bir yedek bittiyse o günkü çalışma atlanır.">Soğuma süresi (saat)</label>
       <div><input type="number" min="0" max="168" step="1" id="e-cool"><div class="errmsg" id="err-cool"></div>
@@ -6099,6 +6403,14 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
       <div><input type="number" min="1" id="g-logkeep"><div class="errmsg" id="err-glogkeep"></div></div></div>
     <div class="f"><label class="tip" title="0 = sınırsız. Uzun yüklemelerde 0 bırak.">rclone zaman aşımı (dk)</label>
       <div><input type="number" min="0" id="g-tmo"><div class="errmsg" id="err-gtmo"></div></div></div>
+    <div class="f"><label class="tip" title="Hesap kotası kaç dakika önbellekte tutulsun. Süre dolunca arka planda tazelenir.">Kota önbelleği (dk)</label>
+      <div><input type="number" min="1" max="1440" id="g-qcache"><div class="errmsg" id="err-gqcache"></div></div></div>
+    <div class="f"><label class="tip" title="Arka planda çalışan kota sorgusunun zaman aşımı. Google hız sınırına takılan sorgu 50 sn sürebiliyor; kısa tutarsan kota 'hata' görünür.">Kota sorgusu zaman aşımı (sn)</label>
+      <div><input type="number" min="5" max="600" id="g-qtmo"><div class="errmsg" id="err-gqtmo"></div></div></div>
+    <div class="f"><label class="tip" title="Hesap testi ve kapasite planlayıcı gibi ekran başında beklediğin yerlerde zaman aşımı.">Beklenen kota sorgusu (sn)</label>
+      <div><input type="number" min="5" max="600" id="g-qwait"><div class="errmsg" id="err-gqwait"></div></div></div>
+    <div class="f"><label class="tip" title="Başarısız kota sorgusundan sonra en erken ne kadar sonra tekrar denensin.">Kota tekrar denemesi (sn)</label>
+      <div><input type="number" min="5" max="3600" id="g-qretry"><div class="errmsg" id="err-gqretry"></div></div></div>
     <div class="f"><label class="tip" title="Kapsamlı silme yetmezse hesap geneli cleanup çalışsın mı.">Hesap geneli cleanup</label>
       <div><label class="cb"><input type="checkbox" id="g-cleanup"> son çare olarak rclone cleanup çalıştır</label>
         <div class="hint">⚠ <code>rclone cleanup</code> yol argümanı almaz, <b>Drive'daki tüm çöpü</b> siler.
@@ -6167,6 +6479,22 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
  * Karşılığı olmayan metin Türkçe görünür (arayüz bozulmaz).
  */
 const EN = {
+    /* --- yas siniri ve budanan --- */
+    "Yalnızca son … gün": "Only the last … days",
+    "Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.": "Only files written in the last N days are uploaded. Older ones stay in the folder and do not go to Drive. 0 = no age limit.",
+    "hepsi": "all", "son 1 gün": "last 1 day", "son 2 gün": "last 2 days",
+    "son 3 gün": "last 3 days", "son 7 gün": "last 7 days",
+    "0-3650 arası gün (0 = hepsi)": "0-3650 days (0 = all)",
+    "yaş sınırı: ": "age limit: ", " tanesi eski": " too old",
+    " tanesi Drive'da süresi dolduğu için tekrar yüklenmez": " expired on Drive and will not be uploaded again",
+    "eski": "too old", "Drive'da silindi": "pruned on Drive",
+    "son ": "older than the last ", " günden eski (": " days (", " gün) — yüklenmez": " days) — not uploaded",
+    "saklama süresi dolup Drive'dan silindi — tekrar yüklenmez": "retention expired and it was removed from Drive — not uploaded again",
+    "Plan en fazla ": "The plan runs only every ", " günde bir çalışıyor ama sınır ": " days but the limit is ",
+    " gün: arada kalan yedekler hiç yüklenmez. ": " days: backups in between are never uploaded. ",
+    "Sınırı en az ": "Set the limit to at least ", " yap ya da 0 bırak.": " or leave it at 0.",
+    "Bir koşu atlanır ya da başarısız olursa, ": "If a run is skipped or fails, ",
+    "o günün yedeği bir sonraki koşuda sınırın dışında kalabilir.": "that day's backup may fall outside the limit on the next run.",
     /* --- dahil etme filtresi --- */
     "filtre dışı": "filtered out", "filtre: ": "filter: ",
     " tanesi dışarıda": " left out",
@@ -6285,6 +6613,15 @@ const EN = {
     "▶ Başlat": "▶ Start", "Jeton (JSON)": "Token (JSON)", "Henüz hesap yok.": "No accounts yet.",
     "jeton bekleniyor…": "waiting for token…", "iptal edildi": "cancelled",
     "kota okunamadı": "quota unreadable", "Yönetmek için tıkla": "Click to manage",
+    "ölçüm gecikti · ": "measurement delayed · ", " önceki değer": " old value",
+    "Son ölçüm başarısız: ": "Last measurement failed: ",
+    " — gösterilen değer eski ama doğru.": " — the value shown is old but correct.",
+    " dk": " min", " sa": " h",
+    "Kota önbelleği (dk)": "Quota cache (min)",
+    "Kota sorgusu zaman aşımı (sn)": "Quota query timeout (s)",
+    "Beklenen kota sorgusu (sn)": "Interactive quota timeout (s)",
+    "Kota tekrar denemesi (sn)": "Quota retry delay (s)",
+    "1-1440 dk": "1-1440 min", "5-600 sn": "5-600 s", "5-3600 sn": "5-3600 s",
     /* --- mail profilleri --- */
     "✉ Mail gönderici profilleri": "✉ Mail sender profiles", "✉ Yönet": "✉ Manage",
     "Sağlayıcı şablonu": "Provider preset", "Profil adı": "Profile name",
@@ -7762,6 +8099,13 @@ function ceviriUygula() { if (dilAl() !== "tr")
     sayfayiCevir(); }
 /** Ana ekranda hesap kotalari. Dolmak uzere olan bir hesap yedegi bozar,
  *  bu yuzden plana girmeden gorunur olmali. Tiklayinca yonetim ekrani acilir. */
+function yasMetni(dk) {
+    const d = Math.max(0, Math.round(dk || 0));
+    if (d < 60)
+        return d + C(" dk");
+    const sa = Math.floor(d / 60);
+    return sa < 24 ? sa + C(" sa") : Math.floor(sa / 24) + C(" gün");
+}
 function hesapSerit() {
     const h = (S && S.hesaplar) || [];
     if (!h.length) {
@@ -7793,12 +8137,24 @@ function hesapSerit() {
                 + esc(q.error || C("kota okunamadı")) + "</div></div>";
         }
         const pct = x.pct === null || x.pct === undefined ? 0 : x.pct;
-        const sinif = pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : "");
-        return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="Yönetmek için tıkla">'
+        // Bayat deger = son tazeleme basarisiz oldu ama gosterilen sayi DOGRU.
+        // Bunu kirmizi "hata" yapmak yanlis alarmdi: Google'in hiz sinirina takilan
+        // tek bir sorgu yuzunden hesap bozuk sanilirdi.
+        // Doluluk alarmi bayatlikla KAYBOLMAMALI: %95 dolu hesap hiz sinirina takildi
+        // diye gri cubuga donerse "disk doluyor" uyarisi tam yanlis anda kaybolur.
+        const sinif = (q.bayat ? " bayat" : "")
+            + (pct >= 90 ? " dolu" : (pct >= 75 ? " uyari" : ""));
+        const alt = q.bayat
+            ? "⏳ " + C("ölçüm gecikti · ") + yasMetni(q.bayat_yas_dk) + C(" önceki değer")
+            : hb(q.used) + " / " + hb(q.total) + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "");
+        const ipucu = q.bayat
+            ? C("Son ölçüm başarısız: ") + (q.bayat_hata || C("kota okunamadı"))
+                + C(" — gösterilen değer eski ama doğru.")
+            : "Yönetmek için tıkla";
+        return '<div class="hesap' + sinif + '" onclick="openAccounts()" title="' + esc(ipucu) + '">'
             + '<div class="ad"><b>' + esc(x.name) + "</b><span>" + pct.toFixed(0) + "%</span></div>"
             + '<div class="mini"><i style="width:' + Math.min(100, pct) + '%"></i></div>'
-            + '<div class="alt">' + hb(q.used) + " / " + hb(q.total)
-            + (q.trashed ? C(" · çöp ") + hb(q.trashed) : "") + "</div></div>";
+            + '<div class="alt">' + alt + "</div></div>";
     }).join(""));
 }
 async function loadLog() {
@@ -7994,7 +8350,7 @@ function kullaniciCiz() {
 const ADIMLAR = [C("Plan"), "Kaynak", "Hedef", "Saklama", "Zamanlama", C("Aktarım"), "Bildirim", C("Özet")];
 /** Her adimda dogrulanacak alanlar. Ozet adiminda hepsi bir kez daha kontrol edilir. */
 const ADIM_ALANLARI = [
-    ["e-name"], ["e-src"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
+    ["e-name"], ["e-src", "e-mxage"], ["e-acct", "e-folder"], ["e-kd", "e-kc", "e-td"],
     ["e-runat", "e-wvm", "e-mage", "e-cool"],
     ["e-bw", "e-bwsch", "e-tr", "e-ck", "e-chunk", "e-bwlink", "e-bwres", "e-bwmin", "e-bwmax", "e-bwint", "e-bwsm", "e-bwstep"],
     ["e-mail", "e-rmail", "e-rat", "e-rdays", "e-rstale", "e-rquota"], [],
@@ -8259,6 +8615,7 @@ function preset(k) {
     good("e-bwsch");
     ramHint();
     saklamaIpucu();
+    yasUyariCiz();
     markDirty();
     flash(C("senaryo yüklendi — kaydetmeden uygulanmaz"), true);
 }
@@ -8317,7 +8674,7 @@ function openEditor(pid) {
         bwlimit: "30M", bwlimit_schedule: "", bwlimit_upload_only: true,
         transfers: 2, checkers: 4, drive_chunk: "64M", rclone_extra: [],
         mail_to: "", smtp_profile: "", notify_success: true, notify_failure: true, notify_skipped: false,
-        wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10,
+        wait_for_vzdump: true, vzdump_wait_min: 60, min_age_min: 10, max_age_days: 0,
         skip_patterns: ["*.dat", "*.tmp", "*.part"], prune_on_failure: false, weekly_report: true,
         host_config_enabled: true, host_config_json: true, host_config_keep_count: 30,
         report_day: 1, report_at: "09:00", report_days: 7, report_stale_days: 2,
@@ -8344,7 +8701,24 @@ function openEditor(pid) {
     saklamaIpucu();
     bwLinkKipi();
     Array.prototype.slice.call(document.querySelectorAll("#m-edit input,#m-edit select"))
-        .forEach((e) => { e.oninput = markDirty; e.onchange = markDirty; });
+        .forEach((e) => {
+        // HTML'de yazili onchange/oninput (or. e-bwauto -> bwAutoToggle) EZILMEZ, zincirlenir.
+        // Once eziliyordu: otomatik bant genisligi kutusu isaretlenince ayar kutusu acilmiyor,
+        // elle yazilan dahil deseni listeye yansimiyordu. Ozgun isleyici YALNIZCA ilk
+        // acilista saklanir; yoksa her acilis bir onceki sarmalayiciyi sarar ve zincir
+        // her acilista bir kat buyur (50 acilis = her degisiklikte 50 kat isleyici).
+        if (!ozgunIsleyici.has(e))
+            ozgunIsleyici.set(e, { ch: e.onchange, inp: e.oninput });
+        const { ch, inp } = ozgunIsleyici.get(e);
+        e.oninput = (ev) => { markDirty(); if (inp)
+            inp.call(e, ev); };
+        e.onchange = (ev) => { markDirty(); if (ch)
+            ch.call(e, ev); };
+    });
+    // Onizlemeyi yenilemesi gereken alanlar.
+    fld("e-inc").onchange = () => { markDirty(); void kaynakListeYukle(true); };
+    fld("e-mxage").onchange = yasDegisti;
+    yasUyariCiz();
     fld("e-bwlmode").onchange = () => { bwLinkKipi(); markDirty(); };
     fld("e-acct").onchange = () => { yhOzet(); markDirty(); };
     fld("e-kd").oninput = () => { kapasiteCiz(); saklamaIpucu(); markDirty(); };
@@ -8524,6 +8898,50 @@ function incUyariCiz() {
             + '\')">' + C("Düzelt") + "</button></div>";
     }).join(""));
 }
+/** Duzenleyici girdilerinin HTML'den gelen ozgun isleyicileri (bkz. openEditor). */
+const ozgunIsleyici = new WeakMap();
+/* ---------- yas siniri ----------
+ * "Yalnizca son N gunun dosyalari". Misafir secimiyle birlikte isler.
+ * Tuzak: plan N gunden seyrek calisirsa arada kalan yedekler HIC yuklenmez --
+ * hata vermez, sessizce eksik kalir. Bu yuzden calisma araligiyla karsilastirilir.
+ */
+function yasSec(gun) {
+    setVal("e-mxage", String(gun));
+    yasDegisti();
+}
+function yasDegisti() {
+    markDirty();
+    yasUyariCiz();
+    void kaynakListeYukle(true);
+}
+/** Secili haftanin gunlerine gore iki calisma arasindaki en uzun bosluk (gun). */
+function calismaAraligiGun() {
+    const gunler = Array.prototype.slice.call(document.querySelectorAll("#e-wd input:checked"))
+        .map((c) => Number(c.value)).filter((x) => x >= 1 && x <= 7)
+        .sort((a, b) => a - b);
+    if (!gunler.length || gunler.length === 7)
+        return 1;
+    let enUzun = 7 - gunler[gunler.length - 1] + gunler[0]; // haftanin donusu
+    for (let i = 1; i < gunler.length; i++)
+        enUzun = Math.max(enUzun, gunler[i] - gunler[i - 1]);
+    return enUzun;
+}
+function yasUyariCiz() {
+    const gun = Number(val("e-mxage")) || 0;
+    if (gun <= 0) {
+        setHtml("e-mxage-uyari", "");
+        return;
+    }
+    const aralik = calismaAraligiGun();
+    if (gun < aralik) {
+        setHtml("e-mxage-uyari", '<div class="uyari-metin">⚠ ' + C("Plan en fazla ") + aralik
+            + C(" günde bir çalışıyor ama sınır ") + gun + C(" gün: arada kalan yedekler hiç yüklenmez. ")
+            + C("Sınırı en az ") + aralik + C(" yap ya da 0 bırak.") + "</div>");
+        return;
+    }
+    setHtml("e-mxage-uyari", '<div class="hint">' + C("Bir koşu atlanır ya da başarısız olursa, ")
+        + C("o günün yedeği bir sonraki koşuda sınırın dışında kalabilir.") + "</div>");
+}
 function incDuzelt(eski, yeni) {
     incYaz(incJetonlar().map((x) => (x === eski ? yeni : x)));
 }
@@ -8544,7 +8962,12 @@ async function kaynakListeYukle(yenile) {
         + "&plan=" + encodeURIComponent(sel || "")
         + "&skip=" + encodeURIComponent(val("e-skip"))
         + "&inc=" + encodeURIComponent(val("e-inc"))
-        + "&mage=" + encodeURIComponent(val("e-mage"));
+        + "&mage=" + encodeURIComponent(val("e-mage"))
+        + "&mxage=" + encodeURIComponent(val("e-mxage"))
+        // Budanan karari hedefe ve saklama kuralina bagli: formdaki (kaydedilmemis) degerler.
+        + "&remote=" + encodeURIComponent(val("e-acct") ? val("e-acct") + ":"
+        + val("e-folder").trim().replace(/^\/+/, "") : "")
+        + "&kd=" + encodeURIComponent(val("e-kd")) + "&kc=" + encodeURIComponent(val("e-kc"));
     let j;
     try {
         j = await api(q);
@@ -8561,6 +8984,7 @@ async function kaynakListeYukle(yenile) {
     }
     misafirCiz(j.misafirler || [], !!j.filtre_acik);
     incUyariCiz();
+    yasUyariCiz();
     const d = j.dosyalar || [];
     const ozet = [
         (j.toplam_dosya || 0) + C(" dosya"), hb(j.toplam_boyut || 0),
@@ -8570,10 +8994,14 @@ async function kaynakListeYukle(yenile) {
     // yedekle" diyen kullanici, geri kalanin yedeklenmedigini gormeden karar veremez.
     if (j.filtre_acik)
         ozet.push(C("filtre: ") + (j.filtre_disi || 0) + C(" tanesi dışarıda"));
+    if (j.max_gun)
+        ozet.push(C("yaş sınırı: ") + (j.yas_disi || 0) + C(" tanesi eski"));
+    if (j.budanan)
+        ozet.push((j.budanan || 0) + C(" tanesi Drive'da süresi dolduğu için tekrar yüklenmez"));
     // Desen hatasi sessiz kalmasin: hicbir sey yuklenmeyen bir plan "basarili" biter,
     // Drive'daki eskiler ise saklama kuraliyla zamanla erir. Yedekleme aracinda en
     // tehlikeli durum budur -- calisiyor gorunup hicbir sey yedeklememek.
-    const hicYok = j.filtre_acik && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
+    const hicYok = (j.filtre_acik || !!j.max_gun) && !(j.yuklenecek || 0) && (j.toplam_dosya || 0) > 0;
     if (j.saklama_disi)
         ozet.push("⚠ " + j.saklama_disi + C(" tanesi saklama dışı"));
     if (hicYok)
@@ -8598,6 +9026,10 @@ async function kaynakListeYukle(yenile) {
             return '<span class="ksl-r ksl-bekle">' + C("belirsiz") + "</span>";
         if (x.durum === "filtre_disi")
             return '<span class="ksl-r ksl-disi">' + C("filtre dışı") + "</span>";
+        if (x.durum === "eski")
+            return '<span class="ksl-r ksl-disi">' + C("eski") + "</span>";
+        if (x.durum === "budandi")
+            return '<span class="ksl-r ksl-disi">' + C("Drive'da silindi") + "</span>";
         if (!x.dump && !x.konf)
             return '<span class="ksl-r ksl-riskli">' + C("saklama dışı") + "</span>";
         return '<span class="ksl-r ksl-yukle">' + C("yüklenir") + "</span>";
@@ -8613,6 +9045,11 @@ async function kaynakListeYukle(yenile) {
             return C("en az yaş ") + x.min_age + C(" dk, bu dosya ") + x.yas_dk + C(" dk");
         if (x.durum === "filtre_disi")
             return C("dahil etme filtresine uymuyor — yüklenmez");
+        if (x.durum === "eski")
+            return C("son ") + x.max_gun + C(" günden eski (")
+                + (x.yas_dk / 1440).toFixed(1) + C(" gün) — yüklenmez");
+        if (x.durum === "budandi")
+            return C("saklama süresi dolup Drive'dan silindi — tekrar yüklenmez");
         if (x.dump)
             return C("saklama: gün kuralı işler");
         if (x.konf)
@@ -8938,8 +9375,13 @@ async function renderAccounts() {
     REM = j.remotes || [];
     setHtml("a-list", REM.length ? REM.map((r) => {
         const q = r.quota || {};
-        const line = q.ok ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
-            + C("  ·  boş ") + hb(q.free || 0) : "⚠ " + esc(q.error || C("kota okunamadı"));
+        const line = q.ok
+            ? hb(q.used) + " / " + hb(q.total) + C("  ·  çöp ") + hb(q.trashed || 0)
+                + C("  ·  boş ") + hb(q.free || 0)
+                + (q.bayat ? ' <span class="bayat-not">⏳ ' + C("ölçüm gecikti · ")
+                    + yasMetni(q.bayat_yas_dk) + C(" önceki değer") + " · "
+                    + esc(q.bayat_hata || "") + "</span>" : "")
+            : "⚠ " + esc(q.error || C("kota okunamadı"));
         return '<div class="card" data-hesap="' + esc(r.name) + '" style="margin-bottom:8px"><div style="display:flex;'
             + 'justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">'
             + "<b>" + esc(r.name) + '</b> <span class="small">' + esc(r.type) + "</span>"
@@ -9376,6 +9818,10 @@ function openSettings() {
     setVal("g-logkeep", s.log_keep);
     setVal("g-tmo", s.rclone_timeout_min);
     setChk("g-cleanup", s.allow_account_cleanup);
+    setVal("g-qcache", s.quota_cache_min);
+    setVal("g-qtmo", s.quota_timeout_sec);
+    setVal("g-qwait", s.quota_wait_timeout_sec);
+    setVal("g-qretry", s.quota_retry_sec);
     setVal("g-cert", s.ssl_cert || "");
     setVal("g-key", s.ssl_key || "");
     setVal("g-nets", (s.allow_networks || []).join(", "));
@@ -9417,6 +9863,10 @@ async function saveSettings() {
     ok = vNum("g-logmb", 0, 1000, "0-1000 MB") && ok;
     ok = vNum("g-logkeep", 1, 20, "1-20") && ok;
     ok = vNum("g-tmo", 0, 1440, C("0-1440 dk")) && ok;
+    ok = vNum("g-qcache", 1, 1440, C("1-1440 dk")) && ok;
+    ok = vNum("g-qtmo", 5, 600, C("5-600 sn")) && ok;
+    ok = vNum("g-qwait", 5, 600, C("5-600 sn")) && ok;
+    ok = vNum("g-qretry", 5, 3600, C("5-3600 sn")) && ok;
     ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
     const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
     const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
@@ -9436,6 +9886,8 @@ async function saveSettings() {
         rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
         log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),
         rclone_timeout_min: Number(val("g-tmo")), allow_account_cleanup: chk("g-cleanup"),
+        quota_cache_min: Number(val("g-qcache")), quota_timeout_sec: Number(val("g-qtmo")),
+        quota_wait_timeout_sec: Number(val("g-qwait")), quota_retry_sec: Number(val("g-qretry")),
         ssl_cert: val("g-cert"), ssl_key: val("g-key"), cookie_secure: chk("g-cookiesec"),
         allow_networks: val("g-nets").split(",").map((x) => x.trim()).filter(Boolean),
         update_check: chk("g-upcheck"), update_auto: chk("g-upauto"), update_url: val("g-upurl"),
@@ -9767,6 +10219,8 @@ const PLAN_ALANLARI = [
     // 2. Kaynak
     { id: "e-src", anahtar: "src_dir", tip: "metin", adim: 2, mesaj: C("kaynak klasör gerekli") },
     { id: "e-inc", anahtar: "include_patterns", tip: "liste", adim: 0 },
+    { id: "e-mxage", anahtar: "max_age_days", tip: "sayi", adim: 2, min: 0, max: 3650, vars: 0,
+        mesaj: C("0-3650 arası gün (0 = hepsi)") },
     // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
     // 4. Saklama
     { id: "e-kd", anahtar: "keep_days", tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },

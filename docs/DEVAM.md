@@ -1,8 +1,44 @@
-# Kaldığımız yer — 2026-08-10 (son güncelleme 00:0x)
+# Kaldığımız yer — 2026-08-10 (son güncelleme 01:5x)
 
 Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o günkü durum**.
 
 ## Hemen bakılacaklar
+
+0. **v1.11.0 YEREL — host'a DAĞITILMADI, commit/yayın YOK.** (2026-10-15)
+
+   - Budanan kaydı: Drive'dan silinen set diskte dursa da yeniden yüklenmiyor
+     (canlı ayarlarda gündüz elle yedekte ~45 GB'lık döngü vardı).
+   - Yeni `max_age_days` ("Yalnızca son N gün"), misafir seçicinin altında.
+   - Kod incelemesi (10 bulgu) ve güvenlik incelemesi (4 düşük) düzeltildi;
+     1.10.2'nin kota işindeki 6 bulgu dahil.
+   - Form taşması giderildi (ürün sahibinin ekran görüntüsü).
+   - Ürün sahibinin çalıştırdığı ikinci `/code-review` (9 bulgu) de düzeltildi;
+     en ağırı: budanan kaydı kalıcıydı, artık bugünkü saklama kuralıyla sınanıyor.
+   - Testler **156 geçti, 0 kaldı**; Debian 12'de kurulum/yükseltme/kur.sh geçti.
+
+   ⏭ **Sırada:** ürün sahibinin onayıyla commit → `./dagit.sh` → GitHub `v1.11.0`.
+   Canlıda plan Ağustos'tan beri koşmamış (`last_run` 2026-08-09) — bilgi, risk maddesi değil.
+
+0. **v1.10.2 host'a dağıtıldı — GitHub yayını HENÜZ YOK.** (2026-08-10 01:5x)
+
+   Hesap kartı `hata / zaman aşımı` diyordu. Ölçüldü: `rclone about` 12 koşudan
+   11'inde ~1 sn, 1 kez **50.1 sn**. Sebep `-vv` günlüğünde: Google, rclone'un
+   herkese açık OAuth projesini (`project_number:202264815644`) hız sınırına
+   takıyor (`403 rateLimitExceeded`), rclone üstel geri çekilmeyle 10 kez tekrar
+   deniyor ve 45 sn'lik **sabit** sınır aşılıyor. Ağ/hesap sorunu yok.
+
+   Düzeltilen: (1) başarısız ölçüm artık eldeki doğru değeri **silmiyor** —
+   kart `⏳ ölçüm gecikti · N dk önceki değer` diyor; (2) başarısız sonuç 15 dk
+   "taze" sayılmıyor, tekrar aralığı `quota_retry_sec`; (3) zaman aşımı
+   parametrik: `quota_timeout_sec` 120 / `quota_wait_timeout_sec` 45.
+
+   Dağıtım `./dagit.sh` ile doğrulandı (pid 2218957, sha256 eşleşti, sürüm
+   1.10.2). Canlı dosyayla taklit edilen hata: `ok=True, bayat=True,
+   149.0 GB / 2.0 TB, %7.3` — yani kırmızı kart yerine doğru sayı.
+   Testler: **138 geçti, 0 kaldı.**
+
+   ⏭ **Sırada:** GitHub release `v1.10.2` (güncelleme adresi hâlâ 1.10.1'i
+   gösteriyor) ve kalıcı çözüm olarak kendi `client_id`/`client_secret`'ımız.
 
 0. **v1.10.1 YAYINLANDI ve canlıda.** (2026-08-10 00:0x)
 

@@ -43,24 +43,54 @@ elif cmd == "listremotes":
         print(f"{ad}:" + (f"       {tip}" if "--long" in a else ""))
 elif cmd == "lsjson":
     path = a[1]; trashed = "--drive-trashed-only" in a
-    out = [{"Name": n.split("/")[-1], "Size": f["size"], "ModTime": f["mod"], "IsDir": False}
+    out = [{"Name": n.split("/")[-1].split("|cop")[0], "Size": f["size"], "ModTime": f["mod"], "IsDir": False}
            for n, f in db["files"].items()
            if f["remote"] == path and bool(f.get("trashed")) == trashed]
     print(json.dumps(out))
 elif cmd == "copy":
     src, dst = a[1], a[2]
     dislama = [a[i + 1] for i, x in enumerate(a) if x == "--exclude"]
+    # --filter kurallari VERILDIKLERI SIRAYLA, ilk eslesen kazanir (gercek rclone gibi).
+    # Eskiden yok sayiliyordu; dahil/atla/budanan kurallari mock'ta hic olculmuyordu.
+    kurallar = [a[i + 1] for i, x in enumerate(a) if x == "--filter"]
+    def sure_sn(v):
+        m = re.match(r"^(\d+(?:\.\d+)?)([smhdw]?)$", v)
+        return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)]
+    def bayrak(ad):
+        return sure_sn(a[a.index(ad) + 1]) if ad in a else None
+    en_az, en_cok = bayrak("--min-age"), bayrak("--max-age")
+    def gecer(fn):
+        for k in kurallar:
+            isaret, desen = k[0], k[2:]
+            if desen.startswith("/"): desen = desen[1:]   # koke sabitli; mock kaynagi duz listeler
+            # Kacirilmis kalip (\[ gibi) birebir ad demektir; mock bunu duz esitlikle sinar.
+            esles = (fn == re.sub(r"\\(.)", r"\1", desen)) if "\\" in desen \
+                else fnmatch.fnmatchcase(fn, desen)
+            if esles: return isaret == "+"
+        return True
     n = 0
     for fn in sorted(os.listdir(src)):
         if any(fnmatch.fnmatch(fn, d) for d in dislama): continue
+        if not gecer(fn): continue
+        yas = time.time() - os.path.getmtime(os.path.join(src, fn))
+        if en_az is not None and yas < en_az: continue
+        if en_cok is not None and yas > en_cok: continue
         key = dst + "/" + fn
-        if key in db["files"]: continue
+        # Gercek Drive'da copteki dosya GORUNMEZ: ayni adli dosya yeniden yuklenir.
+        # Eskiden copteki kayit "var" sayiliyordu ve yeniden yukleme dongusu
+        # testlerde hic gorunmuyordu. Copteki kopya ayri anahtarla korunur.
+        if key in db["files"]:
+            if not db["files"][key].get("trashed"): continue
+            db["files"][key + "|cop" + str(len(db["files"]))] = db["files"].pop(key)
         m = re.search(r"(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})", fn)
         mod = (f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:{m.group(5)}:{m.group(6)}Z"
                if m else "2026-08-07T00:00:00Z")
         db["files"][key] = {"remote": dst, "size": os.path.getsize(os.path.join(src, fn)),
                             "mod": mod, "trashed": False}
         n += 1
+        # Kac kez yuklendi: "kosu sonunda Drive'da yok" kontrolu yeniden yuklemeyi
+        # goremez (ayni kosunun budamasi onu yine cope atar). Sayac dogrudan olcer.
+        sayac = db.setdefault("yukleme_sayaci", {}); sayac[key] = sayac.get(key, 0) + 1
     save(db)
     print(f"Transferred:   \t  {n} / {n}, 100%", file=sys.stderr)
 elif cmd == "deletefile":
@@ -76,7 +106,7 @@ elif cmd == "delete":
     hedef = [k for k, f in db["files"].items()
              if f["remote"] == path
              and (f.get("trashed") if sadece_cop else not f.get("trashed"))
-             and any(fnmatch.fnmatch(k.split("/")[-1], p) for p in kaliplar)]
+             and any(fnmatch.fnmatch(k.split("/")[-1].split("|cop")[0], p) for p in kaliplar)]
     for k in hedef:
         if kalici: del db["files"][k]
         else: db["files"][k]["trashed"] = True

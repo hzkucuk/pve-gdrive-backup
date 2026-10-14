@@ -31,6 +31,8 @@ const PLAN_ALANLARI: Alan[] = [
   // 2. Kaynak
   { id: "e-src",     anahtar: "src_dir", tip: "metin", adim: 2, mesaj: C("kaynak klasör gerekli") },
   { id: "e-inc",     anahtar: "include_patterns", tip: "liste", adim: 0 },
+  { id: "e-mxage",   anahtar: "max_age_days", tip: "sayi", adim: 2, min: 0, max: 3650, vars: 0,
+    mesaj: C("0-3650 arası gün (0 = hepsi)") },
   // 3. Hedef — remote iki alandan birlesir, ozel islenir (e-acct + e-folder)
   // 4. Saklama
   { id: "e-kd", anahtar: "keep_days",        tip: "sayi", adim: 4, min: 0, max: 3650, mesaj: C("0-3650 arası gün") },

@@ -81,8 +81,22 @@
       <div><div id="e-misafir" class="msf-kut"><span class="hint">Kaynak klasörü seçip
         <b>Dosyaları listele</b>'ye bas — klasördeki misafirler burada çıkar.</span></div>
         <div class="eg" id="e-misafir-not"></div></div></div>
+    <div class="f"><label class="tip" title="Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.">Yalnızca son … gün</label>
+      <div><div class="inline"><input type="number" min="0" max="3650" id="e-mxage" placeholder="0">
+        <span class="yas-hizli">
+          <button type="button" class="sm" onclick="yasSec(0)">hepsi</button>
+          <button type="button" class="sm" onclick="yasSec(1)">son 1 gün</button>
+          <button type="button" class="sm" onclick="yasSec(2)">son 2 gün</button>
+          <button type="button" class="sm" onclick="yasSec(3)">son 3 gün</button>
+          <button type="button" class="sm" onclick="yasSec(7)">son 7 gün</button></span></div>
+        <div class="errmsg" id="err-mxage"></div>
+        <div id="e-mxage-uyari"></div>
+        <div class="eg">Yaş, dosyanın diskteki yazılma zamanından ölçülür. Proxmox yedeği
+          21:00'de, bu plan 03:00'te çalışıyorsa dünkü yedek ~6 saatliktir: <b>son 1 gün</b> yeter.
+          <b>0</b> = sınır yok, klasördeki her şey (varsayılan). Misafir seçimiyle birlikte işler:
+          önce misafir, sonra yaş. Aşağıdaki liste sınırın dışında kalanları <b>eski</b> diye gösterir.</div></div></div>
     <div class="f"><label class="tip" title="Boş bırakırsan klasördeki her şey yüklenir. Doldurursan YALNIZCA bu desenlere uyan dosyalar yüklenir.">Dahil edilecek desenler</label>
-      <div><input id="e-inc" placeholder="hepsi" onchange="kaynakListeYukle(true)">
+      <div><input id="e-inc" placeholder="hepsi">
         <div class="errmsg" id="err-inc"></div>
         <div id="e-inc-uyari"></div>
         <div class="eg">Yukarıdan misafir işaretlersen bu kutu kendiliğinden yazılır;
@@ -197,7 +211,7 @@
       <div><input type="time" id="e-runat" step="60" placeholder="03:00"><div class="errmsg" id="err-runat"></div>
         <div class="eg">Proxmox işin 21:00'de başlıyorsa <b>03:00</b> güvenli. Çakışırsa zaten beklenir ama boşuna beklemeyelim.</div></div></div>
     <div class="f"><label class="tip" title="Hiçbiri seçili değilse her gün çalışır. Seçersen sadece o günler.">Günler</label>
-      <div><div class="wd" id="e-wd"></div>
+      <div><div class="wd" id="e-wd" onchange="yasUyariCiz()"></div>
         <div class="hint">Boş = her gün. Haftalık arşiv için tek gün seç.</div></div></div>
     <div class="f"><label class="tip" title="Planlı saatten önceki bu kadar saat içinde başarılı bir yedek bittiyse o günkü çalışma atlanır.">Soğuma süresi (saat)</label>
       <div><input type="number" min="0" max="168" step="1" id="e-cool"><div class="errmsg" id="err-cool"></div>
@@ -573,6 +587,14 @@
       <div><input type="number" min="1" id="g-logkeep"><div class="errmsg" id="err-glogkeep"></div></div></div>
     <div class="f"><label class="tip" title="0 = sınırsız. Uzun yüklemelerde 0 bırak.">rclone zaman aşımı (dk)</label>
       <div><input type="number" min="0" id="g-tmo"><div class="errmsg" id="err-gtmo"></div></div></div>
+    <div class="f"><label class="tip" title="Hesap kotası kaç dakika önbellekte tutulsun. Süre dolunca arka planda tazelenir.">Kota önbelleği (dk)</label>
+      <div><input type="number" min="1" max="1440" id="g-qcache"><div class="errmsg" id="err-gqcache"></div></div></div>
+    <div class="f"><label class="tip" title="Arka planda çalışan kota sorgusunun zaman aşımı. Google hız sınırına takılan sorgu 50 sn sürebiliyor; kısa tutarsan kota 'hata' görünür.">Kota sorgusu zaman aşımı (sn)</label>
+      <div><input type="number" min="5" max="600" id="g-qtmo"><div class="errmsg" id="err-gqtmo"></div></div></div>
+    <div class="f"><label class="tip" title="Hesap testi ve kapasite planlayıcı gibi ekran başında beklediğin yerlerde zaman aşımı.">Beklenen kota sorgusu (sn)</label>
+      <div><input type="number" min="5" max="600" id="g-qwait"><div class="errmsg" id="err-gqwait"></div></div></div>
+    <div class="f"><label class="tip" title="Başarısız kota sorgusundan sonra en erken ne kadar sonra tekrar denensin.">Kota tekrar denemesi (sn)</label>
+      <div><input type="number" min="5" max="3600" id="g-qretry"><div class="errmsg" id="err-gqretry"></div></div></div>
     <div class="f"><label class="tip" title="Kapsamlı silme yetmezse hesap geneli cleanup çalışsın mı.">Hesap geneli cleanup</label>
       <div><label class="cb"><input type="checkbox" id="g-cleanup"> son çare olarak rclone cleanup çalıştır</label>
         <div class="hint">⚠ <code>rclone cleanup</code> yol argümanı almaz, <b>Drive'daki tüm çöpü</b> siler.

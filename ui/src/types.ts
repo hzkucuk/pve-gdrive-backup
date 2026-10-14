@@ -18,7 +18,9 @@ interface Progress {
 }
 
 interface Quota { total?: number; used?: number; trashed?: number; free?: number;
-  ok?: boolean | null; error?: string; bekliyor?: boolean }
+  ok?: boolean | null; error?: string; bekliyor?: boolean;
+  // Son olcum basarisiz oldu ama elde DOGRU (bayat) bir deger var
+  bayat?: boolean; bayat_hata?: string; bayat_yas_dk?: number }
 interface Totals { count: number; size: number }
 interface BackupRow { name: string; guest: string; size: number; mod: string }
 interface TrashRow { name: string; size: number; remain_days: number; tracked?: boolean }
@@ -75,6 +77,7 @@ interface Plan {
   wait_for_vzdump: boolean;
   vzdump_wait_min: number;
   min_age_min: number;
+  max_age_days?: number;
   skip_patterns: string[];
   prune_on_failure: boolean;
   weekly_report: boolean;
@@ -117,6 +120,8 @@ interface Settings {
   sse_heartbeat_sec?: number; sse_max_clients?: number;
   remember_enabled?: boolean; remember_days?: number;
   session_ip_bind?: "ip" | "ag" | "yok";
+  quota_cache_min?: number; quota_timeout_sec?: number;
+  quota_wait_timeout_sec?: number; quota_retry_sec?: number;
 }
 
 interface SmtpProfile {

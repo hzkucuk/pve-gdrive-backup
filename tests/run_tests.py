@@ -124,14 +124,21 @@ class Ortam:
         try:
             with open(self.db) as f: d = json.load(f)
         except Exception: return []
-        return sorted(k[len(remote) + 1:] for k, v in d.get("files", {}).items()
+        # "|cop" eki: ayni adla yeniden yuklenen dosyanin copteki eski kopyasi (bkz. mock)
+        return sorted(k[len(remote) + 1:].split("|cop")[0] for k, v in d.get("files", {}).items()
                       if k.startswith(remote + "/") and bool(v.get("trashed")) == copte)
+
+    def yukleme_sayisi(self, ad, remote="gdrive:hedef"):
+        """Mock'un bu dosyayi kac kez yukledigi (bkz. tests/mock/rclone, yukleme_sayaci)."""
+        try:
+            with open(self.db) as f: return json.load(f).get("yukleme_sayaci", {}).get(f"{remote}/{ad}", 0)
+        except Exception: return 0
 
     def drive(self, copte=False):
         try:
             with open(self.db) as f: d = json.load(f)
         except Exception: return []
-        return sorted(k.split("/")[-1] for k, v in d.get("files", {}).items()
+        return sorted(k.split("/")[-1].split("|cop")[0] for k, v in d.get("files", {}).items()
                       if bool(v.get("trashed")) == copte)
     def yamala(self, nesne, ad, yeni):
         """Surec genelindeki bir seyi gecici olarak degistirir; temizle() geri koyar.
@@ -702,7 +709,8 @@ def t_temiz_acilis():
         dogru(not kalan, f"openEditor kurulumunda damga birakan cagri: {kalan}")
         dogru("dirty = false" in govde, "acilista damga sifirlanmali")
         # Isleyiciler yine de bagli olmali, yoksa gercek degisiklik fark edilmez
-        dogru("oninput = markDirty" in govde, "alanlara isleyici baglanmali")
+        dogru(re.search(r"oninput = (markDirty|\(ev\) => \{ markDirty\(\))", govde),
+              "alanlara isleyici baglanmali")
     finally: o.temizle()
 
 @test("cikis dugmesi arayuzde var", "arayuz")
@@ -775,7 +783,7 @@ def t_remote_dogrulama():
     try:
         G = o.modul()
         G.RCLONE_CONF = os.path.join(o.dizin, "rclone.conf")
-        G.remote_quota = lambda n: {"ok": False, "error": "test"}
+        G.remote_quota = lambda n, tmo=None: {"ok": False, "error": "test"}
         # rclone hep basarili donsun; asil soru dosyaya yazilip yazilmadigi
         G.rclone = lambda a, timeout=None: (0, "", "")
         yazildi = []
@@ -2892,6 +2900,450 @@ def t_dahil_filtresi_ucu():
         dogru(j2["yuklenecek"] == 2, f"bos filtrede 2 dosya yuklenmeli: {j2['yuklenecek']}")
     finally: o.temizle()
 
+# ============================ BUDANAN / YAS SINIRI ============================
+def _dongu_kur(o, gun_sayisi=4):
+    """Canlidaki durum: diskte misafir basina 4 set (Proxmox keep-daily=4),
+    Drive'da 3 tutulur. En eski set Drive'dan silinir ama diskte durur."""
+    for g in range(gun_sayisi):
+        o.vzdump_seti("qemu-105", g); o.vzdump_seti("lxc-103", g, "tar.zst")
+    return o.plan(keep_days=1, keep_count=3, drive_trash_days=0)
+
+@test("saklamayla silinen yedek diskte dursa da TEKRAR YUKLENMEZ", "budanan")
+def t_budanan_dongu():
+    """Olculdu 2026-10-15 (canli ayarlar: Drive keep 3 gun/3 set, Proxmox keep-daily=4):
+    Drive'dan silinen en eski set diskte durdugu icin sonraki kosuda bastan
+    yukleniyor ve ayni kosunun budamasi onu yine cope atiyordu (~45 GB / tur).
+    Mock eskiden copteki dosyayi 'var' sayip atliyordu; dongu testte gorunmuyordu."""
+    o = Ortam()
+    try:
+        _dongu_kur(o)
+        G = o.modul()
+        G.do_run("p1", "test")
+        en_eski = sorted(x for x in os.listdir(o.dump))[:1] + \
+                  sorted(x for x in os.listdir(o.dump) if "lxc" in x)[:1]
+        for a in en_eski:
+            dogru(a not in o.drive(), f"ilk kosuda en eski set budanmaliydi: {a}")
+        dogru(set(en_eski) <= set(G.budanan_oku(G.get_plan("p1"))),
+              f"budanan kaydi tutulmali: {G.budanan_oku(G.get_plan('p1'))}")
+        args_dosyasi = os.path.join(o.dizin, "args.log"); os.environ["MOCK_ARGS"] = args_dosyasi
+        # Ikinci kosu: copte bekleyen dosya Drive'da GORUNMEZ; kayit olmasa yeniden yuklenirdi.
+        G.do_run("p1", "test")
+        for a in en_eski:
+            dogru(a not in o.drive(), f"budanan set yeniden yuklendi: {a}")
+        with open(args_dosyasi) as f:
+            kopya = [l for l in f if l.startswith("copy ")]
+        dogru(kopya and all(f"- /{a}" in kopya[-1] for a in en_eski),
+              f"budanan adlar rclone filtresine yazilmali: {kopya[-1:]}")
+        # Cop kalici bosaltilip drive_trash kaydi dussun: dongu yine GELMEMELI.
+        G.do_purge_trash(G.get_plan("p1"))
+        dogru(not G.pstate(G.read_state(), "p1")["drive_trash"], "cop kaydi bosalmaliydi")
+        G.do_run("p1", "test")
+        for a in en_eski:
+            dogru(a not in o.drive(), f"cop bosaltildiktan sonra yeniden yuklendi: {a}")
+            esit(o.yukleme_sayisi(a), 1, f"{a} uc kosuda yalnizca BIR kez yuklenmeli")
+        # Yeni yedekler etkilenmez
+        esit(len(o.drive()), 6, "misafir basina 3 set Drive'da kalmali")
+    finally: o.temizle()
+
+@test("olcum kontrolu: kayit kapatilinca mock donguyu GERCEKTEN gosteriyor", "budanan")
+def t_budanan_olcum_kontrolu():
+    """Yukaridaki test ancak mock donguyu gosterebiliyorsa bir sey olcer.
+    Kayit devre disi birakilinca dongu gorunmuyorsa test bos calisiyor demektir."""
+    o = Ortam()
+    try:
+        _dongu_kur(o)
+        G = o.modul()
+        G.budanan_ayikla = lambda p: set()        # eski davranis
+        G.do_run("p1", "test")
+        en_eski = sorted(os.listdir(o.dump))[0]
+        dogru(en_eski not in o.drive(), "ilk kosuda budanmaliydi")
+        esit(o.yukleme_sayisi(en_eski), 1, "ilk kosuda bir kez yuklenmeli")
+        G.do_run("p1", "test")
+        esit(o.yukleme_sayisi(en_eski), 2,
+             "kayit yokken dosya YENIDEN YUKLENMELIYDI -- mock donguyu gostermiyor, test bos")
+    finally: o.temizle()
+
+@test("budanan kaydi hedef basina, kaynaktan kalkan ad duser, okuma hatasi silmez", "budanan")
+def t_budanan_kayit():
+    o = Ortam()
+    try:
+        o.plan(keep_days=1, keep_count=0)        # kayittaki set bugunku kuralla da silinir
+        G = o.modul()
+        p = G.get_plan("p1")
+        a1 = o.dosya("vzdump-qemu-100-2026_10_10-21_00_00.vma.zst")
+        G.budanan_ekle(p, ["vzdump-qemu-100-2026_10_10-21_00_00.vma.zst", "diskte-yok.vma.zst"])
+        # Yedek hedef birincilin budamasindan etkilenmemeli
+        dogru(not G.budanan_oku(dict(p, remote="yedek:hedef")),
+              "baska hedefin kaydi bos olmali")
+        # Kaynak okunamazsa hicbir kayit dusurulmez
+        esit(G.budanan_ayikla(dict(p, src_dir=os.path.join(o.dizin, "yok"))),
+             {"vzdump-qemu-100-2026_10_10-21_00_00.vma.zst", "diskte-yok.vma.zst"},
+             "okuma hatasinda kayit korunmali")
+        esit(len(G.budanan_oku(p)), 2, "okuma hatasi kaydi silmemeli")
+        # Diskte olmayan ad duser (sinirsiz buyume yok)
+        esit(G.budanan_ayikla(p), {"vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"}, "ayiklama")
+        esit(set(G.budanan_oku(p)), {"vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"},
+             "diskte olmayan ad kayittan dusmeli")
+        # USB disk bagli degil: baglama noktasi BOS bir dizin. Kayit silinmemeli,
+        # yoksa disk donunce budanan setler yeniden yuklenir.
+        os.remove(a1)
+        esit(G.budanan_ayikla(p), {"vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"},
+             "bos klasor (bagli olmayan disk) kaydi silmemeli")
+        esit(len(G.budanan_oku(p)), 1, "bos klasorde kayit korunmali")
+        # Klasorde baska dosyalar var ama bu ad yok: o zaman gercekten gitmistir
+        o.dosya("vzdump-qemu-100-2026_10_15-21_00_00.vma.zst")
+        esit(G.budanan_ayikla(p), set(), "dosya silinince kayit bosalmali")
+        # Paylasilan varsayilan sozluk kirlenmemeli (pstate sig kopya yapar)
+        dogru("budanan" not in G.EMPTY_PLAN_STATE, "EMPTY_PLAN_STATE kirlendi")
+    finally: o.temizle()
+
+@test("yas siniri: liste son N gunden eskiyi 'eski' diye isaretler", "budanan")
+def t_yas_siniri_liste():
+    o = Ortam()
+    try:
+        p = o.plan(min_age_min=10, max_age_days=2)
+        G = o.modul()
+        o.dosya("vzdump-qemu-100-2026_10_14-21_00_00.vma.zst", yas_sn=6 * 3600)
+        o.dosya("vzdump-qemu-100-2026_10_13-21_00_00.vma.zst", yas_sn=30 * 3600)
+        o.dosya("vzdump-qemu-100-2026_10_11-21_00_00.vma.zst", yas_sn=3 * 86400)
+        o.dosya("vzdump-qemu-100-taze.vma.zst", yas_sn=60)
+        r = G.kaynak_dosyalar(o.dump, G.get_plan("p1"))
+        d = {x["ad"]: x["durum"] for x in r["dosyalar"]}
+        esit(d["vzdump-qemu-100-2026_10_14-21_00_00.vma.zst"], "yuklenir", "6 saatlik")
+        esit(d["vzdump-qemu-100-2026_10_13-21_00_00.vma.zst"], "yuklenir", "30 saatlik")
+        esit(d["vzdump-qemu-100-2026_10_11-21_00_00.vma.zst"], "eski", "3 gunluk")
+        esit(d["vzdump-qemu-100-taze.vma.zst"], "bekler", "min_age hala once isler")
+        esit((r["yas_disi"], r["yuklenecek"], r["max_gun"]), (1, 2, 2.0), "ozet")
+        # Misafir ozeti gercek yuklenecegi sayar
+        m = {g["ad"]: g for g in r["misafirler"]}
+        esit(m["qemu-100"]["yuklenir"], 2, "misafir ozeti yas sinirini hesaba katmali")
+        # 0 = sinir yok
+        r0 = G.kaynak_dosyalar(o.dump, dict(G.get_plan("p1"), max_age_days=0))
+        esit((r0["yas_disi"], r0["yuklenecek"]), (0, 3), "0 iken sinir olmamali")
+        # Bozuk deger 500 uretmemeli
+        dogru(G.kaynak_dosyalar(o.dump, dict(p, max_age_days="abc"))["ok"], "bozuk deger")
+        # Uctan canli onizleme (plan kaydedilmeden)
+        c = o.oku_cfg(); c["browse_roots"] = [o.dizin]; o.yaz_cfg(c)
+        ist = o.sunucu()
+        j = json.load(ist.istek("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+                                + "&plan=p1&mxage=1"))
+        esit((j["yas_disi"], j["yuklenecek"]), (2, 1), f"uc mxage'i kullanmali: {j.get('yas_disi')}")
+        j0 = json.load(ist.istek("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+                                 + "&plan=p1&mxage=&mage="))
+        esit(j0["yas_disi"], 0, "bos mxage = sinir yok")
+        # Bos mage kayitli min_age_min'i (10 dk) EZMEMELI: taze dosya hala bekler
+        d0 = {x["ad"]: x["durum"] for x in j0["dosyalar"]}
+        esit(d0["vzdump-qemu-100-taze.vma.zst"], "bekler", "bos mage kayitli degeri korumali")
+        # Ayni kokten: kayitli dahil deseni varken kutu bosaltilinca onizleme filtresiz olmali
+        c = o.oku_cfg(); c["plans"][0]["include_patterns"] = ["*999*"]; o.yaz_cfg(c); ist.G.cfg(force=True)
+        j1 = json.load(ist.istek("/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump)
+                                 + "&plan=p1&mxage=&inc="))
+        dogru(not j1["filtre_acik"], "bos inc kayitli desenin yerine gecmeli (filtre yok)")
+    finally: o.temizle()
+
+@test("yas siniri ve budanan tahmini GERCEK rclone ile ayni", "budanan")
+def t_yas_budanan_rclone_uyumu():
+    """Arayuzun 'yuklenir / eski / budandi' tahmini, rclone'un fiili kararina
+    esit olmali. Kacirma da burada sinanir: adinda [ ] * olan dosya, kacirilmazsa
+    baska dosyalari da dislar."""
+    gercek = None
+    for aday in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone", "/usr/bin/rclone"):
+        if os.path.exists(aday): gercek = aday; break
+    if not gercek:
+        raise AssertionError("ATLA: gercek rclone yok, karsilastirma yapilamadi")
+    o = Ortam()
+    try:
+        G = o.modul()
+        hedef = os.path.join(o.dizin, "dh")
+        yaslar = {"vzdump-qemu-100-2026_10_14-21_00_00.vma.zst": 6 * 3600,
+                  "vzdump-qemu-100-2026_10_13-21_00_00.vma.zst": 30 * 3600,
+                  "vzdump-qemu-100-2026_10_12-21_00_00.vma.zst": 54 * 3600,
+                  "vzdump-qemu-100-2026_10_11-21_00_00.vma.zst": 78 * 3600,
+                  "elle [1].vma.zst": 7200, "elle 1.vma.zst": 7200, "elle *.vma.zst": 7200,
+                  "yarim.tmp": 7200, "taze.vma.zst": 60}
+        for a, y in yaslar.items(): o.dosya(a, 16, yas_sn=y)
+        senaryolar = [
+            (0, []), (1, []), (2, []),
+            (3, ["vzdump-qemu-100-2026_10_13-21_00_00.vma.zst"]),
+            (0, ["elle [1].vma.zst", "elle *.vma.zst"]),
+        ]
+        for gun, budanan in senaryolar:
+            shutil.rmtree(hedef, ignore_errors=True); os.makedirs(hedef)
+            p = {"id": "p1", "remote": "gdrive:hedef", "skip_patterns": ["*.tmp"],
+                 "include_patterns": [], "min_age_min": 10, "max_age_days": gun,
+                 "keep_days": 0, "keep_count": 0}       # kayit bugunku kuralla da gecerli
+            # do_copy ile ayni yol: kayit once budanan_gecerli'den gecer
+            G.budanan_oku = lambda _p, b=budanan: {x: 0 for x in b}
+            gecerli = set(G.budanan_gecerli(p, G.budanan_oku(p), set(os.listdir(o.dump))))
+            subprocess.run([gercek, "copy", o.dump, hedef, "-q"]
+                           + G.filtre_kurallari(p, gecerli) + G.yas_kurallari(p), check=True)
+            kopyalanan = set(os.listdir(hedef))
+            tahmin = {x["ad"] for x in G.kaynak_dosyalar(o.dump, p)["dosyalar"]
+                      if x["durum"] == "yuklenir"}
+            esit(tahmin, kopyalanan, f"gun={gun} budanan={budanan}: tahmin != rclone")
+        # Kacirma: ozel karakterli ad YALNIZCA kendisini dislar (gercek rclone)
+        shutil.rmtree(hedef, ignore_errors=True); os.makedirs(hedef)
+        subprocess.run([gercek, "copy", o.dump, hedef, "-q"]
+                       + G.filtre_kurallari({}, {"elle [1].vma.zst", "elle *.vma.zst"}), check=True)
+        k = set(os.listdir(hedef))
+        dogru("elle [1].vma.zst" not in k and "elle *.vma.zst" not in k, f"kacirilan adlar dislanmadi: {k}")
+        dogru("elle 1.vma.zst" in k, "kacirma baska dosyayi da dislamamali ('[1]' sinif olarak okunmamali)")
+    finally: o.temizle()
+
+@test("budanan filtresi GERCEK rclone'da yalnizca o dosyayi dislar (sabitleme, bosluk)", "budanan")
+def t_budanan_filtre_guvenligi():
+    """Guvenlik incelemesi 2026-10-15: kural sabitlenmemisti (alt klasordeki ayni
+    adli dosya da dislaniyordu) ve rclone kural sonundaki boslugu kirpiyordu
+    ("X.vma " budaninca "X.vma" disarida kaliyordu)."""
+    gercek = None
+    for aday in ("/opt/homebrew/bin/rclone", "/usr/local/bin/rclone", "/usr/bin/rclone"):
+        if os.path.exists(aday): gercek = aday; break
+    if not gercek:
+        raise AssertionError("ATLA: gercek rclone yok")
+    o = Ortam()
+    try:
+        G = o.modul()
+        ad = "vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"
+        o.dosya(ad, 16); o.dosya(ad[:-4], 16)                  # ".vma" -- ayri dosya
+        os.makedirs(os.path.join(o.dump, "arsiv"))
+        with open(os.path.join(o.dump, "arsiv", ad), "wb") as f: f.write(b"x")
+        hedef = os.path.join(o.dizin, "dh"); os.makedirs(hedef)
+        p = {"skip_patterns": [], "include_patterns": []}
+        subprocess.run([gercek, "copy", o.dump, hedef, "-q"] + G.filtre_kurallari(p, {ad}), check=True)
+        dogru(ad not in os.listdir(hedef), "budanan dosya dislanmali")
+        dogru(os.path.exists(os.path.join(hedef, "arsiv", ad)),
+              "alt klasordeki ayni adli dosya DISLANMAMALI (kural koke sabitli olmali)")
+        # Sonu bosluklu ad kayda girmez; girseydi rclone kirpip "X.vma"yi dislardi
+        bosluklu = ad[:-4] + " "
+        dogru(not G.budanan_ad_guvenli(bosluklu), "sonu bosluklu ad guvensiz sayilmali")
+        for kotu in ("a\nb", "a/b", "", " a"):
+            dogru(not G.budanan_ad_guvenli(kotu), f"guvensiz ad kabul edildi: {kotu!r}")
+        args = G.filtre_kurallari(p, {bosluklu, ad})
+        dogru(not any(a.rstrip() != a for a in args), f"sonu bosluklu kural uretildi: {args}")
+        o.plan(); pl = G.get_plan("p1")
+        G.budanan_ekle(pl, [bosluklu, ad])
+        esit(set(G.budanan_oku(pl)), {ad}, "kayda yalnizca guvenli ad girmeli")
+    finally: o.temizle()
+
+@test("sonsuz/gecersiz yas degerleri cokertmez; kopya istisnasi sonraki hedefe gecer", "budanan")
+def t_sonsuz_degerler():
+    o = Ortam()
+    try:
+        o.vzdump_seti("qemu-100", 0)
+        for k in ("min_age_min", "max_age_days", "vzdump_wait_min"):
+            for v in (float("inf"), float("nan"), 1e999, -5, "abc"):
+                o.plan(**{k: v}); G = o.modul()
+                x = G.get_plan("p1")[k]
+                dogru(isinstance(x, float) and x == x and x != float("inf") and x >= 0,
+                      f"{k}={v!r} -> {x!r}")
+                G.yas_kurallari(G.get_plan("p1"))          # patlamamali
+        o.plan(); G = o.modul()
+        r = G.kaynak_dosyalar(o.dump, dict(G.get_plan("p1"), max_age_days=float("inf"),
+                                            min_age_min=float("nan")))
+        json.loads(json.dumps(r, allow_nan=False))         # gecerli JSON olmali
+        # Hedef dongusu: birincilde istisna -> yedek hedef denenir, silme yok
+        o.plan(yedek_hedefler=["gdrive:yedek"]); G = o.modul()
+        gercek_copy = G.do_copy
+        def bozuk(p):
+            if p["remote"] == "gdrive:hedef": raise OverflowError("deneme")
+            return gercek_copy(p)
+        G.do_copy = bozuk
+        ok, n, _, aktif, den = G._asama_kopyala(G.get_plan("p1"), "p1")
+        dogru(ok and aktif == "gdrive:yedek", f"yedek hedefe gecilmeliydi: {ok} {aktif} {den}")
+    finally: o.temizle()
+
+@test("saklama gevsetilince budanan set YENIDEN YUKLENIR (kayit kalici degil)", "budanan")
+def t_budanan_kural_gevserse():
+    """Inceleme 2026-10-15 #2: keep yanlislikla dusurulup geri alinsa, arada
+    budanan setler diskte durdugu halde bir daha hic yuklenmiyordu."""
+    o = Ortam()
+    try:
+        _dongu_kur(o)                                     # keep_days=1, keep_count=3, 4 set
+        G = o.modul()
+        G.do_run("p1", "test")
+        en_eski = sorted(os.listdir(o.dump))[0]
+        dogru(en_eski not in o.drive() and en_eski in G.budanan_oku(G.get_plan("p1")),
+              "on kosul: en eski set budanmis ve kayitli olmali")
+        # Onizleme bugunku kuralla 'Drive'da silindi' der
+        d = {x["ad"]: x["durum"] for x in G.kaynak_dosyalar(o.dump, G.get_plan("p1"))["dosyalar"]}
+        esit(d[en_eski], "budandi", "kural ayniyken onizleme budandi demeli")
+        # Kural gevsedi: 4 set tutulur
+        c = o.oku_cfg(); c["plans"][0]["keep_count"] = 4; o.yaz_cfg(c); G.cfg(force=True)
+        d = {x["ad"]: x["durum"] for x in G.kaynak_dosyalar(o.dump, G.get_plan("p1"))["dosyalar"]}
+        esit(d[en_eski], "yuklenir", "kural gevseyince onizleme yuklenir demeli")
+        G.do_run("p1", "test")
+        dogru(en_eski in o.drive(), "kural gevseyince budanan set YENIDEN yuklenmeliydi")
+        esit(o.yukleme_sayisi(en_eski), 2, "ikinci kez yuklenmis olmali")
+        dogru(en_eski not in G.budanan_oku(G.get_plan("p1")), "kayittan dusmeli")
+        with open(o.oku_cfg()["log_file"]) as f:
+            dogru("yeniden yuklenecek" in f.read(), "yeniden yukleme gunluge yazilmali")
+    finally: o.temizle()
+
+@test("onizleme budanan kararini formdaki hedefe ve guvenli ada gore verir", "budanan")
+def t_budanan_onizleme_hedef():
+    o = Ortam()
+    try:
+        o.plan(keep_days=1, keep_count=0)
+        G = o.modul()
+        ad = "vzdump-qemu-100-2026_10_10-21_00_00.vma.zst"; o.dosya(ad)
+        G.budanan_ekle(G.get_plan("p1"), [ad])
+        c = o.oku_cfg(); c["browse_roots"] = [o.dizin]; o.yaz_cfg(c)
+        ist = o.sunucu()
+        taban = "/api/kaynak-dosyalar?src=" + urllib.parse.quote(o.dump) + "&plan=p1"
+        durum = lambda ek: {x["ad"]: x["durum"] for x in json.load(ist.istek(taban + ek))["dosyalar"]}[ad]
+        esit(durum(""), "budandi", "kayitli hedefte budandi")
+        esit(durum("&remote=" + urllib.parse.quote("gdrive:baska")), "yuklenir",
+             "baska hedefte (formda degistirilmis) kayit gecerli degil")
+        esit(durum("&kc=5"), "yuklenir", "formda saklama gevsetilince budandi denmemeli")
+    finally: o.temizle()
+
+@test("kota: basarisiz kayitta bekleyen cagri da tekrar kisitina uyar; bayat taze sayilmaz", "kota")
+def t_kota_bekle_kisit():
+    o = Ortam(quota_retry_sec=60, quota_cache_min=15)
+    try:
+        G = o.modul()
+        cagri = []
+        o.yamala(G, "remote_quota", lambda n, t=None: (cagri.append(n), {"ok": False, "error": "x"})[1])
+        G._kota_onbellek_yaz("h", {"ok": False, "error": "x"})
+        G.remote_quota_onbellekli("h", bekle=True); G.remote_quota_onbellekli("h", bekle=True)
+        esit(len(cagri), 0, "kisit icinde bekle=True rclone'u tekrar cagirmamali (45 sn bekletir)")
+        # Bayat: ok=True ama TAZE degil -> kisit dolunca arka planda tazelenir
+        G._kota_onbellek_yaz("b", {"ok": True, "used": 1, "total": 2})
+        G._kota_onbellek_yaz("b", {"ok": False, "error": "zaman asimi (5 sn)"})
+        dogru(G._KOTA_ONBELLEK["b"]["veri"].get("bayat"), "on kosul: bayat")
+        G._KOTA_ONBELLEK["b"]["son_deneme"] -= 120
+        basladi = []
+        o.yamala(G.threading, "Thread", lambda *a, **k: type("T", (), {"start": lambda s: basladi.append(1)})())
+        G.remote_quota_onbellekli("b")
+        dogru(basladi, "bayat kayit TTL icinde olsa da tekrar denenmeli")
+    finally: o.temizle()
+
+@test("hesap testi tanimsiz adi onbellege yazmaz", "kota")
+def t_kota_test_tanimsiz():
+    o = Ortam()
+    try:
+        ist = o.sunucu()
+        j = json.load(ist.istek("/api/remote/test?name=yokboyle", yontem="POST", govde="{}"))
+        dogru(j["ok"] is False, f"tanimsiz hesap basarisiz donmeli: {j}")
+        dogru("yokboyle" not in ist.G._KOTA_ONBELLEK, "tanimsiz ad onbellege girmemeli")
+    finally: o.temizle()
+
+@test("normalize edilmemis plan (metin deger) kopyayi dusurmez; buyuk bekleme korunur", "budanan")
+def t_ham_plan_degerleri():
+    o = Ortam()
+    try:
+        o.vzdump_seti("qemu-100", 0)
+        o.plan(vzdump_wait_min=2000)
+        G = o.modul()
+        esit(G.get_plan("p1")["vzdump_wait_min"], 2000.0, "elle yazilmis buyuk deger kirpilmamali")
+        esit(G.yas_kurallari({"min_age_min": "10", "max_age_days": "2"}),
+             ["--min-age", "10m", "--max-age", "2880m"], "metin degerler")
+        ok, n = G.do_copy(dict(G.get_plan("p1"), max_age_days="2"))   # :g ile patlamamali
+        dogru(ok, "metin max_age_days ile kopya basarili olmali")
+    finally: o.temizle()
+
+@test("yas siniri normalize edilir, varsayilan kapali", "budanan")
+def t_yas_siniri_normalize():
+    o = Ortam()
+    try:
+        G = o.modul()
+        esit(G.PLAN_DEFAULTS["max_age_days"], 0, "varsayilan 0 (hepsi) olmali -- guvenli taraf")
+        for gir, cik in ((None, 0.0), ("", 0.0), ("abc", 0.0), (-3, 0.0), ("1.5", 1.5),
+                         (2, 2.0), (99999, 3650.0)):
+            o.plan(max_age_days=gir)
+            esit(G.get_plan("p1", ) and G.cfg(force=True) and G.get_plan("p1")["max_age_days"],
+                 cik, f"giris {gir!r}")
+    finally: o.temizle()
+
+@test("yas siniri arayuzde: alan, hizli secim, rozetler, aralik uyarisi", "arayuz")
+def t_yas_siniri_arayuz():
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru('id="e-mxage"' in G.HTML, "yas siniri alani gomulu olmali")
+        dogru(re.search(r'anahtar: "max_age_days", tip: "sayi"', G.HTML),
+              "alan tablosunda sayi tipiyle olmali")
+        dogru("mxage=" in G.HTML, "onizleme sorgusu yas sinirini gondermeli")
+        for f in ("function yasSec", "function yasUyariCiz"):
+            dogru(f in G.HTML, f"{f} gomulu olmali")
+        dogru('x.durum === "eski"' in G.HTML and 'x.durum === "budandi"' in G.HTML,
+              "yeni durumlarin rozeti olmali")
+        dogru("hiç yüklenmez" in G.HTML, "calisma araligi uyarisi metni gomulu olmali")
+        # Duzenleyici her girdinin onchange'ini markDirty ile EZIYOR; HTML ozniteligi
+        # olarak yazilan yenileme hic calismiyordu. Yenileme acik atamayla baglanmali.
+        dogru(re.search(r'fld\("e-inc"\)\.onchange\s*=', G.HTML), "e-inc onizlemeyi yenilemeli")
+        dogru(re.search(r'fld\("e-mxage"\)\.onchange\s*=', G.HTML), "e-mxage onizlemeyi yenilemeli")
+        # Sinifin kendisi: dongu var olan isleyiciyi zincirlemeli (e-bwauto -> bwAutoToggle)
+        dogru(re.search(r"if \(ch\)\s*ch\.call\(e, ev\)", G.HTML),
+              "markDirty dongusu HTML'deki onchange'i ezmemeli, zincirlemeli")
+        # Zincir her acilista buyumemeli: ozgun isleyici bir kez saklanir
+        dogru(re.search(r"if \(!ozgunIsleyici\.has\(e\)\)\s*ozgunIsleyici\.set\(e,", G.HTML),
+              "ozgun isleyici yalnizca ilk acilista saklanmali (zincir buyumesin)")
+    finally: o.temizle()
+
+@test("kota: kalici hata bayat sayilmaz, test ucu taze sonucu soyler", "kota")
+def t_kota_kalici_hata():
+    """Kod incelemesi 2026-10-15: bayat yedegi HER hatada devreye giriyordu.
+    Iptal edilmis jeton gunlerce 'olcum gecikti' der, hesap testi ise eski
+    degerle 'basarili' donerdi."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        iyi = {"ok": True, "used": 10, "total": 100}
+        G._kota_onbellek_yaz("h", iyi)
+        q = G._kota_onbellek_yaz("h", {"ok": False, "error": "Google hiz siniri (paylasilan rclone kimligi) - tekrar denenecek"})
+        dogru(q.get("ok") and q.get("bayat"), f"hiz siniri bayat olmali: {q}")
+        q = G._kota_onbellek_yaz("h", {"ok": False, "error": "zaman asimi (45 sn) - Google hiz siniri olabilir"})
+        dogru(q.get("ok") and q.get("bayat"), "zaman asimi bayat olmali")
+        q = G._kota_onbellek_yaz("h", {"ok": False, "error": "couldn't fetch token: invalid_grant"})
+        dogru(q.get("ok") is False, f"kalici hata kirmizi kart olmali, bayat degil: {q}")
+        # Test ucu: onbellekte saglam deger varken rclone hata verirse ok:false
+        c = o.oku_cfg(); o.yaz_cfg(c)
+        ist = o.sunucu()
+        ist.G._kota_onbellek_yaz("gdrive", dict(iyi))
+        os.environ["MOCK_FAIL"] = "about"
+        try:
+            j = json.load(ist.istek("/api/remote/test?name=gdrive", yontem="POST", govde="{}"))
+        finally: os.environ.pop("MOCK_FAIL", None)
+        dogru(j["ok"] is False, f"bozuk hesap testi basarili gorunmemeli: {j}")
+    finally: o.temizle()
+
+@test("kota: saglikli kaydin suresi dolunca tekrar kisiti uygulanmaz", "kota")
+def t_kota_tekrar_yalniz_hatada():
+    o = Ortam(quota_cache_min=1, quota_retry_sec=3600)
+    try:
+        G = o.modul()
+        G._kota_onbellek_yaz("h", {"ok": True, "used": 1, "total": 2})
+        G._KOTA_ONBELLEK["h"]["zaman"] -= 120; G._KOTA_ONBELLEK["h"]["son_deneme"] -= 120
+        basladi = []
+        o.yamala(G.threading, "Thread", lambda *a, **k: type("T", (), {"start": lambda s: basladi.append(1)})())
+        G.remote_quota_onbellekli("h")
+        dogru(basladi, "suresi dolan SAGLIKLI kayit arka planda tazelenmeliydi")
+    finally: o.temizle()
+
+@test("kota ayarlari sunucuda arayuzle ayni sinirlara kirpilir", "kota")
+def t_kota_ayar_sinirlari():
+    o = Ortam()
+    try:
+        G = o.modul()
+        G.save_settings({"quota_timeout_sec": 1, "quota_wait_timeout_sec": 100000,
+                         "quota_retry_sec": 0, "quota_cache_min": 99999})
+        c = G.cfg(force=True)
+        esit((c["quota_timeout_sec"], c["quota_wait_timeout_sec"], c["quota_retry_sec"],
+              c["quota_cache_min"]), (5, 600, 5, 1440), "sinirlar")
+    finally: o.temizle()
+
+@test("kota karti: bayat olsa da doluluk alarmi kalir", "kota")
+def t_kota_bayat_dolu():
+    o = Ortam()
+    try:
+        G = o.modul()
+        dogru(re.search(r'\(q\.bayat \? " bayat" : ""\)\s*\+ \(pct >= 90', G.HTML),
+              "bayat sinifi doluluk sinifini EZMEMELI, eklenmeli")
+        dogru(".hesap.bayat.dolu .mini i{background:#f85149}" in G.HTML,
+              "bayat+dolu kirmizi kalmali (CSS sirasi grisi kazandirmasin)")
+    finally: o.temizle()
+
 @test("form alanlari tipine uygun kontrolle ciziliyor", "arayuz")
 def t_alan_tipleri():
     """Dogrulama tablodan turuyordu ama girdinin KENDISI duz metin kutusuydu:
@@ -3087,6 +3539,135 @@ def t_kota_bekliyor_ekrani():
         # Akis kapaliysa da kendiliginden tazelensin
         dogru("kotaTimer" in G.HTML, "bekleyen kota icin kisa araliktaki tazeleme olmali")
     finally: o.temizle()
+
+@test("gecici kota hatasi eldeki DOGRU degeri silmez", "izleme")
+def t_kota_bayat_korunur():
+    """Ekranda 'sametdrive - hata / zaman asimi' karti cikti. Ariza yoktu:
+    Google, rclone'un ortak OAuth projesini hiz sinirina takmisti (403
+    rateLimitExceeded), rclone ustel geri cekilmeyle tekrar denedi ve tek bir
+    sorgu 50 sn surdu. Olculdu 2026-08-10 (uretim host): ayni komut 11 kez
+    ~1 sn, 1 kez 50.1 sn.
+
+    Asil kusur oradaki gecikme degil, BASARISIZ olcumun onbellekteki dogru
+    degeri silmesiydi: 10 dakikalik saglam kota hata ile ezildi."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        G._KOTA_ONBELLEK.clear()
+        iyi = G.remote_quota_onbellekli("gdrive", bekle=True)
+        dogru(iyi.get("ok") is True, f"once saglam olcum olmali: {iyi}")
+        toplam, kullanilan = iyi.get("total"), iyi.get("used")
+        dogru(toplam, "sahte rclone kota dondurmeli")
+
+        # Simdi YALNIZCA kota sorgusu zaman asimina ugrasin; hesap listesi
+        # calismaya devam etsin (hepsini bozarsak olculen sey degisir)
+        gercek = G.rclone
+        G.rclone = lambda a, timeout=None: ((124, "", "zaman asimi")
+                                            if a[:1] == ["about"] else gercek(a, timeout))
+        sonra = G.remote_quota_onbellekli("gdrive", zorla=True)
+        dogru(sonra.get("ok") is True,
+              f"bayat deger hala GECERLI sayilmali (kirmizi hata degil): {sonra}")
+        esit(sonra.get("total"), toplam, "toplam kota korunmali")
+        esit(sonra.get("used"), kullanilan, "kullanilan kota korunmali")
+        dogru(sonra.get("bayat") is True, "bayat isareti konmali")
+        dogru("zaman asimi" in (sonra.get("bayat_hata") or ""),
+              f"bayatlik sebebi tasinmali: {sonra.get('bayat_hata')}")
+        # Ana ekran ozeti de yuzdeyi kaybetmemeli
+        oz = {h["name"]: h for h in G.hesap_ozeti()}
+        dogru(oz["gdrive"]["pct"] is not None, f"yuzde kaybolmamali: {oz['gdrive']}")
+
+        # Hic saglam deger YOKKEN hata gercekten hata olarak gorunmeli
+        G._KOTA_ONBELLEK.clear()
+        bos = G.remote_quota_onbellekli("gdrive", bekle=True)
+        dogru(bos.get("ok") is False, f"elde deger yoksa hata gizlenmemeli: {bos}")
+    finally: o.temizle()
+
+@test("hiz siniri hatasi 'ariza' gibi yazilmaz", "izleme")
+def t_kota_hiz_siniri_metni():
+    """403 rateLimitExceeded rclone'un paylasilan Google projesinden gelir;
+    ham JSON'u kullaniciya basmak hesabi bozuk sandiriyor."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        ham = ('googleapi: Error 403: Quota exceeded for quota metric \'Queries\' '
+               'and limit \'Queries per minute\' of service \'drive.googleapis.com\' '
+               'for consumer \'project_number:202264815644\'., rateLimitExceeded')
+        m = G.kota_hata_metni(ham)
+        dogru("hiz siniri" in m, f"hiz siniri anlasilir yazilmali: {m}")
+        dogru("rateLimitExceeded" not in m, "ham API cikti ekrana basilmamali")
+        # Zaman asimi hangi sinirda oldugunu soylesin
+        z = G.kota_hata_metni("zaman asimi", 120)
+        dogru("120" in z, f"zaman asimi suresi gorunmeli: {z}")
+        # Taninmayan hata oldugu gibi kalsin, yutulmasin
+        esit(G.kota_hata_metni("boyle bir hesap yok"), "boyle bir hesap yok")
+    finally: o.temizle()
+
+@test("kota zaman asimi sabit degil, ayardan gelir", "izleme")
+def t_kota_zaman_asimi_parametrik():
+    """45 sn sabit kodluydu ve 50 sn suren gercek sorgu yuzunden yaniliyordu.
+    Sinir artik ayardan gelir; arka plan ile kullanicinin bekledigi yol ayri."""
+    o = Ortam(quota_timeout_sec=137, quota_wait_timeout_sec=11, quota_retry_sec=1)
+    try:
+        G = o.modul()
+        gorulen = []
+        G.rclone = lambda a, timeout=None: (gorulen.append(timeout), (0, "{}", ""))[1]
+        G.remote_quota("gdrive")
+        esit(gorulen[-1], 137.0, "arka plan zaman asimi ayardan gelmeli")
+        G._KOTA_ONBELLEK.clear()
+        G.remote_quota_onbellekli("gdrive", bekle=True)
+        esit(gorulen[-1], 11.0, "kullanicinin bekledigi sorgu kisa sinirda olmali")
+        esit(G.kota_bekleme_tmo(), 11.0, "bekleme siniri ayardan okunmali")
+        import inspect
+        kaynak = inspect.getsource(G.remote_quota)
+        dogru("quota_timeout_sec" in kaynak, "sinir config'ten okunmali, sabit olmamali")
+    finally: o.temizle()
+
+@test("basarisiz kota sorgusu saniyede bir tekrarlanmaz", "izleme")
+def t_kota_tekrar_kisiti():
+    """Arayuz olculmeyi bekleyen hesap gorunce 3 sn'de bir yokluyor. Basarisiz
+    sorgu her yoklamada yeniden denenirse rclone dakikada 20 kez calisir ve
+    hiz sinirinin suresini uzatir."""
+    o = Ortam(quota_retry_sec=300)
+    try:
+        G = o.modul()
+        G._KOTA_ONBELLEK.clear()
+        sayac = []
+        gercek = G.rclone
+        G.rclone = lambda a, timeout=None: ((sayac.append(1), (124, "", "zaman asimi"))[1]
+                                            if a[:1] == ["about"] else gercek(a, timeout))
+        G.remote_quota_onbellekli("gdrive", bekle=True)
+        esit(len(sayac), 1, "ilk sorgu calismali")
+        for _ in range(5):
+            G.remote_quota_onbellekli("gdrive")
+        basla = time.time()
+        while G._KOTA_ISLER and time.time() - basla < 3: time.sleep(0.05)
+        esit(len(sayac), 1, f"tekrar kisiti icinde yeniden denenmemeli ({len(sayac)} cagri)")
+        # Kisit dolunca yeniden denenir
+        G._KOTA_ONBELLEK["gdrive"]["son_deneme"] = 0
+        G.remote_quota_onbellekli("gdrive")
+        basla = time.time()
+        while G._KOTA_ISLER and time.time() - basla < 3: time.sleep(0.05)
+        esit(len(sayac), 2, "kisit dolunca yeniden denenmeli")
+    finally: o.temizle()
+
+@test("bayat kota kirmizi 'hata' karti olarak cizilmez", "arayuz")
+def t_kota_bayat_ekrani():
+    """Gecici gecikme ile gercek ariza ayni kirmizi kartta gosterilirse
+    kullanici var olmayan bir sorunu kovalar (ayni sinif: bkz. bekleme dali)."""
+    o = Ortam()
+    try:
+        G = o.modul()
+        bas = G.HTML.find("function hesapSerit")
+        dogru(bas > 0, "hesapSerit gomulu olmali")
+        govde = G.HTML[bas:bas + 3000]
+        dogru("bayat" in govde, "bayat dali arayuzde olmali")
+        i_hata = govde.find('"hesap hata"')
+        i_bayat = govde.find("q.bayat")
+        dogru(0 < i_hata < i_bayat,
+              f"bayat dali !q.ok dalindan SONRA gelmeli (hata={i_hata}, bayat={i_bayat})")
+        dogru("ölçüm gecikti" in G.HTML, "gecikme metni gomulu olmali")
+    finally: o.temizle()
+
 
 @test("gomulu arayuz paketi bastan sona kosuyor", "arayuz")
 def t_paket_acilisi():

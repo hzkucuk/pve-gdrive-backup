@@ -3,6 +3,23 @@
  * Karşılığı olmayan metin Türkçe görünür (arayüz bozulmaz).
  */
 const EN: Record<string, string> = {
+  /* --- yas siniri ve budanan --- */
+  "Yalnızca son … gün": "Only the last … days",
+  "Yalnızca son N günde yazılmış dosyalar yüklenir. Daha eskiler klasörde kalır, Drive'a gitmez. 0 = yaş sınırı yok.":
+    "Only files written in the last N days are uploaded. Older ones stay in the folder and do not go to Drive. 0 = no age limit.",
+  "hepsi": "all", "son 1 gün": "last 1 day", "son 2 gün": "last 2 days",
+  "son 3 gün": "last 3 days", "son 7 gün": "last 7 days",
+  "0-3650 arası gün (0 = hepsi)": "0-3650 days (0 = all)",
+  "yaş sınırı: ": "age limit: ", " tanesi eski": " too old",
+  " tanesi Drive'da süresi dolduğu için tekrar yüklenmez": " expired on Drive and will not be uploaded again",
+  "eski": "too old", "Drive'da silindi": "pruned on Drive",
+  "son ": "older than the last ", " günden eski (": " days (", " gün) — yüklenmez": " days) — not uploaded",
+  "saklama süresi dolup Drive'dan silindi — tekrar yüklenmez": "retention expired and it was removed from Drive — not uploaded again",
+  "Plan en fazla ": "The plan runs only every ", " günde bir çalışıyor ama sınır ": " days but the limit is ",
+  " gün: arada kalan yedekler hiç yüklenmez. ": " days: backups in between are never uploaded. ",
+  "Sınırı en az ": "Set the limit to at least ", " yap ya da 0 bırak.": " or leave it at 0.",
+  "Bir koşu atlanır ya da başarısız olursa, ": "If a run is skipped or fails, ",
+  "o günün yedeği bir sonraki koşuda sınırın dışında kalabilir.": "that day's backup may fall outside the limit on the next run.",
   /* --- dahil etme filtresi --- */
   "filtre dışı": "filtered out", "filtre: ": "filter: ",
   " tanesi dışarıda": " left out",
@@ -137,6 +154,15 @@ const EN: Record<string, string> = {
   "▶ Başlat": "▶ Start", "Jeton (JSON)": "Token (JSON)", "Henüz hesap yok.": "No accounts yet.",
   "jeton bekleniyor…": "waiting for token…", "iptal edildi": "cancelled",
   "kota okunamadı": "quota unreadable", "Yönetmek için tıkla": "Click to manage",
+  "ölçüm gecikti · ": "measurement delayed · ", " önceki değer": " old value",
+  "Son ölçüm başarısız: ": "Last measurement failed: ",
+  " — gösterilen değer eski ama doğru.": " — the value shown is old but correct.",
+  " dk": " min", " sa": " h",
+  "Kota önbelleği (dk)": "Quota cache (min)",
+  "Kota sorgusu zaman aşımı (sn)": "Quota query timeout (s)",
+  "Beklenen kota sorgusu (sn)": "Interactive quota timeout (s)",
+  "Kota tekrar denemesi (sn)": "Quota retry delay (s)",
+  "1-1440 dk": "1-1440 min", "5-600 sn": "5-600 s", "5-3600 sn": "5-3600 s",
 
   /* --- mail profilleri --- */
   "✉ Mail gönderici profilleri": "✉ Mail sender profiles", "✉ Yönet": "✉ Manage",

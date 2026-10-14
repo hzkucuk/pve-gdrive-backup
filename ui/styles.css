@@ -47,10 +47,13 @@ pre{background:#0a0e13;border:1px solid #232b36;border-radius:10px;padding:12px;
 .mask.show{display:flex}
 .modal{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px;width:100%;max-width:760px}
 .modal h2{font-size:16px;margin-bottom:4px}
-fieldset{border:1px solid #232b36;border-radius:10px;padding:12px;margin:12px 0}
+/* min-width:0 -- fieldset ve grid sutunu varsayilan olarak EN GENIS icerige gore
+   buyur (min-content). Uzun dosya adi / nowrap hucre formu modalin disina tasiyordu. */
+fieldset{border:1px solid #232b36;border-radius:10px;padding:12px;margin:12px 0;min-width:0}
 legend{font-size:12px;color:#8b97a5;padding:0 6px}
-.f{display:grid;grid-template-columns:170px 1fr;gap:8px;align-items:start;margin-bottom:10px}
-@media(max-width:640px){.f{grid-template-columns:1fr}}
+.f{display:grid;grid-template-columns:170px minmax(0,1fr);gap:8px;align-items:start;margin-bottom:10px}
+.f>div{min-width:0}
+@media(max-width:640px){.f{grid-template-columns:minmax(0,1fr)}}
 .f>label{font-size:12px;color:#9fb4c9;padding-top:7px;cursor:help;border-bottom:none}
 .f>label{border-bottom:none}
 .f>label.tip{text-decoration:underline dotted #46536380;text-underline-offset:3px}
@@ -80,8 +83,11 @@ input[type=checkbox]{width:auto}
   line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#c9d6e2}
 .ksl-sar{max-height:320px;overflow:auto;margin-top:6px}
 .ksl-sar table{width:100%;border-collapse:collapse}
+.ksl-sar td:nth-child(2),#ksl-ozet,.eg{overflow-wrap:anywhere}
 .ksl-sar td{padding:3px 6px;border-bottom:1px solid #1b2027;vertical-align:top;
   font-size:12px;word-break:break-all}
+/* Genel td kurali nowrap; burada ad ve aciklama kirilmali, yoksa liste yatay kayar. */
+.ksl-sar td:nth-child(2),.ksl-sar td:nth-child(4){white-space:normal}
 .ksl-sar td:nth-child(3){white-space:nowrap;color:#9fb4c9;text-align:right}
 .ksl-r{display:inline-block;min-width:74px;text-align:center;padding:1px 6px;
   border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
@@ -90,6 +96,7 @@ input[type=checkbox]{width:auto}
 .ksl-bekle{background:#1a2230;color:#8fb6e8;border:1px solid #26364d}
 .ksl-riskli{background:#2d1518;color:#ff9b9b;border:1px solid #5a2228}
 .ksl-disi{background:#232326;color:#a5a5ad;border:1px solid #3a3a40}
+.yas-hizli{display:inline-flex;flex-wrap:wrap;gap:4px}
 /* misafir secici: "sadece 100'u yedekle" karari desen yazmadan verilebilsin.
    Etiketin tamami tiklanabilir -- kucuk kutucugu avlamak zorunda kalinmaz. */
 /* Kota olculurken: dolu degil, AKAN bir cubuk -- yuzde bilinmiyor. */
@@ -104,7 +111,9 @@ input[type=checkbox]{width:auto}
 .msf.sec{background:#12291a;border-color:#1f4a2f}
 .msf .msf-ad{font-weight:600;color:#d6e2ee}
 .msf.sec .msf-ad{color:#7ee2a8}
-.msf .msf-bilgi{color:#7d8fa3;white-space:nowrap}
+.msf .msf-bilgi{color:#7d8fa3;min-width:0;overflow-wrap:anywhere}
+/* Dar ekranda kart kendi icinde satir kirar; yoksa telefonda modal disina tasiyordu. */
+.msf{max-width:100%;min-width:0;flex-wrap:wrap}
 .msf label{display:flex;align-items:center;gap:7px;cursor:pointer;margin:0}
 .msf-yalniz,.msf-hepsi{background:#1b2531;border:1px solid #2f3f52;color:#9fb4c9;
   border-radius:6px;font-size:10px;padding:2px 6px;cursor:pointer}
@@ -118,7 +127,8 @@ input[type=checkbox]{width:auto}
 .wd{display:flex;gap:5px;flex-wrap:wrap}
 .wd label,.cb{display:flex;align-items:center;gap:5px;background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer}
 .cbrow{display:flex;gap:6px;flex-wrap:wrap}
-.inline{display:flex;gap:6px;align-items:center}
+.inline{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.inline>input{flex:1 1 140px;min-width:0}
 .dirlist{max-height:300px;overflow:auto;border:1px solid #232b36;border-radius:8px;margin-top:8px}
 .dirlist div{padding:7px 10px;border-bottom:1px solid #1c2330;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
 .dirlist div:hover{background:#1c2330}
@@ -156,6 +166,14 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
 .hesap.dolu .mini i{background:#f85149}
 .hesap .alt{font-size:11px;color:#8b97a5}
 .hesap.hata{border-color:#5c1a1a}
+/* bayat = sayi dogru ama son tazeleme basarisiz; ariza degil, gecikme */
+.hesap.bayat{border-color:#3d3520}
+.hesap.bayat .mini i{background:#6e7681}
+.hesap.bayat .alt{color:#c9a227}
+/* Bayat + dolu: doluluk rengi korunur (alarm hiz siniri yuzunden kaybolmasin) */
+.hesap.bayat.uyari .mini i{background:#d29922}
+.hesap.bayat.dolu .mini i{background:#f85149}
+.bayat-not{color:#c9a227}
 
 /* --- kapasite planlayici --- */
 .kapasite{background:#0f151d;border:1px solid #232b36;border-radius:10px;padding:12px;margin-bottom:14px}

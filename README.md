@@ -47,6 +47,9 @@ Proxmox'un kendi zamanlayıcısı üretir, bu araç yaşam döngüsünü yöneti
 **Saklama.** `keep_days` günden eski setler Google çöp kutusuna gönderilir, `drive_trash_days`
 sonra kalıcı silinir. `keep_count` bir güvenlik tabanıdır: VM/CT başına en yeni N set,
 gün sınırına bakılmadan korunur — uzun süre yedeklenmeyen bir VM'in tüm yedekleri kaybolmaz.
+Drive'dan budanan bir set diskte dursa da yeniden yüklenmez; saklama kuralı gevşetilirse
+(ör. `keep_days` yükseltilirse) yeniden yüklenir. `max_age_days` ile yalnızca son N günün
+dosyaları yüklenir. Tüm ayarlar ve varsayılanları: [docs/OZELLIKLER.md](docs/OZELLIKLER.md).
 
 **Çakışmama.** `vzdump` çalışırken yükleme başlamaz; yazılmakta olan dosyalar `--min-age` ve
 desen dışlamalarıyla atlanır; yükleme başarısızsa retention hiç çalışmaz.

@@ -197,6 +197,8 @@ o özellik için ölçülmüş bir test ekle. Testler geçmeden "bitti" deme.
 - [x] Sağ tık menüleri: plan, hesap, SMTP, log ve tablo satırları
 - [x] Proxmox host yapılandırmasının da yedeklenmesi (/etc/pve, ağ, depo tanımları)
 - [ ] Geri yükleme tatbikatı: indir + sha256 doğrula, sonucu haftalık rapora yaz
+- [x] Drive'dan budanan yedek diskte dursa da tekrar yüklenmesin
+- [x] Misafir listesinde "yalnızca son N günün dosyaları" filtresi (`max_age_days`)
 
 ### 10. Oturum sonunda transcript'i yedekle
 
