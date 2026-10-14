@@ -4,20 +4,27 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
 ## Hemen bakılacaklar
 
-0. **v1.11.0 YEREL — host'a DAĞITILMADI, commit/yayın YOK.** (2026-10-15)
+0. **v1.11.0 YAYINLANDI ve canlıda.** (2026-10-15 01:5x)
 
-   - Budanan kaydı: Drive'dan silinen set diskte dursa da yeniden yüklenmiyor
-     (canlı ayarlarda gündüz elle yedekte ~45 GB'lık döngü vardı).
+   GitHub release `v1.11.0` (varlık `pve_gdrive.py`), commit `fddb236`. `./dagit.sh`:
+   pid 3066905, sha256 eşleşti. Yerel = release = çalışan: `7ce2dcf3f190f50b…`.
+   1.10.2 de bu sürümün içinde (ayrı release yapılmadı).
+
+   - Budanan kaydı: Drive'dan silinen set diskte dursa da yeniden yüklenmiyor; kayıt her
+     koşuda bugünkü saklama kuralıyla sınanıyor (kural gevşerse yeniden yüklenir).
+     **Canlı Drive'da ölçüldü:** çöpteki dosya normal listede yok, `copy --dry-run` onu
+     yeniden yüklemeye kalkıyor. Deney dosyası `sametdrive:pgd-deneme/cop-denemesi.txt`
+     Drive çöpünde duruyor (kalıcı silme yapılmadı; boş klasör elle silinebilir).
    - Yeni `max_age_days` ("Yalnızca son N gün"), misafir seçicinin altında.
-   - Kod incelemesi (10 bulgu) ve güvenlik incelemesi (4 düşük) düzeltildi;
-     1.10.2'nin kota işindeki 6 bulgu dahil.
-   - Form taşması giderildi (ürün sahibinin ekran görüntüsü).
-   - Ürün sahibinin çalıştırdığı ikinci `/code-review` (9 bulgu) de düzeltildi;
-     en ağırı: budanan kaydı kalıcıydı, artık bugünkü saklama kuralıyla sınanıyor.
-   - Testler **156 geçti, 0 kaldı**; Debian 12'de kurulum/yükseltme/kur.sh geçti.
+   - rclone 1.60.1 (canlı) ile 1.75 kural sonundaki boşlukta FARKLI: 1.75 kırpar,
+     1.60.1 kırpmaz. Bu yüzden böyle adlar budanan kaydına hiç alınmaz.
 
-   ⏭ **Sırada:** ürün sahibinin onayıyla commit → `./dagit.sh` → GitHub `v1.11.0`.
-   Canlıda plan Ağustos'tan beri koşmamış (`last_run` 2026-08-09) — bilgi, risk maddesi değil.
+   ⏭ **Ürün sahibi test edecek (önümüzdeki günler):**
+   - Arayüzde "Yalnızca son … gün" alanı, hızlı düğmeler, `eski` / `Drive'da silindi` rozetleri
+   - Telefonda form taşması (biz 500 px'te ölçtük; Chrome daha dar pencereye izin vermedi)
+   - Gündüz elle "Yedekle": en eski set yeniden yüklenmemeli, günlükte
+     "N dosya saklama kuraliyla Drive'dan silinmisti, tekrar yuklenmeyecek" görünmeli
+   - Canlı plan Ağustos'tan beri koşmamış (`last_run` 2026-08-09) — bilgi, risk maddesi değil.
 
 0. **v1.10.2 host'a dağıtıldı — GitHub yayını HENÜZ YOK.** (2026-08-10 01:5x)
 
