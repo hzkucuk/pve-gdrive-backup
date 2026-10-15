@@ -4,6 +4,18 @@ Yeni oturuma başlarken önce bunu oku. `CLAUDE.md` sözleşme, bu dosya **o gü
 
 ## Hemen bakılacaklar
 
+0. **v1.11.4 YAYINLANDI (latest) ve canlıda; v1.11.3 de yayınlandı.** (2026-10-15 19:30)
+
+   1.11.3: mailde `21:00` iki sütuna bölünüyordu (ayraç artık yalnızca `: `), Drive
+   saatleri UTC'ydi (mail + arayüz yerel saate çevirir). Mock rclone da UTC döner oldu.
+   1.11.4: yalnızca log/notes kalmış set yedek sayılmaz (`ARSIV YOK` uyarısı) ve
+   `keep_count` tabanında gerçek arşivin yerini almaz (birleşim — eskisinden fazla silmez).
+   Yeni ayar `dump_yan_regex`. Canlıda budanacak set: yok.
+   Commit `117edc5`; yerel = release = çalışan: `13b753c8099ab254…`.
+
+   **Ürün sahibinde bekleyen:** CT 100 (seaweedfs) hiçbir Proxmox yedek işinde yok —
+   kendisi ekleyecek. VM 122 (Win2019Std) yapılandırmasında disk yok, yedekleri diskless.
+
 0. **v1.11.2 YAYINLANDI (latest) ve canlıda.** (2026-10-15 02:20)
 
    Güvenlik: hesap/hedef adı `-` ile başlarsa rclone bayrak okuyordu; tek doğrulayıcı
