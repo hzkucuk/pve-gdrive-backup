@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.11.3"
+SURUM = "1.11.4"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -189,6 +189,9 @@ GLOBAL_DEFAULTS = {
     "log_max_mb": 5,            # log dosyasi bu boyutu asinca dondurulur
     "log_keep": 2,              # saklanacak eski log dosyasi sayisi
     "dump_regex": r"^(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}))",
+    # Setin yan dosyalari: bunlardan baska dosyasi olmayan set "arsivsiz"dir --
+    # geri yuklenemez, rapor onu yedek saymaz, keep_count tabaninda yer tutmaz.
+    "dump_yan_regex": r"\.(log|notes)$",
     "plans": []
 }
 
@@ -284,6 +287,16 @@ def dump_re():
             print(f"UYARI: dump_regex gecersiz ({e}), varsayilana donuldu", file=sys.stderr)
             _RE_CACHE[pat] = re.compile(GLOBAL_DEFAULTS["dump_regex"])
     return _RE_CACHE[pat]
+
+def yan_dosya_mi(ad):
+    """Set dosyasi arsiv degil de log/notes gibi bir yan dosya mi (dump_yan_regex)."""
+    pat = cfg().get("dump_yan_regex") or GLOBAL_DEFAULTS["dump_yan_regex"]
+    if ("yan", pat) not in _RE_CACHE:
+        try: _RE_CACHE[("yan", pat)] = re.compile(pat)
+        except re.error as e:
+            print(f"UYARI: dump_yan_regex gecersiz ({e}), varsayilana donuldu", file=sys.stderr)
+            _RE_CACHE[("yan", pat)] = re.compile(GLOBAL_DEFAULTS["dump_yan_regex"])
+    return bool(_RE_CACHE[("yan", pat)].search(str(ad)))
 DT_FMT  = "%Y_%m_%d-%H_%M_%S"
 TS_FMT  = "%Y-%m-%d %H:%M:%S"
 
@@ -508,6 +521,13 @@ EN_METIN = {
     "Son calisma HATA ile bitti.": "The last run FAILED.",
     "Saklama suresinden eski yedegi olanlar":
         "VM/CTs whose newest backup is older than the retention period",
+    "icin en yeni yedek saklama suresinden eski - yedegi aliniyor mu?":
+        ": newest backup is older than the retention period - is it still being backed up?",
+    "Drive'da arsivi olmayan, yalnizca log kalanlar":
+        "VM/CTs with only logs on Drive, no archive",
+    "icin Drive'da arsiv yok, yalnizca log - geri yuklenecek yedek yok":
+        ": no archive on Drive, only logs - nothing to restore",
+    "ARSIV YOK, YALNIZCA LOG": "NO ARCHIVE, LOG ONLY",
     "zamanlanmis": "scheduled", "manuel": "manual", "sn": "s", "saat": "at",
     "bos": "free", "dk": "min", "hazir": "ready", "yok": "none",
     "gunden eski setler": "days old or older", "copte": "in trash",
@@ -1450,21 +1470,26 @@ def _bolum_saklama(p):
             f"  Cop suresi   : {p['drive_trash_days']} gun"]
 
 def _bolum_misafirler(p, gs, esik_gun=None):
-    """(satirlar, eski_misafirler). gs None ise Drive listelenememis demektir."""
-    if gs is None: return ["  (Drive listelenemedi)"], []
+    """(satirlar, eski_misafirler, arsivsiz_misafirler). gs None ise Drive
+    listelenememis demektir. Arsivsiz: Drive'da hic arsivi olmayan, yalnizca
+    log/notes kalmis misafir -- geri yuklenecek bir sey yok."""
+    if gs is None: return ["  (Drive listelenemedi)"], [], []
     esik = int(esik_gun if esik_gun is not None else p["keep_days"])
-    simdi = time.time(); satirlar = []; eski = []
+    simdi = time.time(); satirlar = []; eski = []; arsivsiz = []
     for g in gs:
         # Negatif yas olmasin: dosya adindaki tarih ileri olabilir (saat farki,
         # elle kopyalanmis dosya). "-0.8 gun once" anlamsiz bir cikti olurdu.
         yas = max(0.0, (simdi - g["last"]) / 86400) if g["last"] else None
         iso = datetime.fromtimestamp(g["last"]).strftime("%Y-%m-%d %H:%M") if g["last"] else "-"
         isaret = ""
-        if yas is not None and yas > esik:
+        if not g["sets"]:
+            isaret = "  <-- ARSIV YOK, YALNIZCA LOG"; arsivsiz.append(g["guest"])
+        elif yas is not None and yas > esik:
             isaret = "  <-- SAKLAMA SURESINDEN ESKI"; eski.append(g["guest"])
-        satirlar.append(f"  {g['guest']:10} {iso}  {g['sets']:>2} set  {human(g['size']):>9}"
+        ek = f" +{g['arsivsiz']} log" if g.get("arsivsiz") else ""
+        satirlar.append(f"  {g['guest']:10} {iso:16}  {g['sets']:>2} set{ek}  {human(g['size']):>9}"
                         f"  {('%.1f gun once' % yas) if yas is not None else ''}{isaret}")
-    return satirlar, eski
+    return satirlar, eski, arsivsiz
 
 def _bolum_cop(snap, azami=10):
     t = snap.get("trash", []) or []
@@ -1484,17 +1509,18 @@ def guest_summary(p):
     aylardir yedeklenmeyen bir VM'i burada gorursun."""
     ok, files = lsjson_ok(p["remote"])
     if not ok: return None
+    # Yalnizca arsivli setler yedek sayilir: Drive'da log/notes kalmis bir set
+    # geri yuklenemez. Arsivsizler ayrica sayilir ki raporda gorunsunler.
     g = {}
-    for f in files:
-        if f.get("IsDir"): continue
-        m = dump_re().match(f.get("Name", ""))
-        if not m: continue
-        key = f"{m.group(2)}-{m.group(3)}"
-        e = g.setdefault(key, {"guest": key, "last": 0, "sets": set(), "size": 0})
-        e["last"] = max(e["last"], dt_epoch(m.group(4)))
-        e["sets"].add(m.group(4)); e["size"] += int(f.get("Size", 0) or 0)
-    out = [{"guest": v["guest"], "last": v["last"], "sets": len(v["sets"]), "size": v["size"]}
-           for v in g.values()]
+    for s in collect_sets(files).values():
+        e = g.setdefault(s["guest"], {"guest": s["guest"], "last": 0, "sets": 0,
+                                      "arsivsiz": 0, "size": 0})
+        e["size"] += sum(f["size"] for f in s["files"])
+        if s["arsiv"]:
+            e["sets"] += 1; e["last"] = max(e["last"], s["epoch"])
+        else:
+            e["arsivsiz"] += 1
+    out = list(g.values())
     out.sort(key=lambda x: x["last"])
     return out
 
@@ -1797,10 +1823,12 @@ def build_report(p):
     gs = None
     try: gs = guest_summary(p)
     except Exception as e: yut("build_report", e)
-    misafir_satirlari, eski = _bolum_misafirler(p, gs)
+    misafir_satirlari, eski, arsivsiz = _bolum_misafirler(p, gs)
     L += ["VM/CT BAZINDA SON YEDEK"] + misafir_satirlari
     for g in eski:
         uyari.append(f"{g} icin en yeni yedek saklama suresinden eski - yedegi aliniyor mu?")
+    for g in arsivsiz:
+        uyari.append(f"{g} icin Drive'da arsiv yok, yalnizca log - geri yuklenecek yedek yok")
     if gs is not None:
         eksik = sorted(local_guests(p) - {g["guest"] for g in gs})
         if eksik:
@@ -2375,15 +2403,20 @@ def collect_sets(files):
         if not m: continue
         base = m.group(1)
         s = sets.setdefault(base, {"base": base, "guest": f"{m.group(2)}-{m.group(3)}",
-                                   "dt": m.group(4), "epoch": dt_epoch(m.group(4)), "files": []})
+                                   "dt": m.group(4), "epoch": dt_epoch(m.group(4)), "files": [],
+                                   "arsiv": False})
         s["files"].append({"name": f["Name"], "size": int(f.get("Size", 0) or 0)})
+        if not yan_dosya_mi(f["Name"]): s["arsiv"] = True
     return sets
 
 def budanacak_setler(p, files):
     """Saklama kuralinin silecegi setler. TEK karar noktasi: hem do_prune hem
     budanan kaydinin "hala gecerli mi" sinamasi bunu kullanir; iki ayri kopya
     zamanla ayrisir ve kayit, kuralin artik tuttugu bir seti dislamaya devam eder.
-    keep_count taban: misafir basina en yeni N set gun sinirina bakilmadan korunur."""
+    keep_count taban: misafir basina en yeni N set gun sinirina bakilmadan korunur.
+    Taban ARSIVLI setlerle de sayilir ve ikisinin birlesimi korunur: yalnizca log
+    kalmis (arsivi yuklenememis) yeni bir set, daha eski gercek bir arsivi tabandan
+    itip sildiremez. Birlesim oldugu icin eski kuralin tuttugu hicbir sey silinmez."""
     keep_days = int(p.get("keep_days", PLAN_DEFAULTS["keep_days"]))
     keep_count = int(p.get("keep_count", PLAN_DEFAULTS["keep_count"]))
     cutoff = time.time() - keep_days * 86400
@@ -2393,8 +2426,12 @@ def budanacak_setler(p, files):
     secilen = []
     for lst in by_guest.values():
         lst.sort(key=lambda s: (s["epoch"], s["dt"]), reverse=True)
+        arsivli = 0
         for i, s in enumerate(lst):
-            if i < keep_count: continue            # guvenlik tabani
+            arsiv_sirasi = arsivli
+            if s.get("arsiv", True): arsivli += 1
+            if i < keep_count: continue            # guvenlik tabani (tum setler)
+            if s.get("arsiv", True) and arsiv_sirasi < keep_count: continue   # taban (arsivli)
             if s["epoch"] >= cutoff: continue      # gun siniri icinde
             secilen.append(s)
     return secilen
@@ -2829,9 +2866,9 @@ def build_run_mail(p, status, summary, snap, detay):
     gs = None
     try: gs = guest_summary(p)
     except Exception as e: yut("build_run_mail", e)
-    eski = []
+    eski = []; arsivsiz = []
     if gs:
-        misafir_satirlari, eski = _bolum_misafirler(p, gs)
+        misafir_satirlari, eski, arsivsiz = _bolum_misafirler(p, gs)
         L += ["VM/CT BAZINDA SON YEDEK"] + misafir_satirlari + [""]
     bl = snap.get("backups", [])[:10]
     if bl:
@@ -2850,6 +2887,7 @@ def build_run_mail(p, status, summary, snap, detay):
     qw = int(p.get("report_quota_warn") or 0)
     if qw and pct >= qw: uyari.append(f"Kota %{pct:.1f} - esik %{qw} asildi.")
     if eski: uyari.append("Saklama suresinden eski yedegi olanlar: " + ", ".join(eski))
+    if arsivsiz: uyari.append("Drive'da arsivi olmayan, yalnizca log kalanlar: " + ", ".join(arsivsiz))
     L += _bolum_uyarilar(uyari)
     L += ["", f"Haftalik rapor: {nrep.strftime(TS_FMT) if nrep else 'kapali'}",
           f"Log: {cfg().get('log_file')}"]
@@ -4498,7 +4536,7 @@ def public_status():
                          ("ui_bind", "ui_port", "ui_user", "smtp_host", "smtp_port", "smtp_user",
                           "mail_from", "browse_roots", "allow_account_cleanup", "history_max",
                           "log_tail_lines", "ui_refresh_sec", "rclone_timeout_min", "dump_regex",
-                          "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
+                          "dump_yan_regex", "rclone_tail_lines", "snapshot_max_rows", "log_max_mb", "log_keep",
                           "stats_interval_sec", "purge_batch", "purge_timeout_min",
                           "ssl_cert", "ssl_key", "cookie_secure", "cookie_samesite",
                           "allow_networks", "lan_hep_acik",
@@ -5061,9 +5099,16 @@ def smtp_test(pid, to):
     return {"ok": ok, "msg": (f"test maili gonderildi -> {to}") if ok else "gonderilemedi (loga bak)"}
 
 def save_settings(data):
+    # Kaliplar degisiklikten ONCE sinanir: gecersiz kalip kaydedilirse kullanimda
+    # sessizce varsayilana donulur ve kullanici yazdiginin calismadigini bilmez.
+    for k in ("dump_regex", "dump_yan_regex"):
+        if k in data:
+            if not str(data[k] or "").strip(): return {"ok": False, "msg": f"{k}: kalip bos olamaz"}
+            try: re.compile(str(data[k]))
+            except re.error as e: return {"ok": False, "msg": f"{k} gecersiz: {e}"}
     C = cfg()
     for k in ("ui_bind", "ui_user", "smtp_host", "smtp_user", "mail_from", "dump_regex",
-              "ssl_cert", "ssl_key", "log_file", "state_file"):
+              "dump_yan_regex", "ssl_cert", "ssl_key", "log_file", "state_file"):
         if k in data: C[k] = str(data[k])
     for k in ("ui_port", "smtp_port", "history_max", "log_tail_lines", "ui_refresh_sec",
               "rclone_tail_lines", "snapshot_max_rows", "log_keep", "stats_interval_sec",
@@ -5390,7 +5435,7 @@ def disa_aktar(sirlar=False):
         "smtp_profiles": profiller,
         "ayarlar": {k: C.get(k) for k in (
             "ui_port", "ui_user", "ui_refresh_sec", "browse_roots", "dump_regex",
-            "history_max", "log_tail_lines", "rclone_tail_lines", "snapshot_max_rows",
+            "dump_yan_regex", "history_max", "log_tail_lines", "rclone_tail_lines", "snapshot_max_rows",
             "log_max_mb", "log_keep", "rclone_timeout_min", "stats_interval_sec",
             "purge_batch", "quota_cache_min", "quota_timeout_sec",
             "quota_wait_timeout_sec", "quota_retry_sec",
@@ -6454,6 +6499,9 @@ code{background:#0f151d;padding:1px 5px;border-radius:4px;font:12px ui-monospace
     <div class="f"><label class="tip" title="Dosya adı deseni. Grup 1=set, 2=tip, 3=id, 4=tarih.">Dosya adı kalıbı</label>
       <div><input id="g-re"><div class="errmsg" id="err-gre"></div>
         <div class="hint">Regex. Varsayılan vzdump adlarını tanır — değiştirmen normalde gerekmez.</div></div></div>
+    <div class="f"><label class="tip" title="Setin arşiv olmayan yan dosyaları. Yalnızca bunlardan oluşan set geri yüklenemez: raporda yedek sayılmaz, 'arşiv yok' uyarısı verir ve en az N set tabanında yer tutmaz.">Yan dosya kalıbı</label>
+      <div><input id="g-yre"><div class="errmsg" id="err-gyre"></div>
+        <div class="hint">Regex, dosya adının sonuna bakar. Varsayılan <code>\.(log|notes)$</code> — örnek: <code>vzdump-lxc-100-…​.log</code> yan dosya, <code>….tar.zst</code> arşiv.</div></div></div>
     <div class="f"><label class="tip" title="Plan başına saklanacak çalışma geçmişi kaydı.">Geçmiş kaydı</label>
       <div><input type="number" min="1" id="g-hist"><div class="errmsg" id="err-ghist"></div></div></div>
     <div class="f"><label class="tip" title="Arayüzde gösterilecek log satırı sayısı.">Log satırı</label>
@@ -7842,6 +7890,20 @@ function good(id) {
     return true;
 }
 function vTxt(id, msg) { return val(id).trim() ? good(id) : bad(id, msg); }
+// Regex alani: bos olamaz ve derlenmeli. Sunucu da ayni denetimi yapar (Python
+// sozdizimi); bu, gecersiz kalibi kaydetmeden once gormek icin.
+function vRe(id) {
+    const v = val(id).trim();
+    if (!v)
+        return bad(id, C("kalıp boş olamaz"));
+    try {
+        new RegExp(v);
+        return good(id);
+    }
+    catch (e) {
+        return bad(id, C("geçersiz regex: ") + String(e.message || e));
+    }
+}
 function vRx(id, rx, msg, optional) {
     const v = val(id).trim();
     if (!v)
@@ -9914,6 +9976,7 @@ function openSettings() {
     setVal("g-refresh", s.ui_refresh_sec);
     setVal("g-roots", (s.browse_roots || []).join(", "));
     setVal("g-re", s.dump_regex);
+    setVal("g-yre", s.dump_yan_regex);
     setVal("g-hist", s.history_max);
     setVal("g-logn", s.log_tail_lines);
     setVal("g-tail", s.rclone_tail_lines);
@@ -9971,7 +10034,8 @@ async function saveSettings() {
     ok = vNum("g-qtmo", 5, 600, C("5-600 sn")) && ok;
     ok = vNum("g-qwait", 5, 600, C("5-600 sn")) && ok;
     ok = vNum("g-qretry", 5, 3600, C("5-3600 sn")) && ok;
-    ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
+    ok = vRe("g-re") && ok;
+    ok = vRe("g-yre") && ok;
     const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
     const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
         && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
@@ -9985,7 +10049,7 @@ async function saveSettings() {
     }
     const b = {
         ui_bind: val("g-bind"), ui_port: Number(val("g-port")), ui_user: val("g-user"),
-        ui_refresh_sec: Number(val("g-refresh")), dump_regex: val("g-re"),
+        ui_refresh_sec: Number(val("g-refresh")), dump_regex: val("g-re"), dump_yan_regex: val("g-yre"),
         history_max: Number(val("g-hist")), log_tail_lines: Number(val("g-logn")),
         rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
         log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),

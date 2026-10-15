@@ -2429,6 +2429,81 @@ def t_drive_zamani_yerel():
         else: os.environ["TZ"] = eski_tz
         time.tzset()
 
+def _sahte_set(misafir, gun_once, arsiv=True):
+    from datetime import datetime, timedelta
+    t = datetime.now() - timedelta(days=gun_once, hours=12)
+    b = f"vzdump-{misafir}-{t:%Y_%m_%d-%H_%M_%S}"
+    d = [{"Name": b + ".log", "Size": 1000}]
+    if arsiv: d.append({"Name": b + ".tar.zst", "Size": 10**9})
+    return d
+
+@test("yalnizca log kalmis set gercek arsivi tabandan itip sildiremez", "retention")
+def t_arsivsiz_set_taban():
+    o = Ortam()
+    try:
+        o.plan(keep_days=3, keep_count=3); G = o.modul(); p = G.get_plan("p1")
+        # en yeni 2 set arsivsiz (yukleme yarim kalmis), sonra 4 arsivli eski set
+        files = (_sahte_set("lxc-101", 0, False) + _sahte_set("lxc-101", 1, False)
+                 + sum((_sahte_set("lxc-101", g) for g in (10, 11, 12, 13)), []))
+        silinen = {s["dt"] for s in G.budanacak_setler(p, files)}
+        arsivli = sorted((s for s in G.collect_sets(files).values() if s["arsiv"]),
+                         key=lambda s: s["epoch"], reverse=True)
+        for s in arsivli[:3]:
+            dogru(s["dt"] not in silinen, f"en yeni 3 arsivli set korunmali: {s['dt']}")
+        esit(len(silinen), 1, "yalnizca 4. arsivli set silinmeli")
+        # birlesim: eski kuralin tuttugu hicbir sey silinmez (rastgele senaryolar)
+        import random
+        rnd = random.Random(7)
+        for _ in range(500):
+            f = sum((_sahte_set("qemu-1", g, rnd.random() < .6)
+                     for g in rnd.sample(range(40), rnd.randint(1, 12))), [])
+            kc = rnd.randint(0, 5); kd = rnd.randint(0, 20)
+            pp = dict(p, keep_count=kc, keep_days=kd)
+            yeni = {s["base"] for s in G.budanacak_setler(pp, f)}
+            sets = sorted(G.collect_sets(f).values(), key=lambda s: s["epoch"], reverse=True)
+            cut = time.time() - kd * 86400
+            eski = {s["base"] for i, s in enumerate(sets) if i >= kc and s["epoch"] < cut}
+            dogru(yeni <= eski, f"yeni kural eskisinden fazla silmemeli: {yeni - eski}")
+    finally: o.temizle()
+
+@test("arsivsiz misafir raporda ayri uyari alir, yedek sayilmaz", "rapor")
+def t_arsivsiz_rapor():
+    o = Ortam()
+    try:
+        o.plan(keep_days=3, keep_count=3); G = o.modul(); p = G.get_plan("p1")
+        gs = [{"guest": "lxc-100", "last": 0, "sets": 0, "arsivsiz": 2, "size": 2500},
+              {"guest": "lxc-101", "last": int(time.time()) - 3600, "sets": 1, "arsivsiz": 1,
+               "size": 10**9}]
+        satirlar, eski, arsivsiz = G._bolum_misafirler(p, gs)
+        esit(arsivsiz, ["lxc-100"]); esit(eski, [])
+        dogru("ARSIV YOK" in satirlar[0] and "+2 log" in satirlar[0], satirlar[0])
+        dogru("+1 log" in satirlar[1] and "ARSIV YOK" not in satirlar[1], satirlar[1])
+        # guest_summary: mock Drive'da yalnizca log olan misafir
+        o.dosya("vzdump-lxc-100-2026_08_06-21_00_07.log"); o.vzdump_seti("lxc-101", 0)
+        G.do_copy(p)
+        g = {x["guest"]: x for x in G.guest_summary(p)}
+        esit((g["lxc-100"]["sets"], g["lxc-100"]["arsivsiz"]), (0, 1))
+        esit(g["lxc-101"]["sets"], 1)
+        snap = G.update_snapshot(p)
+        govde, _ = G.build_run_mail(p, "basarili", "x", snap, {"trigger": "test", "dur": 1})
+        dogru("yalnizca log kalanlar: lxc-100" in govde, "calisma mailinde uyari olmali")
+        rapor, _ = G.build_report(p)
+        dogru("lxc-100 icin Drive'da arsiv yok" in rapor, "haftalik raporda uyari olmali")
+    finally: o.temizle()
+
+@test("gecersiz dosya kalibi kaydedilmez, anlamli mesaj doner", "ayar")
+def t_kalip_dogrulama():
+    o = Ortam()
+    try:
+        G = o.modul()
+        for k in ("dump_regex", "dump_yan_regex"):
+            r = G.save_settings({k: "(bozuk"})
+            dogru(not r["ok"] and k in r["msg"], f"{k}: {r}")
+            dogru(not G.save_settings({k: "  "})["ok"], f"{k} bos reddedilmeli")
+        dogru(G.save_settings({"dump_yan_regex": r"\.(log|notes|txt)$"})["ok"], "gecerli kalip")
+        dogru(G.yan_dosya_mi("x.txt") and not G.yan_dosya_mi("x.tar.zst"), "kalip uygulanmali")
+    finally: o.temizle()
+
 @test("html mail duz metin alternatifi ile birlikte gider", "rapor")
 def t_mail_multipart():
     o = Ortam()
@@ -2463,7 +2538,7 @@ def t_negatif_yas():
         G = o.modul()
         ileri = time.time() + 3600            # bir saat sonrasi
         gs = [{"guest": "qemu-100", "last": int(ileri), "sets": 1, "size": 100}]
-        satirlar, eski = G._bolum_misafirler(G.get_plan("p1"), gs)
+        satirlar, eski, _ = G._bolum_misafirler(G.get_plan("p1"), gs)
         dogru(not any(re.search(r"-[\d.]+ gun once", l) for l in satirlar),
               "negatif yas basilmamali: " + str(satirlar))
         dogru("0.0 gun once" in satirlar[0], "sifira kirpilmali: " + satirlar[0])

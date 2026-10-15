@@ -108,7 +108,7 @@ interface Saglik {
 interface Settings {
   ui_bind: string; ui_port: number; ui_user: string; ui_refresh_sec: number;
   browse_roots: string[]; allow_account_cleanup: boolean; history_max: number;
-  log_tail_lines: number; rclone_timeout_min: number; dump_regex: string;
+  log_tail_lines: number; rclone_timeout_min: number; dump_regex: string; dump_yan_regex: string;
   rclone_tail_lines: number; snapshot_max_rows: number; log_max_mb: number;
   log_keep: number; stats_interval_sec: number; log_file: string; state_file: string;
   ssl_cert: string; ssl_key: string; cookie_secure: boolean;

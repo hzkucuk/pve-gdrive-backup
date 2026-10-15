@@ -2,6 +2,31 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.11.4 — 2026-10-15
+
+### Yalnızca log kalmış set yedek sayılmıyor; gerçek arşivi tabandan itip sildiremiyor
+
+Canlıda görüldü: lxc-100'ün Drive'da 2 "seti" vardı ama ikisi de yalnızca `.log`/`.notes`
+idi (2.5 KB) — rapor bunu "2 set" diye yedek gibi gösteriyordu.
+
+- **Rapor.** Yalnızca arşivli setler yedek sayılır. Arşivi hiç olmayan misafir
+  `<-- ARSIV YOK, YALNIZCA LOG` ve ayrı uyarı alır (çalışma maili + haftalık rapor);
+  arşivi olanda arşivsiz setler `+N log` diye görünür.
+- **Budama (veri güvenliği).** `keep_count` tabanı yalnızca log kalmış setleri de
+  sayıyordu: arşivi yüklenememiş yeni setler tabanı doldurup daha eski **gerçek**
+  arşivleri silinebilir hale getiriyordu. Ölçüldü (keep_count=3, en yeni 2 set
+  log-only, 4 arşiv): eski kod 3 arşivi siliyordu, yeni kod 1. Taban artık arşivli
+  setlerle de sayılır ve ikisinin birleşimi korunur — eski kuralın tuttuğu hiçbir şey
+  silinmez (500 rastgele senaryoda denetlendi).
+- **Parametrik.** Yan dosya kalıbı `dump_yan_regex` (varsayılan `\.(log|notes)$`),
+  Ayarlar → Gelişmiş'ten düzenlenir.
+- **Regex doğrulama.** `dump_regex` ve `dump_yan_regex` kaydedilmeden derlenir; geçersizse
+  anlamlı mesaj döner (eskiden kaydedilip kullanımda sessizce varsayılana dönülüyordu).
+  Arayüz de kaydetmeden önce denetler.
+- Haftalık rapordaki "saklama süresinden eski" uyarısı İngilizceye çevrilmiyordu, çevrildi.
+
+**Doğrulandı.** 163 geçti, 0 kaldı.
+
 ## 1.11.3 — 2026-10-15
 
 ### Mailde saat ikiye bölünüyordu; Drive saatleri 3 saat geri görünüyordu

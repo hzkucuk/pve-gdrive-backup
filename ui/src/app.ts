@@ -231,6 +231,13 @@ function good(id: string): boolean {
   return true;
 }
 function vTxt(id: string, msg: string): boolean { return val(id).trim() ? good(id) : bad(id, msg); }
+// Regex alani: bos olamaz ve derlenmeli. Sunucu da ayni denetimi yapar (Python
+// sozdizimi); bu, gecersiz kalibi kaydetmeden once gormek icin.
+function vRe(id: string): boolean {
+  const v = val(id).trim();
+  if (!v) return bad(id, C("kalıp boş olamaz"));
+  try { new RegExp(v); return good(id); } catch (e) { return bad(id, C("geçersiz regex: ") + String((e as Error).message || e)); }
+}
 function vRx(id: string, rx: RegExp, msg: string, optional?: boolean): boolean {
   const v = val(id).trim();
   if (!v) return optional ? good(id) : bad(id, msg);
@@ -2116,6 +2123,7 @@ function openSettings(): void {
   setVal("g-bind", s.ui_bind); setVal("g-port", s.ui_port); setVal("g-user", s.ui_user);
   setVal("g-pass", ""); setVal("g-refresh", s.ui_refresh_sec);
   setVal("g-roots", (s.browse_roots || []).join(", ")); setVal("g-re", s.dump_regex);
+  setVal("g-yre", s.dump_yan_regex);
   setVal("g-hist", s.history_max); setVal("g-logn", s.log_tail_lines);
   setVal("g-tail", s.rclone_tail_lines); setVal("g-rows", s.snapshot_max_rows);
   setVal("g-logmb", s.log_max_mb); setVal("g-logkeep", s.log_keep);
@@ -2162,7 +2170,8 @@ async function saveSettings(): Promise<void> {
   ok = vNum("g-qtmo", 5, 600, C("5-600 sn")) && ok;
   ok = vNum("g-qwait", 5, 600, C("5-600 sn")) && ok;
   ok = vNum("g-qretry", 5, 3600, C("5-3600 sn")) && ok;
-  ok = vTxt("g-re", C("kalıp boş olamaz")) && ok;
+  ok = vRe("g-re") && ok;
+  ok = vRe("g-yre") && ok;
   const netler = val("g-nets").split(",").map((x) => x.trim()).filter(Boolean);
   const kotuNet = netler.filter((x) => !/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(x)
     && !/^[0-9a-fA-F:]+(\/\d{1,3})?$/.test(x));
@@ -2170,7 +2179,7 @@ async function saveSettings(): Promise<void> {
   if (!ok) { flash(C("form hatalı"), false); return; }
   const b: Record<string, unknown> = {
     ui_bind: val("g-bind"), ui_port: Number(val("g-port")), ui_user: val("g-user"),
-    ui_refresh_sec: Number(val("g-refresh")), dump_regex: val("g-re"),
+    ui_refresh_sec: Number(val("g-refresh")), dump_regex: val("g-re"), dump_yan_regex: val("g-yre"),
     history_max: Number(val("g-hist")), log_tail_lines: Number(val("g-logn")),
     rclone_tail_lines: Number(val("g-tail")), snapshot_max_rows: Number(val("g-rows")),
     log_max_mb: Number(val("g-logmb")), log_keep: Number(val("g-logkeep")),

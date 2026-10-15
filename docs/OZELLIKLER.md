@@ -225,6 +225,7 @@ aynı `rclone about` komutu 11 kez ~1 sn sürerken 1 kez 50 sn sürdü. Bu yüzd
 |---|---|---|
 | `browse_roots` | `/var/lib/vz`, `/mnt/pve`, `/mnt`, `/srv` | Klasör seçici bu köklerin dışına çıkamaz |
 | `dump_regex` | vzdump kalıbı | Grup 1=set, 2=tip, 3=id, 4=tarih |
+| `dump_yan_regex` | `\.(log\|notes)$` | Setin yan dosyaları. Yalnızca bunlardan oluşan set **arşivsiz** sayılır: raporda yedek sayılmaz, "arşiv yok" uyarısı verir, `keep_count` tabanında yer tutmaz |
 
 ### Soğuma süresi (`cooldown_hours`)
 

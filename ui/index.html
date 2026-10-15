@@ -574,6 +574,9 @@
     <div class="f"><label class="tip" title="Dosya adı deseni. Grup 1=set, 2=tip, 3=id, 4=tarih.">Dosya adı kalıbı</label>
       <div><input id="g-re"><div class="errmsg" id="err-gre"></div>
         <div class="hint">Regex. Varsayılan vzdump adlarını tanır — değiştirmen normalde gerekmez.</div></div></div>
+    <div class="f"><label class="tip" title="Setin arşiv olmayan yan dosyaları. Yalnızca bunlardan oluşan set geri yüklenemez: raporda yedek sayılmaz, 'arşiv yok' uyarısı verir ve en az N set tabanında yer tutmaz.">Yan dosya kalıbı</label>
+      <div><input id="g-yre"><div class="errmsg" id="err-gyre"></div>
+        <div class="hint">Regex, dosya adının sonuna bakar. Varsayılan <code>\.(log|notes)$</code> — örnek: <code>vzdump-lxc-100-…​.log</code> yan dosya, <code>….tar.zst</code> arşiv.</div></div></div>
     <div class="f"><label class="tip" title="Plan başına saklanacak çalışma geçmişi kaydı.">Geçmiş kaydı</label>
       <div><input type="number" min="1" id="g-hist"><div class="errmsg" id="err-ghist"></div></div></div>
     <div class="f"><label class="tip" title="Arayüzde gösterilecek log satırı sayısı.">Log satırı</label>
