@@ -2,6 +2,30 @@
 
 Bu projede yapılan tüm iddialar ölçülerek doğrulanmıştır; her sürümde nasıl doğrulandığı yazılıdır.
 
+## 1.11.3 — 2026-10-15
+
+### Mailde saat ikiye bölünüyordu; Drive saatleri 3 saat geri görünüyordu
+
+**1. Saat bölünmesi.** HTML mail, düz metin satırını ilk `:` işaretinden "etiket : değer"
+diye ayırıyordu. "VM/CT bazında son yedek" satırı (`lxc-100  2026-08-06 21:00 …`) etiket
+desenine uyduğu için `21` sol, `00 …` sağ sütuna düşüyordu. Artık ayraç yalnızca ardından
+boşluk ya da satır sonu gelen `:` — `Hedef : sametdrive:proxmox-yedek` hâlâ doğru ayrılır.
+
+**2. UTC saat.** "En yeni yedekler" listesi (mail ve arayüzdeki "Yedekler (Drive)" tablosu)
+rclone `ModTime`'ını keserek gösteriyordu; Drive UTC verdiği için saatler 3 saat geriydi
+(`pve-config-…-05_48_54` → `02:48:55`). Mailde `rclone_zaman_yerel` (Python 3.11'in
+okuyamadığı 9 haneli kesri de okur), arayüzde `yerelZaman` yerel saate çevirir.
+
+**Mock düzeltmesi.** Sahte rclone, dosya adındaki yerel saate `Z` ekleyip UTC diye
+sunuyordu; bu yüzden kayma testte hiç görünmüyordu. Artık gerçek Drive gibi UTC döner.
+Mevcut mail testi de rakamla başlayan bir satır kullandığı için bölünmeyi yakalayamıyordu.
+
+**Doğrulandı.** Sınıf testi çalışma mailinin, İngilizce çevirisinin ve haftalık raporun
+her satırında her `HH:MM`'in tek hücrede kaldığını denetler; eski kodla düştü
+(`'qemu-122 2026-10-14 05' | '32 1 set…'` — mailde görülen belirtinin aynısı). Uçtan uca
+test: `TZ=Europe/Istanbul` altında mailde görünen saat dosya adındaki saatle aynı.
+Derlenmiş `yerelZaman` Node ile İstanbul saatinde denendi. 160 geçti, 0 kaldı.
+
 ## 1.11.2 — 2026-10-15
 
 ### Güvenlik incelemesi: hesap adı rclone'a bayrak olarak gidebiliyordu

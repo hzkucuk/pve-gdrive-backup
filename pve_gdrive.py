@@ -26,12 +26,12 @@ import os, sys, json, time, base64, subprocess, smtplib, re, fcntl, hmac, thread
 import hashlib, secrets, random, ssl, ipaddress, shutil, tempfile, io, math
 import urllib.request, urllib.parse, html as _html
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-SURUM = "1.11.2"
+SURUM = "1.11.3"
 CONFIG_PATH = os.environ.get("PVE_GDRIVE_CONF", "/etc/pve-gdrive.conf")
 LOCK_DIR    = "/tmp"
 
@@ -2345,6 +2345,27 @@ def dt_epoch(s):
         yut("dt_epoch", e)
         return 0
 
+RE_RCLONE_ZAMAN = re.compile(r"^(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$")
+
+def rclone_zaman_yerel(s):
+    """rclone lsjson ModTime'ini ('2026-10-14T18:53:49.123456789Z') host'un yerel
+    saatine cevirir: '2026-10-14 21:53:49'. Drive UTC verir; kesmek 3 saat kaydirir.
+    fromisoformat kullanilmaz: 3.11 nanosaniyeyi (9 hane) okuyamaz."""
+    m = RE_RCLONE_ZAMAN.match(str(s or "").strip())
+    if not m: return str(s or "")[:19].replace("T", " ")
+    yerel = f"{m.group(1)} {m.group(2)}"
+    if not m.group(3): return yerel                      # bolge yok: oldugu gibi
+    try:
+        bolge = m.group(3)
+        fark = timedelta(0) if bolge == "Z" else (
+            (1 if bolge[0] == "+" else -1)
+            * timedelta(hours=int(bolge[1:3]), minutes=int(bolge[-2:])))
+        an = datetime.strptime(yerel, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(fark))
+        return an.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        yut("rclone_zaman_yerel", e)
+        return yerel
+
 def collect_sets(files):
     """Ayni vzdump setine ait dosyalari (log, notes, .vma.zst) tek kayitta toplar."""
     sets = {}
@@ -2520,6 +2541,7 @@ MAIL_YAZI = ("-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif")
 MAIL_MONO = ("'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace")
 RE_MAIL_ETIKET = re.compile(r"^[A-Za-z\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc]"
                             r"[A-Za-z\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc0-9 ./_()%-]*$")
+RE_MAIL_AYRAC = re.compile(r":(?=\s|$)")
 
 def _mail_coz(satir):
     """Bir metin satirini (tip, sol, sag) olarak siniflar. HTML uretimi buna gore dallanir."""
@@ -2527,8 +2549,11 @@ def _mail_coz(satir):
     govde = satir.lstrip(); girinti = len(satir) - len(govde); cikti = govde.rstrip()
     if len(set(cikti)) == 1 and cikti[0] in "=-_" and len(cikti) > 8: return ("cizgi", "", "")
     if cikti.startswith("! "): return ("uyari", cikti[2:], "")
-    if ":" in cikti:
-        anahtar, _, deger = cikti.partition(":")
+    # Ayrac yalnizca ardindan bosluk/satir sonu gelen ':'. Yoksa degerin icindeki
+    # saat ('21:00') ayrac sanilir ve satir iki sutuna bolunur.
+    ayrac = RE_MAIL_AYRAC.search(cikti)
+    if ayrac:
+        anahtar, deger = cikti[:ayrac.start()], cikti[ayrac.end():]
         if RE_MAIL_ETIKET.match(anahtar.strip()):
             return ("satir", anahtar.strip(), deger.strip())
     if girinti == 0 and cikti == cikti.upper() and len(cikti) > 2: return ("baslik", cikti, "")
@@ -2812,7 +2837,7 @@ def build_run_mail(p, status, summary, snap, detay):
     if bl:
         L.append("EN YENI YEDEKLER")
         for b in bl:
-            L.append(f"  {str(b.get('mod', ''))[:19].replace('T', ' ')}  {b['guest']:9}"
+            L.append(f"  {rclone_zaman_yerel(b.get('mod', ''))}  {b['guest']:9}"
                      f"  {human(b['size']):>9}  {b['name']}")
         L.append("")
     L += _bolum_cop(snap)
@@ -7576,6 +7601,16 @@ function hb(n) {
     }
     return v.toFixed(1) + " PB";
 }
+// rclone ModTime UTC gelir ('...Z'); kesip gostermek saati kaydirir.
+function yerelZaman(iso) {
+    const s = String(iso || "");
+    const d = new Date(s);
+    if (!s || isNaN(d.getTime()))
+        return s.slice(0, 19).replace("T", " ");
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " "
+        + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
 function fmtDur(sec) {
     const s = Math.max(0, Math.round(sec));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
@@ -8083,7 +8118,7 @@ function detail(p) {
         + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
         + (b.slice(0, 40).map((x) => {
             const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
-            return "<tr><td>" + esc((x.mod || "").slice(0, 19).replace("T", " ")) + '</td><td><span class="'
+            return "<tr><td>" + esc(yerelZaman(x.mod)) + '</td><td><span class="'
                 + cl + '">' + esc(x.guest) + '</span></td><td class="r">' + hb(x.size)
                 + '</td><td class="small">' + esc(x.name) + "</td></tr>";
         }).join("") || '<tr><td colspan=4 class="small">yedek yok</td></tr>')

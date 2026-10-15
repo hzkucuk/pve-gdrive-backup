@@ -9,7 +9,7 @@ Ortam degiskenleri:
 Desteklenen komutlar: copy, lsjson, deletefile, delete, about, cleanup, listremotes,
                       config create/delete, rc, version
 """
-import sys, json, os, time, re, fnmatch
+import sys, json, os, time, re, fnmatch, datetime
 
 DB = os.environ.get("MOCK_DB", "/tmp/mockdrive.json")
 
@@ -83,8 +83,10 @@ elif cmd == "copy":
             if not db["files"][key].get("trashed"): continue
             db["files"][key + "|cop" + str(len(db["files"]))] = db["files"].pop(key)
         m = re.search(r"(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})", fn)
-        mod = (f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:{m.group(5)}:{m.group(6)}Z"
-               if m else "2026-08-07T00:00:00Z")
+        # Gercek Drive gibi: dosya adindaki saat yereldir, ModTime UTC + kesir doner.
+        # Eskiden yerel saate 'Z' ekleniyordu; saat kaymasi testte hic gorunmuyordu.
+        mod = (datetime.datetime(*map(int, m.groups())).astimezone(datetime.timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%S.000000000Z") if m else "2026-08-07T00:00:00Z")
         db["files"][key] = {"remote": dst, "size": os.path.getsize(os.path.join(src, fn)),
                             "mod": mod, "trashed": False}
         n += 1

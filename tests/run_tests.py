@@ -2368,6 +2368,67 @@ def t_html_mail():
             dogru(renk in G.mail_html(govde, d, "k"), f"{d} rengi kullanilmali")
     finally: o.temizle()
 
+def _saat_bolunmez(G, govde, kaynak):
+    """Sinif denetimi: govdedeki her 'HH:MM' bir hucrede butun kalmali.
+    Eski ayrac ilk ':'yi aliyordu; '21:00' iki sutuna bolunuyordu."""
+    for satir in govde.split("\n"):
+        for saat in re.findall(r"\d\d:\d\d(?::\d\d)?", satir):
+            tip, sol, sag = G._mail_coz(satir)
+            dogru(saat in sol or saat in sag,
+                  f"{kaynak}: '{saat}' bolundu -> {tip} | {sol!r} | {sag!r}")
+
+@test("mail satirindaki saat ayrac sanilip bolunmez", "rapor")
+def t_mail_saat_bolunmez():
+    o = Ortam()
+    try:
+        o.vzdump_seti("lxc-100", 0); o.vzdump_seti("qemu-122", 1)
+        o.plan(); G = o.modul(); p = G.get_plan("p1")
+        G.do_copy(p)
+        snap = G.update_snapshot(p)
+        govde, _ = G.build_run_mail(p, "basarili", "ozet", snap,
+                                    {"trigger": "test", "dur": 5, "uploaded": 2})
+        dogru("VM/CT BAZINDA SON YEDEK" in govde, "misafir bolumu uretilmeli")
+        _saat_bolunmez(G, govde, "calisma maili")
+        _saat_bolunmez(G, G.metni_cevir(govde), "calisma maili (en)")
+        rapor, _ = G.build_report(p)
+        _saat_bolunmez(G, rapor, "haftalik rapor")
+        # bilinen etiket satirlari hala anahtar/deger olarak ayrilmali
+        esit(G._mail_coz("  Zaman        : 2026-10-15 05:49:46"),
+             ("satir", "Zaman", "2026-10-15 05:49:46"))
+        esit(G._mail_coz("  Hedef        : sametdrive:proxmox-yedek"),
+             ("satir", "Hedef", "sametdrive:proxmox-yedek"))
+        esit(G._mail_coz("Log: /var/log/pve-gdrive.log")[0], "satir")
+        esit(G._mail_coz("  lxc-100    2026-08-06 21:00   2 set")[0], "mono")
+    finally: o.temizle()
+
+@test("Drive zamani (UTC) yerel saate cevrilir", "rapor")
+def t_drive_zamani_yerel():
+    eski_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Istanbul"; time.tzset()
+    o = Ortam()
+    try:
+        G = o.modul()
+        esit(G.rclone_zaman_yerel("2026-10-14T18:53:49.123456789Z"), "2026-10-14 21:53:49")
+        esit(G.rclone_zaman_yerel("2026-10-14T18:53:49Z"), "2026-10-14 21:53:49")
+        esit(G.rclone_zaman_yerel("2026-10-14T21:53:49+03:00"), "2026-10-14 21:53:49")
+        esit(G.rclone_zaman_yerel("2026-10-14T21:53:49"), "2026-10-14 21:53:49")
+        esit(G.rclone_zaman_yerel(""), "")
+        esit(G.rclone_zaman_yerel(None), "")
+        # uctan uca: mailde gorunen saat dosya adindaki (yerel) saatle ayni olmali
+        o.vzdump_seti("qemu-122", 0)
+        o.plan(); p = G.get_plan("p1")
+        G.do_copy(p); snap = G.update_snapshot(p)
+        govde, _ = G.build_run_mail(p, "basarili", "ozet", snap, {"trigger": "test", "dur": 1})
+        satir = next(l for l in govde.split("\n") if ".vma.zst" in l and "vzdump-" in l)
+        m = re.search(r"(\d{4})_(\d\d)_(\d\d)-(\d\d)_(\d\d)_(\d\d)", satir)
+        beklenen = "{}-{}-{} {}:{}:{}".format(*m.groups())
+        dogru(beklenen in satir, f"mail saati dosya adiyla ayni olmali: {satir}")
+    finally:
+        o.temizle()
+        if eski_tz is None: os.environ.pop("TZ", None)
+        else: os.environ["TZ"] = eski_tz
+        time.tzset()
+
 @test("html mail duz metin alternatifi ile birlikte gider", "rapor")
 def t_mail_multipart():
     o = Ortam()

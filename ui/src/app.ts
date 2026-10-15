@@ -41,6 +41,15 @@ function hb(n: unknown): string {
   for (let i = 0; i < u.length; i++) { if (v < 1024) return v.toFixed(1) + " " + u[i]; v /= 1024; }
   return v.toFixed(1) + " PB";
 }
+// rclone ModTime UTC gelir ('...Z'); kesip gostermek saati kaydirir.
+function yerelZaman(iso: unknown): string {
+  const s = String(iso || "");
+  const d = new Date(s);
+  if (!s || isNaN(d.getTime())) return s.slice(0, 19).replace("T", " ");
+  const p = (n: number) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " "
+    + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
 function fmtDur(sec: number): string {
   const s = Math.max(0, Math.round(sec));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
@@ -482,7 +491,7 @@ function detail(p: Plan | undefined): string {
     + '<th>VM/CT</th><th class="r">Boyut</th><th>Dosya</th></tr></thead><tbody>'
     + (b.slice(0, 40).map((x) => {
         const cl = String(x.guest).indexOf("lxc") === 0 ? "tag lxc" : "tag";
-        return "<tr><td>" + esc((x.mod || "").slice(0, 19).replace("T", " ")) + '</td><td><span class="'
+        return "<tr><td>" + esc(yerelZaman(x.mod)) + '</td><td><span class="'
           + cl + '">' + esc(x.guest) + '</span></td><td class="r">' + hb(x.size)
           + '</td><td class="small">' + esc(x.name) + "</td></tr>";
       }).join("") || '<tr><td colspan=4 class="small">yedek yok</td></tr>')
